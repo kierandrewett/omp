@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# Build the patched Linux x64 binary from the pinned upstream commit plus the patch series.
-# Output: dist/omp-linux-x64 and dist/SHA256SUMS.txt. Does not touch work/src.
+# Build the patched Linux binary from the pinned upstream commit plus the patch series.
+# Output: dist/omp-linux-<arch> and dist/SHA256SUMS.txt. Does not touch work/src.
+# The architecture is this machine's (x64 or arm64). TARGET_ARCH overrides it.
 # NATIVES picks how the Rust addon is made:
 #   host      (default) Cargo build for this machine, no Bazel
-#   bazel     both Linux x64 addons through Bazel, as release CI does
-#   prebuilt  copy pi_natives.*.node from NATIVES_DIR; only for the same upstream version
+#   bazel     Bazel, as release CI does: both addons for x64, one for arm64. NATIVES_TARGETS overrides the list
+#   prebuilt  copy this arch's pi_natives.linux-*.node from NATIVES_DIR; only for the same upstream version
+# NATIVES_ONLY=DIR stops after the addons, copies every addon of this run to DIR, and builds no binary. CI uses it
+# to cross-build the arm64 addon on an x64 runner, where Bazel is known to work.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 pinned="$(pinned_commit)"
 eval "$("$root/scripts/release-info.sh")"
 tag="$upstream_tag"
+
+case "${TARGET_ARCH:-$(uname -m)}" in
+    x86_64 | amd64 | x64) arch=x64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) die "unsupported architecture '${TARGET_ARCH:-$(uname -m)}'; use x64 or arm64" ;;
+esac
+binary_name="omp-linux-$arch"
 
 if [ -e "$build_tree" ]; then
     git -C "$upstream" worktree remove --force "$build_tree"
@@ -48,7 +58,7 @@ env -u CI bun run --cwd packages/collab-web gen:export-viewer
 natives_mode="${NATIVES:-host}"
 natives_sources="$(git ls-files --stage -- crates packages/natives Cargo.toml Cargo.lock | sha256sum | cut -c1-16)"
 natives_toolchain="$({ rustc --version --verbose 2>/dev/null || true; } | sha256sum | cut -c1-8)"
-natives_key="$root/build/natives-cache/${pinned:0:10}-$natives_mode-$natives_sources-$natives_toolchain"
+natives_key="$root/build/natives-cache/${pinned:0:10}-$arch-$natives_mode-$natives_sources-$natives_toolchain"
 if [ "$natives_mode" != prebuilt ] && compgen -G "$natives_key/pi_natives.*.node" >/dev/null; then
     log "using cached natives from $natives_key"
     cp "$natives_key"/pi_natives.*.node packages/natives/native/
@@ -60,20 +70,29 @@ else
             bun scripts/bazel-natives.ts host
             ;;
         bazel)
-            # Same as release CI: both Linux x64 addons through Bazel.
+            # Same as release CI. x64 has a modern and a baseline addon, so the binary runs on any x64 CPU.
             command -v bazel >/dev/null || {
                 log "installing Bazelisk"
                 npm install --prefix "$root/build/bazelisk" @bazel/bazelisk >/dev/null
                 export PATH="$root/build/bazelisk/node_modules/.bin:$PATH"
             }
             log "building natives with Bazel"
-            bun scripts/bazel-natives.ts linux-x64-baseline
-            bun scripts/bazel-natives.ts linux-x64-modern
+            if [ -n "${NATIVES_TARGETS:-}" ]; then
+                read -r -a natives_targets <<<"$NATIVES_TARGETS"
+            elif [ "$arch" = x64 ]; then
+                natives_targets=(linux-x64-baseline linux-x64-modern)
+            else
+                natives_targets=(linux-arm64)
+            fi
+            for target in "${natives_targets[@]}"; do
+                bun scripts/bazel-natives.ts "$target"
+            done
             ;;
         prebuilt)
             [ -n "${NATIVES_DIR:-}" ] || die "NATIVES=prebuilt needs NATIVES_DIR"
             log "using prebuilt natives from $NATIVES_DIR"
-            cp "$NATIVES_DIR"/pi_natives.*.node packages/natives/native/
+            compgen -G "$NATIVES_DIR/pi_natives.linux-$arch*.node" >/dev/null || die "no $arch addon in $NATIVES_DIR"
+            cp "$NATIVES_DIR"/pi_natives.linux-"$arch"*.node packages/natives/native/
             ;;
         *)
             die "NATIVES must be host, bazel or prebuilt"
@@ -85,12 +104,20 @@ else
     fi
 fi
 
-log "building binary"
-RELEASE_TARGETS=linux-x64 bun run ci:release:build-binaries
+if [ -n "${NATIVES_ONLY:-}" ]; then
+    mkdir -p "$NATIVES_ONLY"
+    cp packages/natives/native/pi_natives.*.node "$NATIVES_ONLY/"
+    log "addons for $arch copied to $NATIVES_ONLY"
+    ls -l "$NATIVES_ONLY" >&2
+    exit 0
+fi
 
-bin="packages/coding-agent/binaries/omp-linux-x64"
+log "building binary"
+RELEASE_TARGETS="linux-$arch" bun run ci:release:build-binaries
+
+bin="packages/coding-agent/binaries/$binary_name"
 [ -s "$bin" ] || die "build produced no binary"
 [ "$("./$bin" --version)" = "omp/${fork_tag#v}" ] || die "binary version is '$("./$bin" --version)', expected omp/${fork_tag#v}"
-install -m 755 "$bin" "$dist/omp-linux-x64"
-(cd "$dist" && sha256sum omp-linux-x64 > SHA256SUMS.txt)
-log "built $dist/omp-linux-x64 ($fork_tag)"
+install -m 755 "$bin" "$dist/$binary_name"
+(cd "$dist" && sha256sum "$binary_name" > SHA256SUMS.txt)
+log "built $dist/$binary_name ($fork_tag)"
