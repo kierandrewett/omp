@@ -1,0 +1,1075 @@
+diff --git a/docs/mcp-runtime-lifecycle.md b/docs/mcp-runtime-lifecycle.md
+index 0fea07026a..fea2defe3a 100644
+--- a/docs/mcp-runtime-lifecycle.md
++++ b/docs/mcp-runtime-lifecycle.md
+@@ -100,6 +100,7 @@ For each discovered server in `connectServers()`:
+ - creates stdio or HTTP/SSE transport,
+ - performs MCP `initialize` using protocol version `2025-11-25` and advertises the `roots` capability,
+ - answers server-to-client `ping` and `roots/list` requests; unsupported request methods return JSON-RPC `-32601`,
++- for sessions with a screen, also advertises form `elicitation` and answers `elicitation/create` through `ElicitationBroker` (`src/mcp/elicitation.ts`) one question at a time, using the session's `askDialog` (the dialog the `ask` tool uses, no timeout). A request with no fields (an approval such as "may I run this action?") is one `Accept`/`Decline` question: Accept answers `accept`, Decline answers `decline`. A request with fields is one question per field (boolean → Yes/No, enum → its choices, multi-select array → a multi-choice question, string/number → the dialog's free-text row) plus a final `Submit this form?` Accept/Decline question; invalid answers are asked again for those fields only, up to five dialogs. Everything else, including a dismissed dialog, "chat about this", a timed-out item, mismatched results, an `askDialog`-less host or a thrown error, answers `cancel`; it is never read as acceptance. URL mode returns `-32602`,
+ - sends `notifications/initialized` before any further session traffic,
+ - for Streamable HTTP, starts the background SSE listener only after `notifications/initialized`,
+ - uses timeout precedence `OMP_MCP_TIMEOUT_MS`, then `config.timeout`, then 30s; `0` disables the client-side timeout,
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 1934a6ab60..50b7422425 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -10,7 +10,7 @@
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
+-- Answer MCP form elicitation requests (`elicitation/create`) with a dialog. Dismissing the dialog, or having no screen, cancels the request and never accepts it. URL mode is refused.
++- Answer MCP form elicitation requests (`elicitation/create`) with the same dialog the `ask` tool uses. An approval with no fields, such as Executor's "may I run this action?", is one Accept/Decline question; a form is one question per field plus a final `Submit this form?`. Dismissing the dialog, choosing to chat instead, a timed-out answer, an unsupported host (no ask dialog) or any error cancels the request and never accepts it. URL mode is refused.
+ - The task tool description now lists your model roles as `@role` and tells agents to pass the role when you name a model or tier such as "haiku", instead of guessing a model version. When the agent cannot tell which model you mean, it asks with the `ask` tool.
+ - A task item's `model` can be a price tier, `$` to `$$$$`, instead of a role. Tiers are quarters of the price across all loaded chat models. A tier picks the configured role in that tier, or the nearest one, and the role you use most wins a tie. The usage weighting reads `stats.db` and counts the exact model most, then its family, then its provider. The task description shows each role's tier, and the judge that routes calls without `model` weighs price and usage too. `$$$$` is treated as very rare.
+ - Each row in the pinned subagent shelf now ends with that subagent's counter: elapsed time, total tokens (cache reads included) and API cost, for example `2m5s · 1.4M tok · $0.42`, each figure in its own theme colour (time and cost run hotter as they grow) with muted dots between them. The elapsed time shows from the first second and keeps counting while the subagent makes no progress, such as during a long rate-limit wait. Cost is left out while it is zero, and a row too narrow for the whole counter shortens the description first instead of dropping the counter. Subagent progress now reports `cacheReadTokens`.
+diff --git a/packages/coding-agent/src/mcp/elicitation.ts b/packages/coding-agent/src/mcp/elicitation.ts
+index d9e9e31dde..4ddd746832 100644
+--- a/packages/coding-agent/src/mcp/elicitation.ts
++++ b/packages/coding-agent/src/mcp/elicitation.ts
+@@ -5,12 +5,21 @@
+  * how a gateway such as Executor asks "may I run this action?". The answer must come from a person,
+  * so anything that is not an explicit answer is a `cancel`: no UI, a dismissed dialog, a bad schema
+  * or a failure never becomes an `accept`. Dialogs carry no timeout for the same reason.
++ *
++ * Questions are shown with the same dialog the `ask` tool uses (`ExtensionUIContext.askDialog`): an
++ * approval (no fields) is one Accept/Decline question; a form is one question per field plus a final
++ * `Submit this form?` Accept/Decline question.
+  */
+-import type { ExtensionUIContext } from "../extensibility/extensions/types";
++import type {
++	ExtensionAskDialogOption,
++	ExtensionAskDialogQuestion,
++	ExtensionAskDialogResultItem,
++	ExtensionUIContext,
++} from "../extensibility/extensions/types";
+ import type { MCPElicitationParams, MCPElicitationProperty, MCPElicitationResult, MCPElicitationValue } from "./types";
+ 
+-/** The dialogs a question needs. Narrower than the whole UI context so tests can script them. */
+-export type ElicitationDialogs = Pick<ExtensionUIContext, "select" | "input" | "notify">;
++/** The dialog a question needs. Narrower than the whole UI context so tests can script it. */
++export type ElicitationDialogs = Pick<ExtensionUIContext, "askDialog">;
+ 
+ const MAX_MESSAGE_CHARS = 2000;
+ const MAX_TITLE_CHARS = 200;
+@@ -20,12 +29,9 @@ const JSON_RPC_INVALID_PARAMS = -32602;
+ 
+ const ACCEPT = "Accept";
+ const DECLINE = "Decline";
+-const ANSWER = "Answer the questions";
+-const SUBMIT = "Submit";
+-const DONE = "Done";
+-const SKIP = "(skip)";
+ const YES = "Yes";
+ const NO = "No";
++const SERVER_DEFAULT = "Server default";
+ 
+ /**
+  * Text from a server is shown in a terminal. Strip control characters, including the escape that
+@@ -188,10 +194,11 @@ function numberProblem(field: Extract<Field, { kind: "number" }>, text: string):
+ 	return value;
+ }
+ 
+-/** What a question returned: an answer, "no answer, leave it out", or the person backed out. */
+-type Asked = { kind: "value"; value: MCPElicitationValue } | { kind: "skip" } | { kind: "cancel" };
+-
+-const CANCEL: Asked = { kind: "cancel" };
++/**
++ * What a field's answer came to: a value, "no answer, leave it out", or a reason it cannot be used,
++ * in which case only that field is asked again.
++ */
++type Parsed = { kind: "value"; value: MCPElicitationValue } | { kind: "skip" } | { kind: "problem"; message: string };
+ 
+ function heading(field: Field): string {
+ 	return field.description
+@@ -199,119 +206,126 @@ function heading(field: Field): string {
+ 		: `${field.title}${field.required ? "" : " (optional)"}`;
+ }
+ 
++/** Option labels key the answers, so two choices that share a title get their value added to tell them apart. */
+ function labels(choices: Choice[]): string[] {
+ 	const seen = new Set<string>();
+ 	return choices.map(choice => {
+-		// Two options can share a title. Add the value so the person can tell them apart.
+ 		const label = seen.has(choice.label) ? `${choice.label} (${choice.value})` : choice.label;
+ 		seen.add(choice.label);
+ 		return label;
+ 	});
+ }
+ 
+-async function askChoice(ui: ElicitationDialogs, field: Extract<Field, { kind: "choice" }>): Promise<Asked> {
+-	const shown = labels(field.choices);
+-	const options = field.required ? shown : [...shown, SKIP];
+-	const initial = field.default === undefined ? undefined : field.choices.findIndex(c => c.value === field.default);
+-	const picked = await ui.select(
+-		heading(field),
+-		options,
+-		initial !== undefined && initial >= 0 ? { initialIndex: initial } : undefined,
+-	);
+-	if (picked === undefined) return CANCEL;
+-	if (picked === SKIP) return { kind: "skip" };
+-	const index = shown.indexOf(picked);
+-	const choice = field.choices[index];
+-	return choice ? { kind: "value", value: choice.value } : CANCEL;
++/** Mark the option a server named as its default. The dialog preselects nothing: a default is not a recommendation. */
++function choiceOption(label: string, isDefault: boolean): ExtensionAskDialogOption {
++	return isDefault ? { label, description: SERVER_DEFAULT } : { label };
+ }
+ 
+-async function askMulti(ui: ElicitationDialogs, field: Extract<Field, { kind: "multi" }>): Promise<Asked> {
+-	const shown = labels(field.choices);
+-	const chosen = new Set<number>(
+-		(field.default ?? []).map(value => field.choices.findIndex(c => c.value === value)).filter(i => i >= 0),
+-	);
+-	for (let attempt = 0; attempt < 100; attempt += 1) {
+-		const options = [...shown.map((label, i) => `${chosen.has(i) ? "[x]" : "[ ]"} ${label}`), DONE];
+-		const picked = await ui.select(`${heading(field)}\nSelect each one you want, then choose ${DONE}.`, options);
+-		if (picked === undefined) return CANCEL;
+-		if (picked === DONE) {
+-			const count = chosen.size;
+-			if (field.minItems !== undefined && count < field.minItems) {
+-				ui.notify(`Choose at least ${field.minItems}.`, "warning");
+-				continue;
+-			}
+-			if (field.maxItems !== undefined && count > field.maxItems) {
+-				ui.notify(`Choose at most ${field.maxItems}.`, "warning");
+-				continue;
+-			}
+-			if (count === 0 && !field.required) return { kind: "skip" };
+-			const value = [...chosen]
+-				.sort((a, b) => a - b)
+-				.flatMap(i => (field.choices[i] ? [field.choices[i].value] : []));
+-			return { kind: "value", value };
+-		}
+-		const index = options.indexOf(picked);
+-		if (index < 0 || index >= shown.length) return CANCEL;
+-		if (chosen.has(index)) chosen.delete(index);
+-		else chosen.add(index);
+-	}
+-	return CANCEL;
++/** The label of a free-text field's default, shown as the one ready-made answer. */
++function defaultLabel(field: Extract<Field, { kind: "string" | "number" }>): string | undefined {
++	if (field.default === undefined) return undefined;
++	return clean(String(field.default), MAX_TITLE_CHARS) || undefined;
+ }
+ 
+-async function askText(ui: ElicitationDialogs, field: Extract<Field, { kind: "string" | "number" }>): Promise<Asked> {
+-	const hint = field.default === undefined ? "" : ` Press Enter for ${String(field.default)}.`;
+-	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+-		const text = await ui.input(heading(field), hint.trim() || undefined);
+-		if (text === undefined) return CANCEL;
+-		let value: string | number;
+-		if (text === "") {
+-			if (field.default !== undefined) return { kind: "value", value: field.default };
+-			if (!field.required) return { kind: "skip" };
+-			ui.notify(`${field.title} is required.`, "warning");
+-			continue;
+-		}
+-		let problem: string | undefined;
+-		if (field.kind === "number") {
+-			const parsed = numberProblem(field, text);
+-			if (typeof parsed === "string") problem = parsed;
+-			value = typeof parsed === "number" ? parsed : 0;
+-			if (!problem) return { kind: "value", value };
+-		} else {
+-			problem = stringProblem(field, text);
+-			if (!problem) return { kind: "value", value: text };
++/**
++ * The options of a field's question. The dialog always adds a free-text row, so a string or number
++ * field has no options of its own (only its default, when it has one) and is answered by typing.
++ */
++function fieldOptions(field: Field): ExtensionAskDialogOption[] {
++	switch (field.kind) {
++		case "boolean":
++			return [choiceOption(YES, field.default === true), choiceOption(NO, field.default === false)];
++		case "choice":
++			return labels(field.choices).map((label, index) =>
++				choiceOption(label, field.default !== undefined && field.choices[index]?.value === field.default),
++			);
++		case "multi":
++			return labels(field.choices).map((label, index) =>
++				choiceOption(
++					label,
++					field.choices[index] !== undefined && field.default?.includes(field.choices[index].value) === true,
++				),
++			);
++		default: {
++			const label = defaultLabel(field);
++			return label === undefined ? [] : [choiceOption(label, true)];
+ 		}
+-		ui.notify(problem ?? "Not valid.", "warning");
+ 	}
+-	return CANCEL;
+ }
+ 
+-async function askField(ui: ElicitationDialogs, field: Field): Promise<Asked> {
++function fieldQuestion(field: Field, context: string, problem: string | undefined): ExtensionAskDialogQuestion {
++	const lead = problem ? `${problem}\n\n` : "";
++	return {
++		id: field.key,
++		header: field.title,
++		question: `${lead}${heading(field)}\n\n${context}`,
++		options: fieldOptions(field),
++		...(field.kind === "multi" ? { multi: true } : {}),
++	};
++}
++
++/** The answer to a field that was left alone. A default fills it, an optional field is left out, a required one is asked again. */
++function unanswered(field: Field): Parsed {
++	if (field.default !== undefined) return { kind: "value", value: field.default };
++	if (!field.required) return { kind: "skip" };
++	return { kind: "problem", message: `${field.title} is required.` };
++}
++
++function readAnswer(field: Field, item: ExtensionAskDialogResultItem): Parsed {
++	const { selectedOptions: selected, customInput: typed } = item;
++	const freeText = field.kind === "string" || field.kind === "number";
++	// The dialog offers a free-text row on every question. Only a string or number can use what was typed.
++	if (typed !== undefined && !freeText) return { kind: "problem", message: "Pick one of the listed options." };
+ 	switch (field.kind) {
+ 		case "boolean": {
+-			const options = field.default === false ? [NO, YES] : [YES, NO];
+-			const picked = await ui.select(heading(field), options);
+-			if (picked === undefined) return CANCEL;
+-			return { kind: "value", value: picked === YES };
++			if (selected.length === 0) return unanswered(field);
++			if (selected.length === 1 && selected[0] === YES) return { kind: "value", value: true };
++			if (selected.length === 1 && selected[0] === NO) return { kind: "value", value: false };
++			return { kind: "problem", message: "Pick Yes or No." };
++		}
++		case "choice": {
++			if (selected.length === 0) return unanswered(field);
++			const choice =
++				selected.length === 1 ? field.choices[labels(field.choices).indexOf(selected[0] ?? "")] : undefined;
++			return choice
++				? { kind: "value", value: choice.value }
++				: { kind: "problem", message: "Pick one of the listed options." };
++		}
++		case "multi": {
++			const shown = labels(field.choices);
++			const values: string[] = [];
++			for (const label of selected) {
++				const choice = field.choices[shown.indexOf(label)];
++				if (!choice) return { kind: "problem", message: "Pick from the listed options." };
++				values.push(choice.value);
++			}
++			if (values.length === 0 && field.default !== undefined) return { kind: "value", value: field.default };
++			if (values.length === 0 && !field.required) return { kind: "skip" };
++			if (field.minItems !== undefined && values.length < field.minItems) {
++				return { kind: "problem", message: `Choose at least ${field.minItems}.` };
++			}
++			if (field.maxItems !== undefined && values.length > field.maxItems) {
++				return { kind: "problem", message: `Choose at most ${field.maxItems}.` };
++			}
++			return { kind: "value", value: values };
++		}
++		default: {
++			if (typed === undefined) {
++				if (selected.length === 0) return unanswered(field);
++				// The only option a text field offers is its default.
++				if (selected.length === 1 && field.default !== undefined && selected[0] === defaultLabel(field)) {
++					return { kind: "value", value: field.default };
++				}
++				return { kind: "problem", message: "Type a value." };
++			}
++			if (field.kind === "number") {
++				const parsed = numberProblem(field, typed);
++				return typeof parsed === "number" ? { kind: "value", value: parsed } : { kind: "problem", message: parsed };
++			}
++			const problem = stringProblem(field, typed);
++			return problem ? { kind: "problem", message: problem } : { kind: "value", value: typed };
+ 		}
+-		case "choice":
+-			return askChoice(ui, field);
+-		case "multi":
+-			return askMulti(ui, field);
+-		default:
+-			return askText(ui, field);
+-	}
+-}
+-
+-function show(value: MCPElicitationValue, field: Field): string {
+-	if (Array.isArray(value)) {
+-		const names = value.map(v => {
+-			const choice = field.kind === "multi" ? field.choices.find(c => c.value === v) : undefined;
+-			return choice?.label ?? v;
+-		});
+-		return names.join(", ") || "(none)";
+ 	}
+-	if (field.kind === "choice") return field.choices.find(c => c.value === value)?.label ?? String(value);
+-	return String(value);
+ }
+ 
+ /**
+@@ -330,7 +344,39 @@ function describeMeta(meta: unknown): string {
+ 	return `\n\nThe server attached these terms (OMP applies none of them beyond this one answer):\n${clean(text, MAX_META_CHARS)}`;
+ }
+ 
+-/** Run one form: ask, review, answer. Never returns `accept` without an explicit yes. */
++type Decision = "accept" | "decline" | "cancel";
++
++/** Accept and Decline are the only answers. Typed text, no pick, or both is not a yes. */
++function readDecision(item: ExtensionAskDialogResultItem): Decision {
++	if (item.customInput !== undefined || item.selectedOptions.length !== 1) return "cancel";
++	if (item.selectedOptions[0] === ACCEPT) return "accept";
++	if (item.selectedOptions[0] === DECLINE) return "decline";
++	return "cancel";
++}
++
++function decisionQuestion(id: string, header: string, question: string): ExtensionAskDialogQuestion {
++	return { id, header, question, options: [{ label: ACCEPT }, { label: DECLINE }] };
++}
++
++/**
++ * Show the questions in one dialog. Returns one result per question, in order, or undefined when
++ * nobody answered: no dialog, a dismissed dialog, "chat about this", a timed-out item or results that
++ * do not match the questions. The caller turns undefined into `cancel`.
++ */
++async function showQuestions(
++	ui: ElicitationDialogs,
++	questions: ExtensionAskDialogQuestion[],
++): Promise<ExtensionAskDialogResultItem[] | undefined> {
++	// No timeout option: a question nobody answered must never fall back to an answer.
++	const result = await ui.askDialog?.(questions);
++	if (result?.kind !== "submit" || result.results.length !== questions.length) return undefined;
++	for (const [index, item] of result.results.entries()) {
++		if (item.id !== questions[index]?.id || item.timedOut) return undefined;
++	}
++	return result.results;
++}
++
++/** Run one form: ask, validate, answer. Never returns `accept` without an explicit Accept. */
+ export async function runElicitationForm(
+ 	ui: ElicitationDialogs,
+ 	serverName: string,
+@@ -338,35 +384,57 @@ export async function runElicitationForm(
+ ): Promise<MCPElicitationResult> {
+ 	const fields = readFields(params);
+ 	const message = clean(params.message, MAX_MESSAGE_CHARS);
+-	const title = `MCP server "${clean(serverName, MAX_TITLE_CHARS)}" asks:\n${message}${describeMeta(params._meta)}`;
++	const context = `MCP server "${clean(serverName, MAX_TITLE_CHARS)}" asks:\n${message}${describeMeta(params._meta)}`;
+ 
+ 	if (fields.length === 0) {
+-		const picked = await ui.select(title, [ACCEPT, DECLINE]);
+-		if (picked === ACCEPT) return { action: "accept", content: {} };
+-		return { action: picked === DECLINE ? "decline" : "cancel" };
++		const items = await showQuestions(ui, [decisionQuestion("approval", "Approval", context)]);
++		const decision = items?.[0] ? readDecision(items[0]) : "cancel";
++		return decision === "accept" ? { action: "accept", content: {} } : { action: decision };
+ 	}
+ 
+-	const outline = fields.map(field => `- ${field.title}${field.required ? "" : " (optional)"}`).join("\n");
+-	const gate = await ui.select(`${title}\n\nIt wants to know:\n${outline}`, [ANSWER, DECLINE]);
+-	if (gate !== ANSWER) return { action: gate === DECLINE ? "decline" : "cancel" };
++	// The submit question's id must not collide with a field key: results are matched by id.
++	const keys = new Set(fields.map(field => field.key));
++	let submitId = "submit";
++	while (keys.has(submitId)) submitId += "_";
++	const submit = decisionQuestion(
++		submitId,
++		"Submit",
++		`Submit this form?\n\nMCP server "${clean(serverName, MAX_TITLE_CHARS)}"`,
++	);
+ 
+-	const content: Record<string, MCPElicitationValue> = {};
+-	for (const field of fields) {
+-		const asked = await askField(ui, field);
+-		if (asked.kind === "cancel") return { action: "cancel" };
+-		if (asked.kind === "value") content[field.key] = asked.value;
+-	}
++	const answers = new Map<string, MCPElicitationValue>();
++	let pending: Array<{ field: Field; problem?: string }> = fields.map(field => ({ field }));
++	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
++		const first = attempt === 0;
++		const questions = pending.map(entry => fieldQuestion(entry.field, context, entry.problem));
++		if (first) questions.push(submit);
++		const items = await showQuestions(ui, questions);
++		if (!items) return { action: "cancel" };
++
++		if (first) {
++			// Decided before the fields are checked: a person who declines owes the server no valid answers.
++			const decision = readDecision(items[items.length - 1] as ExtensionAskDialogResultItem);
++			if (decision !== "accept") return { action: decision };
++		}
+ 
+-	const review = fields
+-		.filter(field => content[field.key] !== undefined)
+-		.map(field => `- ${field.title}: ${show(content[field.key] as MCPElicitationValue, field)}`)
+-		.join("\n");
+-	const final = await ui.select(
+-		`Send these answers to "${clean(serverName, MAX_TITLE_CHARS)}"?\n${review || "(no answers)"}`,
+-		[SUBMIT, DECLINE],
+-	);
+-	if (final === SUBMIT) return { action: "accept", content };
+-	return { action: final === DECLINE ? "decline" : "cancel" };
++		const failed: Array<{ field: Field; problem: string }> = [];
++		for (const [index, entry] of pending.entries()) {
++			const parsed = readAnswer(entry.field, items[index] as ExtensionAskDialogResultItem);
++			if (parsed.kind === "value") answers.set(entry.field.key, parsed.value);
++			else if (parsed.kind === "skip") answers.delete(entry.field.key);
++			else failed.push({ field: entry.field, problem: parsed.message });
++		}
++		if (failed.length === 0) {
++			const content: Record<string, MCPElicitationValue> = {};
++			for (const field of fields) {
++				const value = answers.get(field.key);
++				if (value !== undefined) content[field.key] = value;
++			}
++			return { action: "accept", content };
++		}
++		pending = failed;
++	}
++	return { action: "cancel" };
+ }
+ 
+ /**
+diff --git a/packages/coding-agent/src/mcp/manager.ts b/packages/coding-agent/src/mcp/manager.ts
+index 77ec6353ba..5045d4fa09 100644
+--- a/packages/coding-agent/src/mcp/manager.ts
++++ b/packages/coding-agent/src/mcp/manager.ts
+@@ -611,7 +611,7 @@ export class MCPManager {
+ 	}
+ 
+ 	/**
+-	 * Dialogs for answering elicitation. Without them, every question is cancelled, never accepted.
++	 * The UI whose `askDialog` answers elicitation. Without one, every question is cancelled, never accepted.
+ 	 * Pass undefined when the screen goes away.
+ 	 */
+ 	setElicitationUI(ui: ElicitationDialogs | undefined): void {
+diff --git a/packages/coding-agent/test/mcp-elicitation.test.ts b/packages/coding-agent/test/mcp-elicitation.test.ts
+index 1b2b88f07f..ec052ebea4 100644
+--- a/packages/coding-agent/test/mcp-elicitation.test.ts
++++ b/packages/coding-agent/test/mcp-elicitation.test.ts
+@@ -1,5 +1,11 @@
+ import { afterEach, describe, expect, it } from "bun:test";
+ import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
++import type {
++	ExtensionAskDialogQuestion,
++	ExtensionAskDialogResult,
++	ExtensionAskDialogResultItem,
++	ExtensionUIDialogOptions,
++} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+ import { ElicitationBroker, type ElicitationDialogs } from "@oh-my-pi/pi-coding-agent/mcp/elicitation";
+ import type { MCPElicitationResult } from "@oh-my-pi/pi-coding-agent/mcp/types";
+ 
+@@ -87,26 +93,57 @@ function startServer(elicitation: Record<string, unknown>): TestServer {
+ 	};
+ }
+ 
+-/** Answers dialogs from a script. A `undefined` entry is a dismissed dialog (Escape). */
+-function scriptedDialogs(selects: Array<string | undefined>, inputs: Array<string | undefined> = []) {
+-	const shown: string[] = [];
+-	const notices: string[] = [];
++/** What a person did with one question: the options they picked, or the text they typed in the free-text row. */
++interface Answer {
++	pick?: string[];
++	text?: string;
++	timedOut?: boolean;
++}
++
++function resultItem(question: ExtensionAskDialogQuestion, answer: Answer = {}): ExtensionAskDialogResultItem {
++	return {
++		id: question.id,
++		question: question.question,
++		options: question.options.map(option => option.label),
++		multi: question.multi ?? false,
++		selectedOptions: answer.pick ?? [],
++		customInput: answer.text,
++		timedOut: answer.timedOut,
++	};
++}
++
++/** Submit the dialog with these answers by question id. A question with no entry stays unanswered. */
++function submit(
++	answers: Record<string, Answer>,
++): (questions: ExtensionAskDialogQuestion[]) => ExtensionAskDialogResult {
++	return questions => ({
++		kind: "submit",
++		results: questions.map(question => resultItem(question, answers[question.id])),
++	});
++}
++
++type Turn =
++	| ExtensionAskDialogResult
++	| undefined
++	| ((questions: ExtensionAskDialogQuestion[]) => ExtensionAskDialogResult | undefined);
++
++/** A scripted `askDialog`: each call takes the next turn. `undefined` is a dismissed dialog (Escape). */
++function scriptedDialog(...turns: Turn[]) {
++	const asked: ExtensionAskDialogQuestion[][] = [];
++	const options: Array<ExtensionUIDialogOptions | undefined> = [];
+ 	const dialogs: ElicitationDialogs = {
+-		select: async (title, options) => {
+-			shown.push(`${title}\n${options.map(o => (typeof o === "string" ? o : o.label)).join(" | ")}`);
+-			return selects.shift();
+-		},
+-		input: async title => {
+-			shown.push(title);
+-			return inputs.shift();
+-		},
+-		notify: message => {
+-			notices.push(message);
++		askDialog: async (questions, dialogOptions) => {
++			asked.push(questions);
++			options.push(dialogOptions);
++			const turn = turns.shift();
++			return typeof turn === "function" ? turn(questions) : turn;
+ 		},
+ 	};
+-	return { dialogs, shown, notices };
++	return { dialogs, asked, options };
+ }
+ 
++const APPROVAL = { type: "object", properties: {} };
++
+ async function askThroughServer(
+ 	elicitation: Record<string, unknown>,
+ 	broker: ElicitationBroker,
+@@ -134,6 +171,15 @@ async function askThroughServer(
+ 	}
+ }
+ 
++/** The reply the server got for an approval answered with this turn, over a real HTTP MCP server. */
++async function approve(turn: Turn, message = "Run it?"): Promise<Reply & MCPElicitationResult> {
++	const broker = new ElicitationBroker();
++	broker.setUI(scriptedDialog(turn).dialogs);
++	const { reply } = await askThroughServer({ message, requestedSchema: APPROVAL }, broker);
++	server?.stop(true);
++	return reply;
++}
++
+ describe("MCP form elicitation: capability", () => {
+ 	it("declares form elicitation only when asked to and a handler exists", async () => {
+ 		const on = startServer({ message: "x" });
+@@ -169,142 +215,94 @@ describe("MCP form elicitation: capability", () => {
+ 	});
+ });
+ 
+-describe("MCP form elicitation: a server asks, a person answers", () => {
+-	it("accepts an approval only when the person picks Accept", async () => {
++describe("MCP form elicitation: an approval, answered over HTTP", () => {
++	it("asks one Accept/Decline question with the server's message, no recommendation and no timeout", async () => {
+ 		const broker = new ElicitationBroker();
+-		const ui = scriptedDialogs(["Accept"]);
+-		broker.setUI(ui.dialogs);
++		const dialog = scriptedDialog(submit({ approval: { pick: ["Accept"] } }));
++		broker.setUI(dialog.dialogs);
+ 		const { reply } = await askThroughServer(
+-			{ message: "Send this email to Sam?", requestedSchema: { type: "object", properties: {} } },
++			{ message: "Send this email to Sam?", requestedSchema: APPROVAL },
+ 			broker,
+ 		);
+ 		expect(reply.result).toEqual({ action: "accept", content: {} });
+-		expect(ui.shown[0]).toContain('MCP server "elicit-test" asks:');
+-		expect(ui.shown[0]).toContain("Send this email to Sam?");
++		expect(dialog.asked).toHaveLength(1);
++		const [question] = dialog.asked[0] ?? [];
++		expect(dialog.asked[0]).toHaveLength(1);
++		expect(question?.options).toEqual([{ label: "Accept" }, { label: "Decline" }]);
++		expect(question?.recommended).toBeUndefined();
++		expect(question?.question).toContain('MCP server "elicit-test" asks:');
++		expect(question?.question).toContain("Send this email to Sam?");
++		// A timeout would let an unanswered dialog fall back to a default answer.
++		expect(dialog.options).toEqual([undefined]);
+ 	});
+ 
+ 	it("declines when the person picks Decline", async () => {
+-		const broker = new ElicitationBroker();
+-		broker.setUI(scriptedDialogs(["Decline"]).dialogs);
+-		const { reply } = await askThroughServer(
+-			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
+-			broker,
+-		);
+-		expect(reply.result).toEqual({ action: "decline" });
++		expect((await approve(submit({ approval: { pick: ["Decline"] } }))).result).toEqual({ action: "decline" });
+ 	});
+ 
+ 	it("cancels, never accepts, when the dialog is dismissed", async () => {
+-		const broker = new ElicitationBroker();
+-		broker.setUI(scriptedDialogs([undefined]).dialogs);
+-		const { reply } = await askThroughServer(
+-			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
+-			broker,
+-		);
+-		expect(reply.result).toEqual({ action: "cancel" });
++		expect((await approve(undefined)).result).toEqual({ action: "cancel" });
+ 	});
+ 
+-	it("cancels when there is no screen to ask on", async () => {
+-		const broker = new ElicitationBroker();
+-		const { reply } = await askThroughServer(
+-			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
+-			broker,
+-		);
++	it("cancels when the person chose to chat instead of answering", async () => {
++		expect((await approve({ kind: "chat" })).result).toEqual({ action: "cancel" });
++	});
++
++	it("cancels when the dialog reports a timed-out item, even one that carries Accept", async () => {
++		const reply = await approve(submit({ approval: { pick: ["Accept"], timedOut: true } }));
+ 		expect(reply.result).toEqual({ action: "cancel" });
+ 	});
+ 
+-	it("cancels when the dialog throws", async () => {
+-		const broker = new ElicitationBroker();
+-		broker.setUI({
+-			select: async () => {
+-				throw new Error("the screen went away");
+-			},
+-			input: async () => undefined,
+-			notify: () => {},
++	it("cancels when the results do not match the questions", async () => {
++		expect((await approve({ kind: "submit", results: [] })).result).toEqual({ action: "cancel" });
++		const wrongId = (questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogResult => ({
++			kind: "submit",
++			results: questions.map(question => ({ ...resultItem(question, { pick: ["Accept"] }), id: "other" })),
+ 		});
+-		const { reply } = await askThroughServer(
+-			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
+-			broker,
+-		);
+-		expect(reply.result).toEqual({ action: "cancel" });
++		expect((await approve(wrongId)).result).toEqual({ action: "cancel" });
++		const extra = (questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogResult => ({
++			kind: "submit",
++			results: [...questions, ...questions].map(question => resultItem(question, { pick: ["Accept"] })),
++		});
++		expect((await approve(extra)).result).toEqual({ action: "cancel" });
+ 	});
+ 
+-	it("collects typed answers, rejects bad ones, and asks again", async () => {
+-		const broker = new ElicitationBroker();
+-		const ui = scriptedDialogs(
+-			["Answer the questions", "Production", "Yes", "Submit"],
+-			["abc", "7.5", "7", "me@example.com"],
+-		);
+-		broker.setUI(ui.dialogs);
+-		const { reply } = await askThroughServer(
+-			{
+-				message: "Provision a database",
+-				requestedSchema: {
+-					type: "object",
+-					properties: {
+-						replicas: { type: "integer", title: "Replicas", minimum: 1, maximum: 9 },
+-						env: {
+-							type: "string",
+-							title: "Environment",
+-							oneOf: [
+-								{ const: "prod", title: "Production" },
+-								{ const: "dev", title: "Development" },
+-							],
+-						},
+-						backups: { type: "boolean", title: "Enable backups" },
+-						owner: { type: "string", title: "Owner email", format: "email" },
+-					},
+-					required: ["replicas", "env", "backups", "owner"],
+-				},
+-			},
+-			broker,
+-		);
+-		expect(reply.result).toEqual({
+-			action: "accept",
+-			content: { replicas: 7, env: "prod", backups: true, owner: "me@example.com" },
++	it("cancels when nothing is picked or the person types their own answer instead", async () => {
++		expect((await approve(submit({}))).result).toEqual({ action: "cancel" });
++		expect((await approve(submit({ approval: { text: "yes, go on" } }))).result).toEqual({ action: "cancel" });
++		expect((await approve(submit({ approval: { pick: ["Accept", "Decline"] } }))).result).toEqual({
++			action: "cancel",
+ 		});
+-		expect(ui.notices).toEqual(["Enter a number.", "Enter a whole number."]);
+-		// The person sees their answers before anything is sent.
+-		expect(ui.shown.at(-1)).toContain("- Replicas: 7");
+-		expect(ui.shown.at(-1)).toContain("- Environment: Production");
+ 	});
+ 
+-	it("cancels when the person backs out partway through", async () => {
++	it("cancels when the dialog throws", async () => {
+ 		const broker = new ElicitationBroker();
+-		broker.setUI(scriptedDialogs(["Answer the questions"], [undefined]).dialogs);
+-		const { reply } = await askThroughServer(
+-			{
+-				message: "Name it",
+-				requestedSchema: {
+-					type: "object",
+-					properties: { name: { type: "string", title: "Name" } },
+-					required: ["name"],
+-				},
++		broker.setUI({
++			askDialog: async () => {
++				throw new Error("the screen went away");
+ 			},
+-			broker,
+-		);
++		});
++		const { reply } = await askThroughServer({ message: "Delete it?", requestedSchema: APPROVAL }, broker);
+ 		expect(reply.result).toEqual({ action: "cancel" });
+ 	});
+ 
+-	it("does not accept when the final review is dismissed", async () => {
+-		const broker = new ElicitationBroker();
+-		broker.setUI(scriptedDialogs(["Answer the questions", undefined], ["hello"]).dialogs);
+-		const { reply } = await askThroughServer(
+-			{
+-				message: "Name it",
+-				requestedSchema: {
+-					type: "object",
+-					properties: { name: { type: "string", title: "Name" } },
+-					required: ["name"],
+-				},
+-			},
+-			broker,
++	it("cancels when there is no UI, or the UI has no ask dialog", async () => {
++		const none = await askThroughServer(
++			{ message: "Delete it?", requestedSchema: APPROVAL },
++			new ElicitationBroker(),
+ 		);
+-		expect(reply.result).toEqual({ action: "cancel" });
++		expect(none.reply.result).toEqual({ action: "cancel" });
++		server?.stop(true);
++
++		const withoutAsk = new ElicitationBroker();
++		withoutAsk.setUI({});
++		const noAsk = await askThroughServer({ message: "Delete it?", requestedSchema: APPROVAL }, withoutAsk);
++		expect(noAsk.reply.result).toEqual({ action: "cancel" });
+ 	});
+ 
+ 	it("refuses URL mode and a schema it cannot ask, with an invalid-params error", async () => {
+ 		const broker = new ElicitationBroker();
+-		broker.setUI(scriptedDialogs(["Accept"]).dialogs);
++		broker.setUI(scriptedDialog(submit({ approval: { pick: ["Accept"] } })).dialogs);
+ 		const url = await askThroughServer({ mode: "url", message: "Sign in", url: "https://example.com" }, broker);
+ 		expect(url.reply.error?.code).toBe(-32602);
+ 
+@@ -318,77 +316,296 @@ describe("MCP form elicitation: a server asks, a person answers", () => {
+ 
+ 	it("shows the terms a server attaches in _meta, cleaned, and never treats them as consent", async () => {
+ 		const broker = new ElicitationBroker();
+-		const ui = scriptedDialogs([undefined]);
+-		broker.setUI(ui.dialogs);
++		const dialog = scriptedDialog(undefined);
++		broker.setUI(dialog.dialogs);
+ 		const { reply } = await askThroughServer(
+ 			{
+ 				message: "Send this email?",
+-				requestedSchema: { type: "object", properties: {} },
++				requestedSchema: APPROVAL,
+ 				_meta: { persist: "always", scope: "all mail\u001b[2J" },
+ 			},
+ 			broker,
+ 		);
+-		expect(ui.shown[0]).toContain("Send this email?");
+-		expect(ui.shown[0]).toContain('"persist": "always"');
++		const text = dialog.asked[0]?.[0]?.question ?? "";
++		expect(text).toContain("Send this email?");
++		expect(text).toContain('"persist": "always"');
+ 		// The escape character arrives spelled out as text, so it cannot repaint the terminal.
+-		expect(ui.shown[0]).toContain("all mail\\u001b[2J");
+-		expect(ui.shown[0]).not.toContain("\u001b");
++		expect(text).toContain("all mail\\u001b[2J");
++		expect(text).not.toContain("\u001b");
+ 		// A server that asks for a lasting approval still gets only the person's one answer.
+ 		expect(reply.result).toEqual({ action: "cancel" });
+ 	});
+ 
+-	it("adds nothing to the dialog when _meta is absent, empty or not an object", async () => {
++	it("adds nothing to the question when _meta is absent, empty or not an object", async () => {
+ 		for (const meta of [undefined, {}, [], "terms", null]) {
+ 			const broker = new ElicitationBroker();
+-			const ui = scriptedDialogs(["Decline"]);
+-			broker.setUI(ui.dialogs);
+-			await askThroughServer(
+-				{ message: "Plain", requestedSchema: { type: "object", properties: {} }, _meta: meta },
+-				broker,
+-			);
+-			expect(ui.shown[0]).not.toContain("server attached");
++			const dialog = scriptedDialog(submit({ approval: { pick: ["Decline"] } }));
++			broker.setUI(dialog.dialogs);
++			await askThroughServer({ message: "Plain", requestedSchema: APPROVAL, _meta: meta }, broker);
++			expect(dialog.asked[0]?.[0]?.question).not.toContain("server attached");
+ 			server?.stop(true);
+ 		}
+ 	});
+ 
+ 	it("strips terminal control sequences from what the server says", async () => {
+ 		const broker = new ElicitationBroker();
+-		const ui = scriptedDialogs(["Decline"]);
+-		broker.setUI(ui.dialogs);
+-		await askThroughServer(
+-			{ message: "Harmless\u001b[2J\u001b[31m text\u0007", requestedSchema: { type: "object", properties: {} } },
+-			broker,
+-		);
+-		expect(ui.shown[0]).not.toContain("\u001b");
+-		expect(ui.shown[0]).not.toContain("\u0007");
+-		expect(ui.shown[0]).toContain("Harmless[2J[31m text");
++		const dialog = scriptedDialog(submit({ approval: { pick: ["Decline"] } }));
++		broker.setUI(dialog.dialogs);
++		await askThroughServer({ message: "Harmless\u001b[2J\u001b[31m text\u0007", requestedSchema: APPROVAL }, broker);
++		const text = dialog.asked[0]?.[0]?.question ?? "";
++		expect(text).not.toContain("\u001b");
++		expect(text).not.toContain("\u0007");
++		expect(text).toContain("Harmless[2J[31m text");
+ 	});
+ 
+ 	it("asks one question at a time when two servers ask together", async () => {
+ 		const broker = new ElicitationBroker();
+ 		const order: string[] = [];
+-		const gate = Promise.withResolvers<string | undefined>();
++		const gate = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
+ 		const firstOpened = Promise.withResolvers<void>();
+ 		broker.setUI({
+-			select: async title => {
+-				order.push(`open:${title.includes("first") ? "first" : "second"}`);
+-				if (title.includes("first")) firstOpened.resolve();
+-				if (title.includes("first")) return gate.promise;
+-				return "Accept";
++			askDialog: async questions => {
++				const first = questions[0]?.question.includes("first") === true;
++				order.push(`open:${first ? "first" : "second"}`);
++				if (first) {
++					firstOpened.resolve();
++					return gate.promise;
++				}
++				return submit({ approval: { pick: ["Accept"] } })(questions);
+ 			},
+-			input: async () => undefined,
+-			notify: () => {},
+ 		});
+-		const schema = { type: "object", properties: {} };
+-		const first = broker.handle("a", { message: "first", requestedSchema: schema });
+-		const second = broker.handle("b", { message: "second", requestedSchema: schema });
++		const first = broker.handle("a", { message: "first", requestedSchema: APPROVAL });
++		const second = broker.handle("b", { message: "second", requestedSchema: APPROVAL });
+ 		await firstOpened.promise;
+ 		// Let the queue run as far as it can. If it were not serial, the second dialog would open here.
+ 		for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+ 		expect(order).toEqual(["open:first"]);
+-		gate.resolve("Decline");
++		gate.resolve({
++			kind: "submit",
++			results: [resultItem({ id: "approval", question: "", options: [] }, { pick: ["Decline"] })],
++		});
+ 		expect(await first).toEqual({ action: "decline" });
+ 		expect(await second).toEqual({ action: "accept", content: {} });
+ 		expect(order).toEqual(["open:first", "open:second"]);
+ 	});
+ });
++
++const PROVISION = {
++	message: "Provision a database",
++	requestedSchema: {
++		type: "object",
++		properties: {
++			replicas: { type: "integer", title: "Replicas", minimum: 1, maximum: 9 },
++			env: {
++				type: "string",
++				title: "Environment",
++				oneOf: [
++					{ const: "prod", title: "Production" },
++					{ const: "dev", title: "Development" },
++				],
++			},
++			backups: { type: "boolean", title: "Enable backups" },
++			regions: { type: "array", title: "Regions", items: { enum: ["eu", "us", "ap"] }, minItems: 1, maxItems: 2 },
++			owner: { type: "string", title: "Owner email", format: "email" },
++		},
++		required: ["replicas", "env", "backups", "regions", "owner"],
++	},
++};
++
++const ALL_GOOD: Record<string, Answer> = {
++	replicas: { text: "7" },
++	env: { pick: ["Production"] },
++	backups: { pick: ["Yes"] },
++	regions: { pick: ["eu", "ap"] },
++	owner: { text: "me@example.com" },
++	submit: { pick: ["Accept"] },
++};
++
++describe("MCP form elicitation: a form, answered over HTTP", () => {
++	it("asks one question per field plus Submit this form?, and reads every kind of answer", async () => {
++		const broker = new ElicitationBroker();
++		const dialog = scriptedDialog(submit(ALL_GOOD));
++		broker.setUI(dialog.dialogs);
++		const { reply } = await askThroughServer(PROVISION, broker);
++		expect(reply.result).toEqual({
++			action: "accept",
++			content: { replicas: 7, env: "prod", backups: true, regions: ["eu", "ap"], owner: "me@example.com" },
++		});
++		expect(dialog.asked).toHaveLength(1);
++		const questions = dialog.asked[0] ?? [];
++		expect(questions.map(question => question.id)).toEqual([
++			"replicas",
++			"env",
++			"backups",
++			"regions",
++			"owner",
++			"submit",
++		]);
++		expect(questions.map(question => question.header)).toEqual([
++			"Replicas",
++			"Environment",
++			"Enable backups",
++			"Regions",
++			"Owner email",
++			"Submit",
++		]);
++		// Free text is typed into the dialog's own free-text row, so those questions list nothing.
++		expect(questions[0]?.options).toEqual([]);
++		expect(questions[4]?.options).toEqual([]);
++		expect(questions[1]?.options).toEqual([{ label: "Production" }, { label: "Development" }]);
++		expect(questions[2]?.options).toEqual([{ label: "Yes" }, { label: "No" }]);
++		expect(questions[3]).toMatchObject({ multi: true, options: [{ label: "eu" }, { label: "us" }, { label: "ap" }] });
++		expect(questions.filter(question => question.multi)).toHaveLength(1);
++		expect(questions.every(question => question.recommended === undefined)).toBe(true);
++		expect(questions[5]?.options).toEqual([{ label: "Accept" }, { label: "Decline" }]);
++		expect(questions[5]?.question).toContain("Submit this form?");
++		expect(questions[0]?.question).toContain("Provision a database");
++	});
++
++	it("declines, without checking the fields, when the person declines the form", async () => {
++		const broker = new ElicitationBroker();
++		const dialog = scriptedDialog(submit({ replicas: { text: "abc" }, submit: { pick: ["Decline"] } }));
++		broker.setUI(dialog.dialogs);
++		const { reply } = await askThroughServer(PROVISION, broker);
++		expect(reply.result).toEqual({ action: "decline" });
++		expect(dialog.asked).toHaveLength(1);
++	});
++
++	it("cancels when the form is dismissed, or Submit this form? is not answered", async () => {
++		const dismissed = new ElicitationBroker();
++		dismissed.setUI(scriptedDialog(undefined).dialogs);
++		expect((await askThroughServer(PROVISION, dismissed)).reply.result).toEqual({ action: "cancel" });
++		server?.stop(true);
++
++		const silent = new ElicitationBroker();
++		silent.setUI(scriptedDialog(submit({ ...ALL_GOOD, submit: {} })).dialogs);
++		expect((await askThroughServer(PROVISION, silent)).reply.result).toEqual({ action: "cancel" });
++		server?.stop(true);
++
++		const timedOut = new ElicitationBroker();
++		timedOut.setUI(scriptedDialog(submit({ ...ALL_GOOD, env: { pick: ["Production"], timedOut: true } })).dialogs);
++		expect((await askThroughServer(PROVISION, timedOut)).reply.result).toEqual({ action: "cancel" });
++	});
++
++	it("asks again only for the fields that failed, saying why, and then accepts", async () => {
++		const broker = new ElicitationBroker();
++		const dialog = scriptedDialog(
++			submit({ ...ALL_GOOD, replicas: { text: "7.5" }, regions: { pick: ["eu", "us", "ap"] } }),
++			submit({ replicas: { text: "abc" }, regions: { pick: ["us"] } }),
++			submit({ replicas: { text: "7" } }),
++		);
++		broker.setUI(dialog.dialogs);
++		const { reply } = await askThroughServer(PROVISION, broker);
++		expect(reply.result).toEqual({
++			action: "accept",
++			content: { replicas: 7, env: "prod", backups: true, regions: ["us"], owner: "me@example.com" },
++		});
++		expect(dialog.asked.map(questions => questions.map(question => question.id))).toEqual([
++			["replicas", "env", "backups", "regions", "owner", "submit"],
++			["replicas", "regions"],
++			["replicas"],
++		]);
++		expect(dialog.asked[1]?.[0]?.question).toContain("Enter a whole number.");
++		expect(dialog.asked[1]?.[1]?.question).toContain("Choose at most 2.");
++		expect(dialog.asked[2]?.[0]?.question).toContain("Enter a number.");
++	});
++
++	it("cancels after five attempts at a field that stays invalid", async () => {
++		const broker = new ElicitationBroker();
++		const bad = submit({ ...ALL_GOOD, owner: { text: "not an email" } });
++		const dialog = scriptedDialog(bad, bad, bad, bad, bad, bad);
++		broker.setUI(dialog.dialogs);
++		const { reply } = await askThroughServer(PROVISION, broker);
++		expect(reply.result).toEqual({ action: "cancel" });
++		expect(dialog.asked).toHaveLength(5);
++		expect(dialog.asked[4]?.map(question => question.id)).toEqual(["owner"]);
++	});
++
++	it("does not take typed text for a listed choice, or a required field left blank", async () => {
++		const broker = new ElicitationBroker();
++		const dialog = scriptedDialog(
++			submit({ ...ALL_GOOD, env: { text: "staging" }, owner: {} }),
++			submit({ env: { pick: ["Development"] }, owner: { text: "a@b.co" } }),
++		);
++		broker.setUI(dialog.dialogs);
++		const { reply } = await askThroughServer(PROVISION, broker);
++		expect(dialog.asked[1]?.map(question => question.id)).toEqual(["env", "owner"]);
++		expect(dialog.asked[1]?.[0]?.question).toContain("Pick one of the listed options.");
++		expect(dialog.asked[1]?.[1]?.question).toContain("Owner email is required.");
++		expect(reply.result).toMatchObject({ action: "accept", content: { env: "dev", owner: "a@b.co" } });
++	});
++
++	it("leaves an unanswered optional field out and fills an unanswered one from its default", async () => {
++		const broker = new ElicitationBroker();
++		const dialog = scriptedDialog(submit({ submit: { pick: ["Accept"] }, nickname: { text: "Sam" } }));
++		broker.setUI(dialog.dialogs);
++		const { reply } = await askThroughServer(
++			{
++				message: "Profile",
++				requestedSchema: {
++					type: "object",
++					properties: {
++						nickname: { type: "string", title: "Nickname" },
++						note: { type: "string", title: "Note" },
++						limit: { type: "integer", title: "Limit", default: 10 },
++						news: { type: "boolean", title: "News", default: false },
++						tags: { type: "array", title: "Tags", items: { enum: ["a", "b"] } },
++					},
++				},
++			},
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "accept", content: { nickname: "Sam", limit: 10, news: false } });
++		const questions = dialog.asked[0] ?? [];
++		// A default is offered, marked as the server's, and is never preselected or recommended.
++		expect(questions[2]?.options).toEqual([{ label: "10", description: "Server default" }]);
++		expect(questions[3]?.options).toEqual([{ label: "Yes" }, { label: "No", description: "Server default" }]);
++		expect(questions[0]?.question).toContain("Nickname (optional)");
++		expect(questions.every(question => question.recommended === undefined)).toBe(true);
++	});
++
++	it("takes the default when the person picks it", async () => {
++		const broker = new ElicitationBroker();
++		broker.setUI(scriptedDialog(submit({ limit: { pick: ["10"] }, submit: { pick: ["Accept"] } })).dialogs);
++		const { reply } = await askThroughServer(
++			{
++				message: "Limit",
++				requestedSchema: {
++					type: "object",
++					properties: { limit: { type: "integer", title: "Limit", default: 10 } },
++					required: ["limit"],
++				},
++			},
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "accept", content: { limit: 10 } });
++	});
++
++	it("tells two choices with the same title apart", async () => {
++		const broker = new ElicitationBroker();
++		const dialog = scriptedDialog(submit({ region: { pick: ["Main (b)"] }, submit: { pick: ["Accept"] } }));
++		broker.setUI(dialog.dialogs);
++		const { reply } = await askThroughServer(
++			{
++				message: "Where",
++				requestedSchema: {
++					type: "object",
++					properties: {
++						region: {
++							type: "string",
++							title: "Region",
++							oneOf: [
++								{ const: "a", title: "Main" },
++								{ const: "b", title: "Main" },
++							],
++						},
++					},
++					required: ["region"],
++				},
++			},
++			broker,
++		);
++		expect(dialog.asked[0]?.[0]?.options.map(option => option.label)).toEqual(["Main", "Main (b)"]);
++		expect(reply.result).toEqual({ action: "accept", content: { region: "b" } });
++	});
++});

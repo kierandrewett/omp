@@ -23,6 +23,8 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0010-anthropic-sequential-accounts`|Anthropic accounts are used one at a time until one is blocked or spent. `retry.accountMode` is `sequential` (default) or `balanced`.|
 |`0011-status-line-usage-bar-and-account-labels`|Adds a `usage_bar` status-line segment to the default preset. The model shows its account, such as `Anthropic (B) > Sonnet 5.5`.|
 |`0012-subagent-shelf-and-viewer-fixes`|Colours the subagent counter, shows tokens on the completion line, fixes `.` in a busy subagent, and ends very long 429 waits cleanly.|
+|`0013-mcp-elicitation-ask-dialog`|A server's approval request shows in the same dialog as the `ask` tool. Anything but an explicit Accept is a cancel.|
+|`0014-task-routing-prefers-haiku`|Automatic subagent model choice sends work that states what to do and how to check it to Haiku, not Sonnet.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.

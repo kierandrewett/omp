@@ -10,3 +10,5 @@
 0010-anthropic-sequential-accounts.patch
 0011-status-line-usage-bar-and-account-labels.patch
 0012-subagent-shelf-and-viewer-fixes.patch
+0013-mcp-elicitation-ask-dialog.patch
+0014-task-routing-prefers-haiku.patch
