@@ -1,0 +1,69 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+index cf1a9b113a..35b5ec9d1d 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -18,6 +18,7 @@ _ADDONS = {
+     "linux-x64-modern": ("//bazel/platforms:linux-x64-modern", "pi_natives.linux-x64-modern.node"),
+     "linux-arm64": ("//bazel/platforms:linux-arm64", "pi_natives.linux-arm64.node"),
+     "linux-musl-x64-baseline": ("//bazel/platforms:linux-musl-x64-baseline", "pi_natives.linux-x64-baseline.node"),
++    "linux-musl-x64-modern": ("//bazel/platforms:linux-musl-x64-modern", "pi_natives.linux-x64-modern.node"),
+     "linux-musl-arm64": ("//bazel/platforms:linux-musl-arm64", "pi_natives.linux-arm64.node"),
+     "darwin-x64-baseline": ("//bazel/platforms:darwin-x64-baseline", "pi_natives.darwin-x64-baseline.node"),
+     "darwin-arm64": ("//bazel/platforms:darwin-arm64", "pi_natives.darwin-arm64.node"),
+@@ -45,6 +46,7 @@ filegroup(
+         ":natives-linux-arm64",
+         ":natives-linux-musl-arm64",
+         ":natives-linux-musl-x64-baseline",
++        ":natives-linux-musl-x64-modern",
+         ":natives-linux-x64-baseline",
+         ":natives-linux-x64-modern",
+         ":natives-win32-arm64",
+diff --git a/bazel/platforms/BUILD.bazel b/bazel/platforms/BUILD.bazel
+index 712fed22ad..87b471fef8 100644
+--- a/bazel/platforms/BUILD.bazel
++++ b/bazel/platforms/BUILD.bazel
+@@ -30,6 +30,12 @@ platform(
+     parents = ["@zig_sdk//libc_aware/platform:linux_amd64_musl"],
+ )
+ 
++platform(
++    name = "linux-musl-x64-modern",
++    constraint_values = ["//bazel/variants:modern"],
++    parents = ["@zig_sdk//libc_aware/platform:linux_amd64_musl"],
++)
++
+ platform(
+     name = "linux-musl-arm64",
+     parents = ["@zig_sdk//libc_aware/platform:linux_arm64_musl"],
+diff --git a/docs/natives-build-release-debugging.md b/docs/natives-build-release-debugging.md
+index 0a58b23792..e552f43f69 100644
+--- a/docs/natives-build-release-debugging.md
++++ b/docs/natives-build-release-debugging.md
+@@ -43,6 +43,7 @@ Root `BUILD.bazel` instantiates one `native_addon` per Bazel-built `(platform, a
+ | `//:natives-linux-x64-modern`        | `//bazel/platforms:linux-x64-modern`        | `pi_natives.linux-x64-modern.node`    |
+ | `//:natives-linux-arm64`             | `//bazel/platforms:linux-arm64`             | `pi_natives.linux-arm64.node`         |
+ | `//:natives-linux-musl-x64-baseline` | `//bazel/platforms:linux-musl-x64-baseline` | `pi_natives.linux-x64-baseline.node`  |
++| `//:natives-linux-musl-x64-modern`   | `//bazel/platforms:linux-musl-x64-modern`   | `pi_natives.linux-x64-modern.node`    |
+ | `//:natives-linux-musl-arm64`        | `//bazel/platforms:linux-musl-arm64`        | `pi_natives.linux-arm64.node`         |
+ | `//:natives-darwin-x64-baseline`     | `//bazel/platforms:darwin-x64-baseline`     | `pi_natives.darwin-x64-baseline.node` |
+ | `//:natives-darwin-arm64`            | `//bazel/platforms:darwin-arm64`            | `pi_natives.darwin-arm64.node`        |
+diff --git a/scripts/bazel-natives.ts b/scripts/bazel-natives.ts
+index 199133374b..45bda2fbcb 100755
+--- a/scripts/bazel-natives.ts
++++ b/scripts/bazel-natives.ts
+@@ -55,6 +55,7 @@ export const ADDON_OUTPUTS: Record<string, string> = {
+ 	"linux-x64-modern": "pi_natives.linux-x64-modern.node",
+ 	"linux-arm64": "pi_natives.linux-arm64.node",
+ 	"linux-musl-x64-baseline": "pi_natives.linux-x64-baseline.node",
++	"linux-musl-x64-modern": "pi_natives.linux-x64-modern.node",
+ 	"linux-musl-arm64": "pi_natives.linux-arm64.node",
+ 	"darwin-x64-baseline": "pi_natives.darwin-x64-baseline.node",
+ 	"darwin-arm64": "pi_natives.darwin-arm64.node",
+@@ -70,6 +71,7 @@ export const AGGREGATE_TARGETS: Record<string, string[]> = {
+ 		"linux-arm64",
+ 		"linux-musl-arm64",
+ 		"linux-musl-x64-baseline",
++		"linux-musl-x64-modern",
+ 		"linux-x64-baseline",
+ 		"linux-x64-modern",
+ 		"win32-arm64",
