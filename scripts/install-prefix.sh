@@ -6,7 +6,8 @@
 #   prefix/usr/share/licenses/omp/NOTICE.md
 #
 # Usage: install-prefix.sh [PREFIX]    default: build/prefix
-# Reads dist/omp-linux-<arch>, and runs scripts/build.sh first when that file is missing.
+# Reads dist/omp-linux-<arch>, or dist/omp-linux-musl-<arch> with LIBC=musl, and runs scripts/build.sh first when that
+# file is missing. Both land in the same prefix path, usr/bin/omp: the packages of one build hold one binary.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -16,15 +17,17 @@ case "$prefix" in
 esac
 
 arch="$(target_arch)"
-bin="$dist/omp-linux-$arch"
+libc="$(target_libc)"
+bin="$dist/$(binary_name "$arch" "$libc")"
 if [ ! -s "$bin" ]; then
     log "no $bin; building it"
     "$root/scripts/build.sh"
 fi
 [ -s "$bin" ] || die "no binary at $bin"
 
-# A binary for this machine must run and report the release it was built for. Another arch cannot run here.
-if [ "$arch" = "$(TARGET_ARCH='' target_arch)" ]; then
+# A binary this machine can run must report the release it was built for. Another architecture, or musl on a glibc
+# machine, cannot run here; scripts/smoke-packages.sh runs it in a container of its own distro.
+if runs_here "$arch" "$libc"; then
     eval "$("$root/scripts/release-info.sh")"
     [ "$("$bin" --version)" = "omp/${fork_tag#v}" ] || die "$bin reports '$("$bin" --version)', expected omp/${fork_tag#v}"
 fi

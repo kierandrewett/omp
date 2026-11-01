@@ -35,6 +35,21 @@ target_arch() {
     esac
 }
 
+# The C library the build and the packages are for: glibc or musl. glibc unless LIBC says otherwise. musl is what Alpine
+# runs, so a musl build is the one that gets an apk (see pkgsmith.star).
+target_libc() {
+    case "${LIBC:-glibc}" in
+        glibc | musl) printf '%s\n' "${LIBC:-glibc}" ;;
+        *) die "unsupported LIBC '$LIBC'; use glibc or musl" ;;
+    esac
+}
+
+# The name upstream gives the binary of the architecture ($1: x64 or arm64) and the C library ($2): omp-linux-x64 for
+# glibc and omp-linux-musl-x64 for musl. The glibc names are the ones `omp update` reads, so they do not change.
+binary_name() {
+    if [ "$2" = musl ]; then printf 'omp-linux-musl-%s\n' "$1"; else printf 'omp-linux-%s\n' "$1"; fi
+}
+
 # The C library an ELF program was built for, read from its program interpreter: glibc or musl. A static program
 # has no interpreter, so its library cannot be told and this stops instead of guessing.
 elf_libc() {
@@ -45,6 +60,30 @@ elf_libc() {
         *ld-linux*) printf 'glibc\n' ;;
         *) die "cannot tell the C library of $1 (program interpreter '${interpreter:-none}')" ;;
     esac
+}
+
+# The C library of this machine, read from its shell: Alpine's /bin/sh is a musl program.
+host_libc() {
+    elf_libc "$(readlink -f /bin/sh)"
+}
+
+# Whether a binary for architecture $1 (x64 or arm64) and C library $2 runs on this machine.
+runs_here() {
+    [ "$1" = "$(TARGET_ARCH='' target_arch)" ] && [ "$2" = "$(host_libc)" ]
+}
+
+# The C library an addon (a shared library) links to, from the libraries it needs: glibc, musl, or unknown when it names
+# neither. Upstream's musl addons keep the file names of the glibc ones, so the name cannot tell them apart.
+addon_libc() {
+    local needed
+    needed="$(readelf -d "$1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')"
+    if grep -q '^libc\.musl-' <<<"$needed"; then
+        printf 'musl\n'
+    elif grep -qx 'libc\.so\.6' <<<"$needed"; then
+        printf 'glibc\n'
+    else
+        printf 'unknown\n'
+    fi
 }
 
 # The architecture an ELF program was built for, in the names of the packages: amd64 or arm64.
