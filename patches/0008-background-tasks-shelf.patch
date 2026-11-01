@@ -26,7 +26,7 @@ index ea0273c7d7..7183dd079a 100644
  | `tui.resizeScrollback`        | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport.                                                                                                                                                                                                                                                                                                                                                   |
  | `tui.completeScrollback`      | boolean | `false`          | Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback. When it shrinks, blank rows sit between the transcript and the input until new output fills them.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index ac8124e0b1..eb828c865a 100644
+index b5bba9b1dd..d113000863 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -4,6 +4,7 @@

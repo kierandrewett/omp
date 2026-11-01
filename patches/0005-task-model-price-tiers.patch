@@ -12,7 +12,7 @@ index 6bbad6cd50..9bc61b9dc3 100644
  
  Batch calls reject a top-level `agent` rather than silently discarding a specialist selector and spawning the default agent. Put `agent` on each `tasks[]` item when selecting `reviewer`, `scout`, or a custom agent; the agent name is not inferred from the task text.
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index a7e80ac7c9..86b627fd91 100644
+index c539bf39cc..39d8a0b69d 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -8,6 +8,7 @@

@@ -9,11 +9,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 pinned="$(pinned_commit)"
-tag="$(git -C "$upstream" describe --tags --exact-match "$pinned" 2>/dev/null)" || die "pinned upstream commit is not a release tag"
-[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "pinned tag is not a stable release: $tag"
-revision="$(tr -d '[:space:]' < "$root/revision")"
-[[ "$revision" =~ ^[1-9][0-9]*$ ]] || die "revision must be a positive integer"
-fork_tag="$tag-fork.$revision"
+eval "$("$root/scripts/release-info.sh")"
+tag="$upstream_tag"
 
 if [ -e "$build_tree" ]; then
     git -C "$upstream" worktree remove --force "$build_tree"
@@ -50,7 +47,7 @@ env -u CI bun run --cwd packages/collab-web gen:export-viewer
 # toolchain. A patch that touches the Rust sources therefore gets its own entry.
 natives_mode="${NATIVES:-host}"
 natives_sources="$(git ls-files --stage -- crates packages/natives Cargo.toml Cargo.lock | sha256sum | cut -c1-16)"
-natives_toolchain="$(rustc --version --verbose 2>/dev/null | sha256sum | cut -c1-8)"
+natives_toolchain="$({ rustc --version --verbose 2>/dev/null || true; } | sha256sum | cut -c1-8)"
 natives_key="$root/build/natives-cache/${pinned:0:10}-$natives_mode-$natives_sources-$natives_toolchain"
 if [ "$natives_mode" != prebuilt ] && compgen -G "$natives_key/pi_natives.*.node" >/dev/null; then
     log "using cached natives from $natives_key"

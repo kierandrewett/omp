@@ -76,7 +76,23 @@ This moves the submodule and rebuilds `work/src`. A patch that no longer applies
 markers in `work/src`. Fix them, commit, run `just export`, then `git add upstream patches` and commit.
 Never drop a patch to make an update pass.
 
+## Releases
+
+`omp update` reads the releases of this repository, `kierandrewett/omp`. It takes the latest stable release, checks
+`omp-linux-x64` against `SHA256SUMS.txt`, and replaces the running binary. Only Linux x64 is built.
+
+`.github/workflows/release.yml` publishes them. It runs when `patches/`, `revision`, `upstream` or `scripts/` change
+on `main`, and from the Actions tab. The tag is the pinned upstream tag plus `revision`, for example
+`v18.14.2-fork.2`. A published release is never overwritten and the run skips it, so raise `revision` when you ship
+changed patches for an upstream tag you already released. A run builds with `NATIVES=bazel`, which makes both the
+modern and the baseline native addon. A local `just build` uses `NATIVES=host` and makes only this machine's addon,
+so install it here but do not publish it.
+
+## Licence
+
+The patches contain lines of [oh-my-pi](https://github.com/can1357/oh-my-pi), which is MIT. `NOTICE.md` carries its
+licence text. The files added in this repository have no licence of their own yet.
+
 ## Not here yet
 
-* A GitHub Actions release workflow. The fork's updater still reads releases from `kierandrewett/oh-my-pi`.
 * Packages from pkgsmith. They wait for pkgsmith 0.1.0.

@@ -12,7 +12,7 @@ index c148cbc073..e4e4f82570 100644
  
  ---
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 4c53720f49..fca9ab2039 100644
+index 4c53720f49..2a8542e327 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -7,6 +7,10 @@
@@ -21,13 +21,13 @@ index 4c53720f49..fca9ab2039 100644
  
 +### Changed
 +
-+- `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/oh-my-pi`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
++- `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
 +
  ## [18.14.2] - 2026-10-31
  
  ### Added
 diff --git a/packages/coding-agent/README.md b/packages/coding-agent/README.md
-index c1d4032730..9538bf9e7c 100644
+index c1d4032730..5bdba26b98 100644
 --- a/packages/coding-agent/README.md
 +++ b/packages/coding-agent/README.md
 @@ -15,6 +15,23 @@ Package-specific references:
@@ -36,7 +36,7 @@ index c1d4032730..9538bf9e7c 100644
  
 +## Fork releases and updates
 +
-+This fork publishes standalone binaries at [kierandrewett/oh-my-pi releases](https://github.com/kierandrewett/oh-my-pi/releases). `omp update` and startup checks use the latest stable fork release, not the upstream npm registry or build service. Releases are named `v<upstream-version>-fork.<revision>`; the embedded version has the same suffix. The updater verifies the release asset's SHA-256 and size before replacing the binary, and restores the previous binary if version verification fails. Canary releases are not provided; use `omp update --stable` if the stored channel is canary. A platform without a matching release asset fails rather than falling back to an upstream binary.
++This fork publishes standalone binaries at [kierandrewett/omp releases](https://github.com/kierandrewett/omp/releases). `omp update` and startup checks use the latest stable fork release, not the upstream npm registry or build service. Releases are named `v<upstream-version>-fork.<revision>`; the embedded version has the same suffix. The updater verifies the release asset's SHA-256 and size before replacing the binary, and restores the previous binary if version verification fails. Canary releases are not provided; use `omp update --stable` if the stored channel is canary. A platform without a matching release asset fails rather than falling back to an upstream binary.
 +
 +The fork does not publish npm packages, a Homebrew formula, or a mise package. The fork updater will not upgrade or overwrite an npm, bun, Homebrew, mise, or Nix-managed installation; `omp update --check` checks the fork release and a normal update reports that an explicit migration is required. **An already-installed upstream executable still has its original updater**; do not run it to migrate.
 +
@@ -45,7 +45,7 @@ index c1d4032730..9538bf9e7c 100644
 +```sh
 +mkdir -p ~/.local/bin
 +workdir=$(mktemp -d)
-+gh release download --repo kierandrewett/oh-my-pi --dir "$workdir" --pattern omp-linux-x64 --pattern SHA256SUMS.txt
++gh release download --repo kierandrewett/omp --dir "$workdir" --pattern omp-linux-x64 --pattern SHA256SUMS.txt
 +(cd "$workdir" && grep '  omp-linux-x64$' SHA256SUMS.txt | sha256sum -c -) && install -m 755 "$workdir/omp-linux-x64" ~/.local/bin/omp
 +```
 +
@@ -55,7 +55,7 @@ index c1d4032730..9538bf9e7c 100644
  
  The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):
 diff --git a/packages/coding-agent/src/cli/build-service.ts b/packages/coding-agent/src/cli/build-service.ts
-index 4ba1d4d2ac..4bf69e3b64 100644
+index 4ba1d4d2ac..67feecd83f 100644
 --- a/packages/coding-agent/src/cli/build-service.ts
 +++ b/packages/coding-agent/src/cli/build-service.ts
 @@ -1,31 +1,4 @@
@@ -96,7 +96,7 @@ index 4ba1d4d2ac..4bf69e3b64 100644
  
  /** The product omp's builds are published under. */
 -const PRODUCT = "omp";
-+const FORK_REPOSITORY = "kierandrewett/oh-my-pi";
++const FORK_REPOSITORY = "kierandrewett/omp";
  
  const BUILD_CHECK_TIMEOUT_MS = 30_000;
  
@@ -206,7 +206,7 @@ index 4ba1d4d2ac..4bf69e3b64 100644
 +	};
  }
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 8fbee0cd57..662d4a617e 100644
+index 8fbee0cd57..63dd4c7f53 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -34,7 +34,6 @@ import {
@@ -271,7 +271,7 @@ index 8fbee0cd57..662d4a617e 100644
 -	return process.platform === "win32"
 -		? "& ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Binary"
 -		: "curl -fsSL https://omp.sh/install | sh -s -- --binary";
-+	return "https://github.com/kierandrewett/oh-my-pi/releases";
++	return "https://github.com/kierandrewett/omp/releases";
  }
  
  /** Persisted channel, or undefined when settings are unavailable (SDK/test embedding without `Settings.init()`). */
@@ -350,7 +350,7 @@ index 8fbee0cd57..662d4a617e 100644
 +		console.log(chalk.yellow("This installation is package-managed or not a standalone binary; it was not changed."));
 +		console.log(
 +			chalk.dim(
-+				"To migrate explicitly, install a verified fork release binary separately: https://github.com/kierandrewett/oh-my-pi/releases",
++				"To migrate explicitly, install a verified fork release binary separately: https://github.com/kierandrewett/omp/releases",
 +			),
 +		);
 +		if (!request.check) process.exitCode = 1;
@@ -406,7 +406,7 @@ index 89668b0c45..e8a3accf8d 100644
  		return undefined;
  	}
 diff --git a/packages/coding-agent/test/cli/build-service.test.ts b/packages/coding-agent/test/cli/build-service.test.ts
-index 776133bd5c..68def46eea 100644
+index 776133bd5c..1f017b8453 100644
 --- a/packages/coding-agent/test/cli/build-service.test.ts
 +++ b/packages/coding-agent/test/cli/build-service.test.ts
 @@ -1,4 +1,4 @@
@@ -433,9 +433,9 @@ index 776133bd5c..68def46eea 100644
 -		process.env.PI_BUILD_URL = "https://build.test/";
 -		const requests: Array<{ url: string; userAgent: string | null; signal: AbortSignal | null | undefined }> = [];
 -
-+	const api = "https://api.github.com/repos/kierandrewett/oh-my-pi/releases";
++	const api = "https://api.github.com/repos/kierandrewett/omp/releases";
 +	const tag = "v18.8.9-fork.2";
-+	const download = `https://github.com/kierandrewett/oh-my-pi/releases/download/${tag}`;
++	const download = `https://github.com/kierandrewett/omp/releases/download/${tag}`;
 +	const release = {
 +		tag_name: tag,
 +		draft: false,
@@ -582,7 +582,7 @@ index 776133bd5c..68def46eea 100644
  	});
  });
 diff --git a/packages/coding-agent/test/cli/update-cli.test.ts b/packages/coding-agent/test/cli/update-cli.test.ts
-index 9e9ccc2fd3..7375c1b011 100644
+index 9e9ccc2fd3..4a3358df5c 100644
 --- a/packages/coding-agent/test/cli/update-cli.test.ts
 +++ b/packages/coding-agent/test/cli/update-cli.test.ts
 @@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -623,24 +623,25 @@ index 9e9ccc2fd3..7375c1b011 100644
  	const dirs: string[] = [];
  	let settingsState: SettingsTestState | undefined;
  
-@@ -35,6 +52,9 @@ describe("runUpdateCommand version source", () => {
+@@ -35,6 +52,10 @@ describe("runUpdateCommand version source", () => {
  		AgentStorage.close();
  		restoreSettingsTestState(settingsState);
  		settingsState = undefined;
 +		vi.restoreAllMocks();
 +		process.env.PATH = previousPath;
-+		process.exitCode = previousExitCode;
++		// Bun keeps an exit code that is reset to `undefined`, so a refusal test would fail the whole run.
++		process.exitCode = previousExitCode ?? 0;
  		await Promise.all(dirs.splice(0).map(dir => removeWithRetries(dir)));
  	});
  
-@@ -78,48 +98,120 @@ describe("runUpdateCommand version source", () => {
+@@ -78,48 +99,120 @@ describe("runUpdateCommand version source", () => {
  		return { logs };
  	}
  
 -	it("checks npm, with a timeout, when no standalone binary is on PATH", async () => {
-+	const api = "https://api.github.com/repos/kierandrewett/oh-my-pi/releases/latest";
++	const api = "https://api.github.com/repos/kierandrewett/omp/releases/latest";
 +	const version = "999.0.0-fork.1";
-+	const releaseBase = `https://github.com/kierandrewett/oh-my-pi/releases/download/v${version}`;
++	const releaseBase = `https://github.com/kierandrewett/omp/releases/download/v${version}`;
 +
 +	it("checks the fork release without changing a non-standalone installation or querying npm", async () => {
  		await isolatePath();

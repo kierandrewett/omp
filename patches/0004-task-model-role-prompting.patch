@@ -12,7 +12,7 @@ index 0b2dd8fac9..6bbad6cd50 100644
  Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape. Settled results report the requested and actual model; extension routing, auth fallback, and runtime retry fallback can switch the actual model under the existing policies.
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index bb6a410bad..a7e80ac7c9 100644
+index b40509c0de..c539bf39cc 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -7,6 +7,7 @@

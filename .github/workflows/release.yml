@@ -1,0 +1,121 @@
+name: Release
+
+# Builds the patched Linux x64 binary and publishes it as a GitHub release of this repo. `omp update` reads
+# these releases. The release tag is the pinned upstream tag plus `revision`, for example v18.14.2-fork.2.
+# A published release is never overwritten: raise `revision` to ship changed patches for the same upstream tag.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - patches/**
+      - revision
+      - upstream
+      - scripts/**
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-22.04
+    outputs:
+      upstream_tag: ${{ steps.info.outputs.upstream_tag }}
+      fork_tag: ${{ steps.info.outputs.fork_tag }}
+      build: ${{ steps.info.outputs.build }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Work out the release and whether it exists
+        id: info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/release-info.sh | tee -a "$GITHUB_OUTPUT"
+          fork_tag="$(scripts/release-info.sh | sed -n 's/^fork_tag=//p')"
+          if release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$fork_tag" 2>/dev/null)"; then
+              if [ "$(jq -r '.draft or .prerelease' <<<"$release")" != "false" ]; then
+                  echo "::error::Release $fork_tag exists as a draft or prerelease; inspect it before retrying"
+                  exit 1
+              fi
+              for asset in omp-linux-x64 SHA256SUMS.txt; do
+                  jq -e --arg a "$asset" '.assets | any(.name == $a and .state == "uploaded" and .size > 0)' <<<"$release" >/dev/null \
+                      || { echo "::error::Release $fork_tag is missing $asset; inspect it"; exit 1; }
+              done
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              echo "$fork_tag is already published; nothing to build"
+          elif git ls-remote --exit-code --tags origin "refs/tags/$fork_tag" >/dev/null 2>&1; then
+              echo "::error::Tag $fork_tag exists without a release; inspect it before retrying"
+              exit 1
+          else
+              echo "build=true" >> "$GITHUB_OUTPUT"
+              echo "Building $fork_tag"
+          fi
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          submodules: true
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      # Bazel builds both the modern and the baseline native addon, so the binary runs on any x64 CPU.
+      # A local `NATIVES=host` build has only this machine's addon and must not be released.
+      - name: Build
+        env:
+          NATIVES: bazel
+        run: scripts/build.sh
+      - name: Check the artifact
+        env:
+          FORK_TAG: ${{ needs.discover.outputs.fork_tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check SHA256SUMS.txt
+          test "$(./omp-linux-x64 --version)" = "omp/${FORK_TAG#v}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-x64
+          path: |
+            dist/omp-linux-x64
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [discover, build]
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-x64
+          path: release
+      - name: Publish the release with both assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          FORK_TAG: ${{ needs.discover.outputs.fork_tag }}
+          UPSTREAM_TAG: ${{ needs.discover.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          # A draft first, so nobody sees a release with a missing asset.
+          gh release create "$FORK_TAG" omp-linux-x64 SHA256SUMS.txt \
+              --target "$GITHUB_SHA" --draft --title "$FORK_TAG" \
+              --notes "Patched build of can1357/oh-my-pi $UPSTREAM_TAG. Patches and build scripts: $GITHUB_SHA."
+          gh release edit "$FORK_TAG" --draft=false --latest
