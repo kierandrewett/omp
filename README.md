@@ -26,6 +26,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0013-mcp-elicitation-ask-dialog`|A server's approval request shows in the same dialog as the `ask` tool. Anything but an explicit Accept is a cancel.|
 |`0014-task-routing-preferences`|Adds `task.routingPreferences`: your own text on which work suits which model, for the automatic subagent choice. Empty by default.|
 |`0015-status-line-usage-window`|`usage_bar` shows weekly usage by default. `statusLine.usageWindow` picks weekly, 5-hour or the worst window.|
+|`0016-status-line-weekly-only`|In weekly mode `usage_bar` shows only the 7-day window, or no bar if the provider has none.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.

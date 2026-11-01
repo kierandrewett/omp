@@ -1,0 +1,72 @@
+diff --git a/docs/settings.md b/docs/settings.md
+index 581e2dcf91..f1bf8466cd 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -916,7 +916,7 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
+ 
+ The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
+ 
+-The `usage_bar` segment draws a five-cell progress bar, the percent used and the window it shows (`━━━━━ 100% 7d`, or `=====` glyphs with the ASCII symbol set) for the active account of the active provider, warning-coloured from 50% and error-coloured from 80%. `statusLine.usageWindow` chooses the window: `weekly` (default) draws the 7 Day window, `session` the 5 Hour window, `worst` whichever is more used. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` draws the more used of the shared 7 Day row and that model's row, tagged `7d fable`, the way credential ranking scopes a model's weekly limit. A provider with no 7 Day window falls back to its longest reported window (monthly, then daily, then 5 Hour) under that window's own tag (`mo`, `1d`, `5h`), never a shorter window labelled `7d`; `session` likewise falls back to the shortest window it has. The bar reads the same cached usage reports as the `usage` segment, refreshed no more often than every five minutes, picks the report of the session's own account (nothing is drawn while a provider with several accounts has no resolved account), and renders nothing when the provider reports no such window. It sits right after `context_pct` in the `default` preset; add `usage_bar` to `statusLine.leftSegments` or `statusLine.rightSegments` with `statusLine.preset: custom` to use it in a custom line.
++The `usage_bar` segment draws a five-cell progress bar, the percent used and the window it shows (`━━━━━ 100% 7d`, or `=====` glyphs with the ASCII symbol set) for the active account of the active provider, warning-coloured from 50% and error-coloured from 80%. `statusLine.usageWindow` chooses the window: `weekly` (default) draws the 7 Day window, `session` the 5 Hour window, `worst` whichever is more used. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` draws the more used of the shared 7 Day row and that model's row, tagged `7d fable`, the way credential ranking scopes a model's weekly limit. A provider that reports no 7 Day window draws no bar in `weekly` mode; another window is never shown in its place. `session` draws the 5 Hour window, and when a provider has none it draws its shortest reported window under that window's own tag (`1d`, `7d`, `mo`), so read the tag. The bar reads the same cached usage reports as the `usage` segment, refreshed no more often than every five minutes, picks the report of the session's own account (nothing is drawn while a provider with several accounts has no resolved account), and renders nothing when the provider reports no such window. It sits right after `context_pct` in the `default` preset; add `usage_bar` to `statusLine.leftSegments` or `statusLine.rightSegments` with `statusLine.preset: custom` to use it in a custom line.
+ 
+ When a provider holds two or more stored OAuth accounts, the `model` segment names the session's account by its stored position, the order `omp usage accounts` prints (A is the first): `Anthropic (B) > Sonnet 5.5`, and the footer shows the raw id as `anthropic-b/claude-sonnet-5-5`. A provider with one account is unchanged, and model ids themselves are never rewritten.
+ 
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 37e30ed9c6..04178ff714 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -5,7 +5,7 @@
+ ### Added
+ 
+ - Added the `retry.accountMode` setting (`sequential` by default, or `balanced`). With `sequential`, Anthropic accounts are used one at a time: every session and subagent follows the account that served last until it is blocked or spent, then moves to the next.
+-- New `usage_bar` status-line segment, in the `default` preset right after the context percent: a five-cell progress bar, the percent used and the window tag (`━━━━━ 100% 7d`) for the active account. New `statusLine.usageWindow` setting (`weekly` by default, `session`, `worst`) chooses the 7 Day window, the 5 Hour window or the more used one. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` uses the more used of the shared and the model's 7 Day row, tagged `7d fable`; a provider without a 7 Day window falls back to its longest reported window under its own tag. It renders nothing when the provider reports no usage windows, or when several accounts have no resolved one.
++- New `usage_bar` status-line segment, in the `default` preset right after the context percent: a five-cell progress bar, the percent used and the window tag (`━━━━━ 100% 7d`) for the active account. New `statusLine.usageWindow` setting (`weekly` by default, `session`, `worst`) chooses the 7 Day window, the 5 Hour window or the more used one. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` uses the more used of the shared and the model's 7 Day row, tagged `7d fable`; a provider without a 7 Day window draws no bar in `weekly` mode, and `session` falls back to its shortest window under its own tag. It renders nothing when the provider reports no usage windows, or when several accounts have no resolved one.
+ - When a provider holds two or more stored OAuth accounts, the status line names the session's account in the model: `Anthropic (B) > Sonnet 5.5`, and the footer's raw model id reads `anthropic-b/claude-sonnet-5-5`. The letter is the account's position in `omp usage accounts` order (A first) and follows an account change mid-session. Single-account providers look as before.
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
+index cade4b2eca..11003de785 100644
+--- a/packages/tui/src/status-line/segments.ts
++++ b/packages/tui/src/status-line/segments.ts
+@@ -1317,8 +1317,7 @@ interface UsageBarWindow {
+  *   own weekly counter (Fable, Mythos, Opus, Sonnet), the more used of the shared
+  *   7 Day row and that tier row, tagged `7d fable`; this is how Claude credential
+  *   ranking scopes a model's weekly limit. A provider that reports no 7 Day window
+- *   falls back to its longest reported window (monthly, then daily, then 5 Hour),
+- *   tagged with that window's own label, never a shorter window under `7d`.
++ *   draws nothing: the bar never shows another window in its place.
+  * - `session`: the 5 Hour window, tagged `5h`; a provider without one falls back
+  *   to its shortest reported window (daily, then 7 Day, then monthly) under its own tag.
+  * - `worst`: the most used of every reported window. The shorter window wins a tie.
+@@ -1353,7 +1352,7 @@ function usageBarWindow(ctx: SegmentContext): UsageBarWindow | null {
+ 		case "worst":
+ 			return mostUsed(fiveHour, daily, weekly, monthly);
+ 		default:
+-			return weekly ?? monthly ?? daily ?? fiveHour;
++			return weekly;
+ 	}
+ }
+ 
+diff --git a/packages/tui/test/status-line-usage-bar.test.ts b/packages/tui/test/status-line-usage-bar.test.ts
+index 60a5bdcf05..dd357339d2 100644
+--- a/packages/tui/test/status-line-usage-bar.test.ts
++++ b/packages/tui/test/status-line-usage-bar.test.ts
+@@ -54,15 +54,12 @@ describe("usage_bar status-line segment windows", () => {
+ 		expect(plain(ctxWith({ sevenDay: { percent: 140 } }))).toContain(`${bar(5)} 100% 7d`);
+ 	});
+ 
+-	it("weekly falls back to the longest reported window under that window's own tag", () => {
+-		expect(plain(ctxWith({ fiveHour: { percent: 21 } }))).toContain("21% 5h");
+-		expect(plain(ctxWith({ fiveHour: { percent: 21 }, daily: { percent: 33 } }))).toContain("33% 1d");
+-		// Monthly outlasts a week; a weekly row still wins when the provider reports one.
+-		expect(plain(ctxWith({ fiveHour: { percent: 21 }, monthly: { percent: 77 } }))).toContain("77% mo");
++	it("weekly draws nothing when the provider reports no 7 Day window", () => {
++		expect(plain(ctxWith({ fiveHour: { percent: 21 } }))).not.toContain("%");
++		expect(plain(ctxWith({ fiveHour: { percent: 21 }, monthly: { percent: 77 } }))).not.toContain("%");
+ 		expect(
+ 			plain(ctxWith({ fiveHour: { percent: 21 }, sevenDay: { percent: 5 }, monthly: { percent: 77 } })),
+ 		).toContain("5% 7d");
+-		expect(plain(ctxWith({ fiveHour: { percent: 21 } }))).not.toContain("7d");
+ 	});
+ 
+ 	it("session falls back to the shortest reported window under its own tag", () => {
