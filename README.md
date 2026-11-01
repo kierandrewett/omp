@@ -182,7 +182,8 @@ Every run of the release workflow checks this on real runners (amd64 on `ubuntu-
   `archlinux:latest` for the Arch package and `alpine:3` for the apk.
 * The package manager owns `/usr/bin/omp`, and `omp --version` and `omp --smoke-test` pass.
 * On x64 the smoke test runs again with `PI_NATIVE_VARIANT=modern` and with `baseline`. The check needs the matching
-  addon to be unpacked under `~/.omp/natives`, so both embedded addons are in each x64 package and load there.
+  addon to be unpacked under `~/.omp/natives`. `--smoke-test` exits 1 when an addon cannot load, so a pass means that
+  addon loaded, and both embedded addons are in each x64 package.
 * On arm64 the Arch package is checked by its contents only, because Arch Linux has no official arm64 image.
 * The collect step stops unless the release holds two files of each of the five formats.
 

@@ -19,10 +19,12 @@ Patch series for Kieran's fork of can1357/oh-my-pi. Read `README.md` first.
 * Do not add a flag that sets the C library or the architecture of a package. `scripts/package.sh` reads both from the
   ELF headers of the binary. A musl binary gets only the apk. A glibc binary gets rpm, deb, Arch and tar, and never an
   apk, because it does not run on Alpine.
-* Upstream's musl addons keep the file names of the glibc addons (`pi_natives.linux-x64-baseline.node`,
-  `pi_natives.linux-arm64.node`). Never put glibc and musl addons in one folder. `scripts/build.sh` stops when an addon
-  links to the other C library. The raw musl binaries are not released, and `omp-linux-x64` and `omp-linux-arm64` stay
-  the glibc binaries that `omp update` reads.
+* Upstream's musl addons keep the file names of the glibc addons: x64 baseline, x64 modern and arm64. Never put glibc
+  and musl addons in one folder.
+* `scripts/build.sh` stops when an addon links to the other C library. It reads that from the needed libraries of the
+  addon: `libc.so.6` is glibc, and `libc.so` is musl.
+* The raw musl binaries are not released. `omp-linux-x64` and `omp-linux-arm64` stay the glibc binaries that `omp update`
+  reads.
 * pkgsmith names an apk without its architecture. `scripts/package.sh build` adds `x86_64` or `aarch64`. Keep that, or the
   two apks of a release overwrite each other.
 * The pkgsmith commit is pinned in `scripts/pkgsmith-commit`. pkgsmith is not on crates.io.
