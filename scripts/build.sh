@@ -15,11 +15,7 @@ pinned="$(pinned_commit)"
 eval "$("$root/scripts/release-info.sh")"
 tag="$upstream_tag"
 
-case "${TARGET_ARCH:-$(uname -m)}" in
-    x86_64 | amd64 | x64) arch=x64 ;;
-    aarch64 | arm64) arch=arm64 ;;
-    *) die "unsupported architecture '${TARGET_ARCH:-$(uname -m)}'; use x64 or arm64" ;;
-esac
+arch="$(target_arch)"
 binary_name="omp-linux-$arch"
 
 if [ -e "$build_tree" ]; then

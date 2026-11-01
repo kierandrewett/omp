@@ -26,6 +26,38 @@ pinned_commit() {
     git -C "$root" ls-files --stage upstream | awk 'NR == 1 { print $2 }'
 }
 
+# The architecture the build and the packages are for: x64 or arm64. This machine's, unless TARGET_ARCH says otherwise.
+target_arch() {
+    case "${TARGET_ARCH:-$(uname -m)}" in
+        x86_64 | amd64 | x64) printf 'x64\n' ;;
+        aarch64 | arm64) printf 'arm64\n' ;;
+        *) die "unsupported architecture '${TARGET_ARCH:-$(uname -m)}'; use x64 or arm64" ;;
+    esac
+}
+
+# The C library an ELF program was built for, read from its program interpreter: glibc or musl. A static program
+# has no interpreter, so its library cannot be told and this stops instead of guessing.
+elf_libc() {
+    local interpreter
+    interpreter="$(readelf -l "$1" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')"
+    case "$interpreter" in
+        *ld-musl*) printf 'musl\n' ;;
+        *ld-linux*) printf 'glibc\n' ;;
+        *) die "cannot tell the C library of $1 (program interpreter '${interpreter:-none}')" ;;
+    esac
+}
+
+# The architecture an ELF program was built for, in the names of the packages: amd64 or arm64.
+elf_arch() {
+    local machine
+    machine="$(readelf -h "$1" 2>/dev/null | sed -n 's/^ *Machine: *//p')"
+    case "$machine" in
+        *X86-64*) printf 'amd64\n' ;;
+        *AArch64*) printf 'arm64\n' ;;
+        *) die "cannot tell the architecture of $1 (machine '${machine:-unknown}')" ;;
+    esac
+}
+
 # Where the upstream submodule is cloned from.
 upstream_url() {
     git config -f "$root/.gitmodules" submodule.upstream.url
