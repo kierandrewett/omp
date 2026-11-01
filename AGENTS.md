@@ -19,6 +19,17 @@ The patches must follow upstream style: tabs, no `any`, no `ReturnType<>`, no in
 `#private` fields, `Promise.withResolvers()`, and no wall-clock timers in tests. Run `bunx oxfmt` on touched files.
 Check with `bun run check:types` in `packages/coding-agent`.
 
+## Traps found while building
+
+* Do not run `oxfmt` or the `edit` tool on large upstream files (`interactive-mode.ts`, `executor.ts`, `tui/src/tools/task.ts`).
+  The format-on-save hook rewrites the whole file with spaces and the diff grows to tens of thousands of lines.
+  Use exact-text replacement with a script that asserts each anchor occurs once, then check `git diff --stat`.
+* Do not add `await import()`. Upstream bans it. A value import from a low-level module into the task graph can
+  merge bundle graphs and break the binary build ("Multiple files share the same output path"). Register a callback
+  instead, as `registerSubagentModelSwitcher` does.
+* Run tests with the default timeout. A test that only passes with `--timeout 20000` fails in upstream's setup.
+* Pass `set -o pipefail` when piping `scripts/build.sh` into `tail`, or the exit status is lost.
+
 ## Known failures on plain upstream
 
 On v18.14.2, 26 tests in `test/task` and `test/eval` fail without any patch. Worktree tests fail because the commit

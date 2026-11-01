@@ -1,0 +1,1218 @@
+diff --git a/docs/agent-hub.md b/docs/agent-hub.md
+index 0502c732ee..cc30b240d7 100644
+--- a/docs/agent-hub.md
++++ b/docs/agent-hub.md
+@@ -87,6 +87,10 @@ While subagents run, a pinned `Subagents` block above the editor lists every liv
+ 
+ The list stays short: it shows a few rows plus an expander (`display.pinnedAgents: collapsed`, the default), lists everything (`full`), or hides entirely (`off`). Clicking the expander toggles between the two while `tui.mouse` is on.
+ 
++Directly above it, a pinned `Background tasks` block lists the other work running in the background: backgrounded `bash` commands, backgrounded `eval` cells and services. A row shows the task id (`bg_1099`, or the service name), a one-line preview of its command and the elapsed time, right-aligned. Jobs that only run a subagent (every `task` job, including work-pool batches and security scans) are not listed there, since the `Subagents` block and the Hub already show that work. The block appears while something runs, clears itself when nothing does, and repaints its elapsed times once a second only while it is showing.
++
++`display.pinnedJobs` sets its density the same way: `collapsed` (the default) shows a few rows plus an expander, `full` lists everything and `off` hides the block. Clicking its expander toggles between the two while `tui.mouse` is on, and changing the setting resets that click.
++
+ Each row ends with that agent's total tokens and API cost, for example `1.4M tok · $0.42`, right-aligned and dim. Tokens count everything the model processed, cache reads included, so the figure matches what the provider counts; the Hub's own `tok` figure leaves cache reads out. Cost appears once it is above zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. A row too narrow to keep a readable title drops the usage and keeps the title.
+ 
+ Set `display.subagentLivePreview: true` to add a second line under each row showing what that agent is doing: its current tool call (or, between calls, the most recent one) with a one-line detail, plus the elapsed time once a call runs longer than five seconds. Off by default.
+diff --git a/docs/settings.md b/docs/settings.md
+index ea0273c7d7..7183dd079a 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -902,6 +902,7 @@ tui:
+ | `tui.autoGraph`               | enum    | `auto`           | Chart numeric tables in the agent's answers, in the theme's colors, on terminals that show graphics: `always` uses the built-in best guess, `smart` lets the judge model refine each chart (kind, columns, row names and grouping, scales and reference row, which way each measure is better, the focus row, and the title, or no chart at all) for every table the guess would chart, `auto` is `smart` while the judge role resolves to a native TypeSafe jev model and `always` otherwise, `off` leaves tables alone. Tern receives the chart as SVG. Applies to the main session in the TUI only: subagent transcripts, print, RPC, and ACP output stay plain, and their system prompts omit the diagram and chart guidance. |
+ | `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on [extension-owned links](./extensions.md#extension-link-schemes) reach their extension (`app.links.hint` picks them without the mouse). Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on.                                                                                                                                                                                                                                           |
+ | `display.pinnedAgents`        | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
++| `display.pinnedJobs`          | enum    | `collapsed`      | Pinned background-task shelf above the subagent shelf: running backgrounded `bash` commands, `eval` cells and services. `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+ | `display.subagentLivePreview` | boolean | `false`          | Show each pinned subagent's current (or most recent) tool call beneath its jump-list row.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+ | `tui.resizeScrollback`        | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport.                                                                                                                                                                                                                                                                                                                                                   |
+ | `tui.completeScrollback`      | boolean | `false`          | Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback. When it shrinks, blank rows sit between the transcript and the input until new output fills them.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index ac8124e0b1..eb828c865a 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -4,6 +4,7 @@
+ 
+ ### Added
+ 
++- Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
+ - Answer MCP form elicitation requests (`elicitation/create`) with a dialog. Dismissing the dialog, or having no screen, cancels the request and never accepts it. URL mode is refused.
+diff --git a/packages/coding-agent/src/async/job-manager.ts b/packages/coding-agent/src/async/job-manager.ts
+index 0460ff5042..344b08a4ab 100644
+--- a/packages/coding-agent/src/async/job-manager.ts
++++ b/packages/coding-agent/src/async/job-manager.ts
+@@ -315,6 +315,33 @@ export class AsyncJobManager {
+ 	/** Live widgets of this root's jobs; set by the root session when widgets are available. */
+ 	widgets: JobWidgetRegistry | undefined;
+ 	readonly #settleListeners = new Set<() => void>();
++	readonly #startListeners = new Set<() => void>();
++
++	/**
++	 * Calls `listener` whenever a job starts running as a background job: registered
++	 * as one, or promoted from a foreground call that outlived it (see
++	 * {@link AsyncJobManager.backgroundJob}). Foreground-backed jobs stay silent
++	 * until promoted, matching the listings. Returns the unsubscribe.
++	 */
++	onJobStarted(listener: () => void): () => void {
++		this.#startListeners.add(listener);
++		return () => {
++			this.#startListeners.delete(listener);
++		};
++	}
++
++	#notifyJobStarted(jobId: string): void {
++		for (const listener of this.#startListeners) {
++			try {
++				listener();
++			} catch (error) {
++				logger.warn("Async job start listener failed", {
++					jobId,
++					error: error instanceof Error ? error.message : String(error),
++				});
++			}
++		}
++	}
+ 
+ 	/**
+ 	 * Calls `listener` whenever a job settles (completed, failed or cancelled), so
+@@ -490,6 +517,7 @@ export class AsyncJobManager {
+ 		})();
+ 
+ 		this.#jobs.set(id, job);
++		if (!job.foreground) this.#notifyJobStarted(id);
+ 		return id;
+ 	}
+ 
+@@ -588,6 +616,7 @@ export class AsyncJobManager {
+ 		if (job.status === "completed" || job.status === "failed") {
+ 			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
+ 		}
++		if (job.status === "running") this.#notifyJobStarted(jobId);
+ 		return true;
+ 	}
+ 
+diff --git a/packages/coding-agent/src/launch/live-services.ts b/packages/coding-agent/src/launch/live-services.ts
+new file mode 100644
+index 0000000000..ca7cb57a71
+--- /dev/null
++++ b/packages/coding-agent/src/launch/live-services.ts
+@@ -0,0 +1,109 @@
++/**
++ * Running services of this process's sessions, kept so the TUI's Background tasks
++ * shelf can list them without asking the daemon broker. `services.ts` feeds it from
++ * every broker reply and completion notice it already handles, so it is as current as
++ * the session's own view of its services, and it never wakes an idle UI.
++ */
++import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
++import type { DaemonSnapshot, DaemonState } from "@oh-my-pi/pi-tui/tools/daemon";
++
++/** A running service as the Background tasks shelf lists it. */
++export interface LiveService {
++	/** Session that owns the service. */
++	readonly owner: string;
++	readonly name: string;
++	/** Daemon instance id; a restart under the same name is a new instance. */
++	readonly id: string;
++	readonly startedAt: number;
++	readonly state: DaemonState;
++	readonly pid?: number;
++	/** The shell command the session launched it with, known only for services it started itself. */
++	readonly command?: string;
++}
++
++/** Owner session id -> service name -> its latest known state. */
++const liveByOwner = new Map<string, Map<string, LiveService>>();
++const listeners = new Set<() => void>();
++
++function notify(): void {
++	for (const listener of listeners) listener();
++}
++
++/** Store `daemon` into `owned` without notifying; true when that changed the owner's services. */
++function storeService(
++	owned: Map<string, LiveService>,
++	owner: string,
++	daemon: DaemonSnapshot,
++	command: string | undefined,
++): boolean {
++	if (TERMINAL_STATES[daemon.state]) return owned.delete(daemon.name);
++	const previous = owned.get(daemon.name);
++	const next: LiveService = {
++		owner,
++		name: daemon.name,
++		id: daemon.id,
++		startedAt: daemon.startedAt,
++		state: daemon.state,
++		pid: daemon.pid,
++		// A later reply for the same instance carries no command; keep the one the launch recorded.
++		command: command ?? (previous?.id === daemon.id ? previous.command : undefined),
++	};
++	if (
++		previous &&
++		previous.id === next.id &&
++		previous.startedAt === next.startedAt &&
++		previous.state === next.state &&
++		previous.pid === next.pid &&
++		previous.command === next.command
++	) {
++		return false;
++	}
++	owned.set(daemon.name, next);
++	return true;
++}
++
++function ownedServices(owner: string): Map<string, LiveService> {
++	let owned = liveByOwner.get(owner);
++	if (!owned) {
++		owned = new Map();
++		liveByOwner.set(owner, owned);
++	}
++	return owned;
++}
++
++/** Record `daemon` as `owner`'s latest state for that service; a settled one is dropped. */
++export function recordLiveService(owner: string, daemon: DaemonSnapshot, command?: string): void {
++	if (storeService(ownedServices(owner), owner, daemon, command)) notify();
++}
++
++/** Replace `owner`'s services with the broker's list of them, dropping any the broker no longer knows. */
++export function replaceLiveServices(owner: string, daemons: readonly DaemonSnapshot[]): void {
++	const owned = ownedServices(owner);
++	let changed = false;
++	const listed = new Set(daemons.map(daemon => daemon.name));
++	for (const name of owned.keys()) {
++		if (!listed.has(name)) changed = owned.delete(name) || changed;
++	}
++	for (const daemon of daemons) changed = storeService(owned, owner, daemon, undefined) || changed;
++	if (changed) notify();
++}
++
++/** Forget every service of `owner`, e.g. when its session ends or switches. */
++export function clearLiveServices(owner: string): void {
++	const hadServices = (liveByOwner.get(owner)?.size ?? 0) > 0;
++	liveByOwner.delete(owner);
++	if (hadServices) notify();
++}
++
++/** Running services `owner` has, oldest first. */
++export function listLiveServices(owner: string): LiveService[] {
++	return [...(liveByOwner.get(owner)?.values() ?? [])].sort((a, b) => a.startedAt - b.startedAt);
++}
++
++/** Calls `listener` whenever a service starts, changes state or ends. Returns the unsubscribe. */
++export function onLiveServicesChanged(listener: () => void): () => void {
++	listeners.add(listener);
++	return () => {
++		listeners.delete(listener);
++	};
++}
+diff --git a/packages/coding-agent/src/launch/services.ts b/packages/coding-agent/src/launch/services.ts
+index 865ce7e70f..ad169ad81b 100644
+--- a/packages/coding-agent/src/launch/services.ts
++++ b/packages/coding-agent/src/launch/services.ts
+@@ -6,6 +6,7 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
+ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+ import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+ import { type DaemonBrokerClient, daemonClientForProject } from "./client";
++import { clearLiveServices, recordLiveService, replaceLiveServices } from "./live-services";
+ import { canonicalProjectDir } from "./paths";
+ import type { DaemonOperation, DaemonRpcResult } from "./protocol";
+ import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
+@@ -75,6 +76,7 @@ function track(session: ToolSession, daemon: DaemonSnapshot): void {
+ 	const services = serviceState(session).owned;
+ 	if (TERMINAL_STATES[daemon.state]) services.delete(daemon.name);
+ 	else services.set(daemon.name, { id: daemon.id, startedAt: daemon.startedAt });
++	if (owner) recordLiveService(owner, daemon);
+ }
+ 
+ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
+@@ -95,6 +97,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
+ 		unsubscribe({ preservePending: true });
+ 		clients.delete(client);
+ 		serviceState(session).owned.clear();
++		clearLiveServices(owner);
+ 		for (const listener of serviceState(session).listeners) listener();
+ 	});
+ 	session.registerSessionChangeCallback?.(() => {
+@@ -103,6 +106,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
+ 		unsubscribe({ preservePending: true });
+ 		clients.delete(client);
+ 		serviceState(session).owned.clear();
++		clearLiveServices(owner);
+ 		for (const listener of serviceState(session).listeners) listener();
+ 	});
+ }
+@@ -119,6 +123,12 @@ async function request(
+ 		const owner = serviceOwner(session);
+ 		serviceState(session).owned.clear();
+ 		for (const daemon of result.daemons) if (daemon.owner === owner) track(session, daemon);
++		if (owner) {
++			replaceLiveServices(
++				owner,
++				result.daemons.filter(daemon => daemon.owner === owner),
++			);
++		}
+ 	} else if ("daemon" in result) track(session, result.daemon);
+ 	return result;
+ }
+@@ -266,6 +276,9 @@ export async function startService(
+ 	);
+ 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
+ 	const launched = result.daemon;
++	const launchOwner = serviceOwner(session);
++	// Only a launch records its command: later replies for the same service carry just the snapshot.
++	if (launchOwner && launched.owner === launchOwner) recordLiveService(launchOwner, launched, params.command);
+ 	// A legacy broker ignores `awaitReady` and already waited: its result is
+ 	// ready, terminal, or timed out, so the wait phase is skipped.
+ 	if (
+diff --git a/packages/coding-agent/src/modes/controllers/input-controller.ts b/packages/coding-agent/src/modes/controllers/input-controller.ts
+index c9ce8e629b..24c0b632cc 100644
+--- a/packages/coding-agent/src/modes/controllers/input-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/input-controller.ts
+@@ -50,7 +50,7 @@ import { openLocalFileInEditor } from "../local-file-editor";
+ import { AgentRegistry } from "../../registry/agent-registry";
+ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+ import { USER_INTERRUPT_LABEL } from "../../session/messages";
+-import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
++import { PINNED_HUD_TOGGLE_ID, PINNED_JOBS_TOGGLE_ID } from "../../task/output-manager";
+ import { pickRecentFocusableAgentId } from "./session-focus-controller";
+ import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+ import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
+@@ -945,6 +945,10 @@ export class InputController {
+ 			this.ctx.togglePinnedHudExpanded();
+ 			return;
+ 		}
++		if (candidates.includes(PINNED_JOBS_TOGGLE_ID) && scoped.length === 0) {
++			this.ctx.togglePinnedJobsExpanded();
++			return;
++		}
+ 		// No global fallback: when every candidate is gone (aborted, released),
+ 		// focusing an unrelated recent agent would open something other than
+ 		// what the click displayed.
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index 0beefa60a6..77db4d204c 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -48,6 +48,7 @@ import {
+ 	latestJobWidget,
+ } from "@oh-my-pi/pi-tui/tools/job-widget";
+ import type { AsyncJobManager } from "../async/job-manager";
++import { listLiveServices, type LiveService, onLiveServicesChanged } from "../launch/live-services";
+ import type { JobWidgetRegistry } from "../job-widgets/types";
+ import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
+ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
+@@ -143,6 +144,7 @@ import { sumSubagentTreeCost } from "./agent-hub-runtime";
+ import {
+ 	type AgentSession,
+ 	type AgentSessionEvent,
++	type AsyncJobSnapshotItem,
+ 	type DroppedPrompt,
+ 	type ResolvedRoleModel,
+ 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
+@@ -288,7 +290,7 @@ import { statusLineHost } from "./status-line-host";
+ import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+ import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+ import { Composer, type ComposerPreferences, type ComposerStatusCache } from "@oh-my-pi/pi-tui/prompt/composer";
+-import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
++import { PINNED_HUD_TOGGLE_ID, PINNED_JOBS_TOGGLE_ID } from "../task/output-manager";
+ import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+ import { MAGIC_KEYWORDS } from "./magic-keywords";
+ import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
+@@ -380,6 +382,7 @@ import {
+ 	cfgDisplayCollapseCompacted,
+ 	cfgDisplayHideToolActivity,
+ 	cfgDisplayPinnedAgents,
++	cfgDisplayPinnedJobs,
+ 	cfgDisplayShowTokenUsage,
+ 	cfgDisplayShowTurnTime,
+ 	cfgDisplaySubagentLivePreview,
+@@ -465,6 +468,7 @@ const cfgLiveUiSettings = combine({
+ 	"tui.vimMode": cfgTuiVimMode,
+ 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+ 	"display.pinnedAgents": cfgDisplayPinnedAgents,
++	"display.pinnedJobs": cfgDisplayPinnedJobs,
+ 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
+ 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
+ 	"compaction.idleThresholdTokens": cfgCompactionIdleThresholdTokens,
+@@ -1017,15 +1021,23 @@ export class SubagentHudComponent implements Component {
+ 	#lines: readonly string[];
+ 	#order: readonly string[];
+ 	#toggleLine: number | undefined;
++	readonly #toggleId: string;
+ 	#physicalOwner?: (string | undefined)[];
+ 	#renderedWidth?: number;
+ 	#renderedRows = 0;
+ 	#renderedWidthConfigEpoch?: number;
+-	constructor(lines: readonly string[], order: readonly string[], toggleRow?: number) {
++	/** `toggleId` is the click target of the expander row; the Background tasks shelf passes its own. */
++	constructor(
++		lines: readonly string[],
++		order: readonly string[],
++		toggleRow?: number,
++		toggleId: string = PINNED_HUD_TOGGLE_ID,
++	) {
+ 		this.#text = new Text(lines.join("\n"), 1, 0);
+ 		this.#lines = lines;
+ 		this.#order = order;
+ 		this.#toggleLine = toggleRow;
++		this.#toggleId = toggleId;
+ 	}
+ 
+ 	/** Repaint in place with a new view; the click map rebuilds lazily. */
+@@ -1069,7 +1081,7 @@ export class SubagentHudComponent implements Component {
+ 		for (let index = 0; index < this.#lines.length; index++) {
+ 			const height = wrapTextWithAnsi(replaceTabs(this.#lines[index]!), contentWidth).length;
+ 			let id: string | undefined;
+-			if (this.#toggleLine !== undefined && index === this.#toggleLine) id = PINNED_HUD_TOGGLE_ID;
++			if (this.#toggleLine !== undefined && index === this.#toggleLine) id = this.#toggleId;
+ 			else {
+ 				const orderIndex = index - 2;
+ 				id = orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
+@@ -1078,7 +1090,7 @@ export class SubagentHudComponent implements Component {
+ 		}
+ 		if (owner.length !== renderedRows) {
+ 			this.#physicalOwner = this.#lines.map((_line, index) => {
+-				if (this.#toggleLine !== undefined && index === this.#toggleLine) return PINNED_HUD_TOGGLE_ID;
++				if (this.#toggleLine !== undefined && index === this.#toggleLine) return this.#toggleId;
+ 				const orderIndex = index - 2;
+ 				return orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
+ 			});
+@@ -1356,6 +1368,128 @@ export function renderSubagentHudLines(
+ 	return ["", header, ...itemLines, ...toggleRow];
+ }
+ 
++/** Columns between a Background tasks row's preview and its elapsed time. */
++const BACKGROUND_TASK_ELAPSED_GAP = 2;
++
++/** Most of a command or label read into a row's one-line preview; the row cuts it to width anyway. */
++const BACKGROUND_TASK_PREVIEW_MAX_CHARS = 512;
++
++/** One row of the Background tasks shelf: a running async job or service. */
++export interface BackgroundTaskRow {
++	/** Job id (`bg_12`) or service name. */
++	id: string;
++	/** Epoch ms the task started; the row's elapsed time counts from it. */
++	startTime: number;
++	/** Command or label the row previews. */
++	text: string;
++}
++
++/**
++ * Whether the Background tasks shelf lists `job`: a running backgrounded bash command
++ * or eval cell. Every `task` job is agent work (a subagent, a work-pool batch of
++ * them, a security scan, a `/tan` clone) that the Subagents shelf and the agent hub
++ * already show, so none is listed here.
++ */
++export function isHudBackgroundJob(job: AsyncJobSnapshotItem): boolean {
++	return job.status === "running" && job.type !== "task";
++}
++
++/** The shelf's rows, oldest first: the listed running jobs, then the running services, merged by start time. */
++export function backgroundTaskRows(
++	jobs: readonly AsyncJobSnapshotItem[],
++	services: readonly LiveService[],
++): BackgroundTaskRow[] {
++	const rows: BackgroundTaskRow[] = [];
++	for (const job of jobs) {
++		if (isHudBackgroundJob(job)) rows.push({ id: job.id, startTime: job.startTime, text: job.command ?? job.label });
++	}
++	for (const service of services) {
++		rows.push({
++			id: service.name,
++			startTime: service.startedAt,
++			text: service.command ?? `service ${service.state}`,
++		});
++	}
++	return rows.sort((a, b) => a.startTime - b.startTime);
++}
++
++/**
++ * Delay until the Background tasks shelf next needs a repaint with no job event to
++ * trigger it: a second (the Subagents live preview's cadence) while any row shows an
++ * elapsed time, none when nothing is listed so an idle UI arms no timer.
++ */
++export function nextBackgroundTasksTickMs(rowCount: number): number | undefined {
++	return rowCount > 0 ? SUBAGENT_PREVIEW_TICK_MS : undefined;
++}
++
++/**
++ * Build the anchored Background tasks shelf, which sits directly above the
++ * Subagents shelf and shares its look: a bold accent "Background tasks" header with
++ * a dim `· N running`, then tree rows shifted right by one space. A row is a dot,
++ * the task id in bold accent, a muted one-line preview of its command (newlines
++ * collapsed, control sequences stripped, home paths shortened) and its elapsed time,
++ * right-aligned and dim. Density follows `layoutPinnedHud`, so a long list collapses
++ * behind an expander. Returns an empty array when nothing is running so the
++ * container can clear.
++ */
++export function renderBackgroundJobsHudLines(
++	rows: readonly BackgroundTaskRow[],
++	columns: number,
++	expanded = false,
++	now = Date.now(),
++): string[] {
++	if (rows.length === 0) return [];
++	// `SubagentHudComponent` paints through `Text` with horizontal padding, so
++	// rows budgeted to the full terminal width would wrap.
++	const contentColumns = Math.max(0, columns - getPaddingX(1) * 2);
++	const layout = layoutPinnedHud(rows.length, expanded);
++	const dot = theme.styledSymbol("status.done", "accent");
++	const outerIndent = " ";
++	const treeRows = renderTreeList(
++		{
++			items: rows.slice(0, layout.itemRows),
++			expanded: true,
++			renderItem: (row, context) => {
++				const fullWidth = Math.max(0, contentColumns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
++				const head = `${dot} ${theme.fg("accent", theme.bold(row.id))}`;
++				const elapsed = theme.fg("dim", formatDuration(Math.max(0, now - row.startTime)));
++				// A row too narrow to keep the whole id beside its elapsed time drops the time, not the id.
++				const reserved = visibleWidth(elapsed) + BACKGROUND_TASK_ELAPSED_GAP;
++				const showElapsed = fullWidth - reserved >= visibleWidth(head);
++				const titleWidth = showElapsed ? fullWidth - reserved : fullWidth;
++				let line = truncateToWidth(head, titleWidth, "");
++				const preview = shortenEmbeddedPaths(
++					replaceTabs(sanitizeText(row.text.slice(0, BACKGROUND_TASK_PREVIEW_MAX_CHARS).trim())),
++				)
++					.replace(/\s*[\r\n]+\s*/g, " ↵ ")
++					.trim();
++				const budget = titleWidth - visibleWidth(line) - 1;
++				if (preview && budget > 0) line += ` ${theme.fg("muted", truncateToWidth(preview, budget))}`;
++				if (!showElapsed) return line;
++				return `${line}${" ".repeat(titleWidth - visibleWidth(line) + BACKGROUND_TASK_ELAPSED_GAP)}${elapsed}`;
++			},
++		},
++		theme,
++	);
++	const toggleRow =
++		layout.toggle === undefined
++			? []
++			: [
++					truncateToWidth(
++						`${outerIndent}${theme.fg(
++							"dim",
++							layout.toggle === "expand" ? `… ${rows.length - layout.itemRows} more — expand` : "… show less",
++						)}`,
++						contentColumns,
++						"",
++					),
++				];
++	const itemLines = treeRows.map(row => truncateToWidth(`${outerIndent}${row}`, contentColumns, ""));
++	const title = theme.bold(theme.fg("accent", "Background tasks"));
++	const runningLabel = theme.fg("dim", `${theme.sep.dot}${rows.length} running`);
++	return ["", truncateToWidth(`${title}${runningLabel}`, contentColumns), ...itemLines, ...toggleRow];
++}
++
+ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
+ 
+ /** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
+@@ -1384,6 +1518,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	/** Whether {@link statusContainer} rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
+ 	statusRowOccupied = false;
+ 	todoContainer: Container;
++	backgroundJobsContainer: Container;
+ 	subagentContainer: Container;
+ 	btwContainer: Container;
+ 	omfgContainer: Container;
+@@ -1595,7 +1730,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		if (this.#jobSettleListener?.manager !== manager) {
+ 			this.#jobSettleListener?.unsubscribe();
+ 			this.#jobSettleListener = manager
+-				? { manager, unsubscribe: manager.onJobSettled(() => this.ui.requestRender()) }
++				? { manager, unsubscribe: this.#followBackgroundJobs(manager) }
+ 				: undefined;
+ 		}
+ 	}
+@@ -1956,6 +2091,23 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.ui.requestRender();
+ 	}
+ 
++	/** Flip the Background tasks shelf between its collapsed few and the full list, overriding the setting. */
++	togglePinnedJobsExpanded(): void {
++		const mode = cfgDisplayPinnedJobs.get(settings);
++		const expanded = this.#pinnedJobsOverride ?? mode === "full";
++		this.#pinnedJobsOverride = !expanded;
++		this.#renderBackgroundJobsShelf();
++		this.ui.requestRender();
++	}
++
++	/** Rebuild the Background tasks shelf for a `display.pinnedJobs` change. */
++	applyPinnedJobsSetting(): void {
++		// Same as the Subagents shelf: an explicit settings change wins over click state.
++		this.#pinnedJobsOverride = undefined;
++		this.#renderBackgroundJobsShelf();
++		this.ui.requestRender();
++	}
++
+ 	setClickHoverId(id: string | undefined): void {
+ 		this.composer.setHoveredClickId(id);
+ 	}
+@@ -2001,6 +2153,11 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	#observerRegistry: SessionObserverRegistry;
+ 	/** Click override for the pinned jump-list density; undefined follows `display.pinnedAgents`. */
+ 	#pinnedHudOverride: boolean | undefined;
++	/** Click override for the Background tasks shelf density; undefined follows `display.pinnedJobs`. */
++	#pinnedJobsOverride: boolean | undefined;
++	/** Repaints the Background tasks shelf so elapsed times advance while a task runs. */
++	#backgroundJobsTickTimer?: NodeJS.Timeout;
++	#backgroundJobsHudKey = "";
+ 	#eventBus?: EventBus;
+ 	#subagentEventBus?: EventBus;
+ 	#eventBusUnsubscribers: Array<() => void> = [];
+@@ -2163,6 +2320,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.#eventBusUnsubscribers.push(onDownloadActivity(activity => this.#downloadActivityHud.update(activity)));
+ 		this.statusContainer = new StatusHudContainer(this);
+ 		this.todoContainer = new TodoHudContainer(this);
++		this.backgroundJobsContainer = new AnchoredLiveContainer();
+ 		this.subagentContainer = new AnchoredLiveContainer();
+ 		this.btwContainer = new AnchoredLiveContainer();
+ 		this.omfgContainer = new AnchoredLiveContainer();
+@@ -2500,6 +2658,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 				this.pendingShellContainer,
+ 				this.pendingMessagesContainer,
+ 				this.todoContainer,
++				this.backgroundJobsContainer,
+ 				this.subagentContainer,
+ 				this.btwContainer,
+ 				this.reportContainer,
+@@ -2545,6 +2704,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 				// their tallest (a restored todo list on resume), so it is never a baseline.
+ 				selfClearingChrome: [
+ 					this.todoContainer,
++					this.backgroundJobsContainer,
+ 					this.subagentContainer,
+ 					this.modelCycleContainer,
+ 					this.progressHudContainer,
+@@ -2622,6 +2782,13 @@ export class InteractiveMode implements InteractiveModeContext {
+ 				if (!paused) this.ui.requestRender();
+ 			}),
+ 		);
++		// `/pause` also stops the Background tasks elapsed tick; resuming repaints so times catch up.
++		this.#eventBusUnsubscribers.push(
++			agentPauseGate.onChange(paused => {
++				this.#renderBackgroundJobsShelf();
++				if (!paused) this.ui.requestRender();
++			}),
++		);
+ 		// Let the transient todo tool result light up pending todos executed by a
+ 		// live subagent, matching the sticky HUD's active set (#5873).
+ 		setActiveTodoDescriptionsProvider(() => this.#getActiveSubagentDescriptions());
+@@ -2822,6 +2989,13 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			this.#jobSettleListener?.unsubscribe();
+ 			this.#jobSettleListener = undefined;
+ 		});
++		// Services start and end outside the job manager; the launch layer reports them.
++		this.#eventBusUnsubscribers.push(
++			onLiveServicesChanged(() => {
++				if (this.#renderBackgroundJobsShelf()) this.ui.requestRender();
++			}),
++		);
++		this.#renderBackgroundJobsShelf();
+ 
+ 		this.#eventBusUnsubscribers.push(
+ 			this.session.subscribe(event => {
+@@ -4180,6 +4354,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		if (any("composer.shape")) this.syncComposerShape();
+ 		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
+ 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
++		if (any("display.pinnedJobs")) this.applyPinnedJobsSetting();
+ 		if (any("display.subagentLivePreview")) {
+ 			this.#renderSubagentList();
+ 			this.ui.requestRender();
+@@ -5025,6 +5200,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		}
+ 		this.#observerUiSyncNeedsTodoReconcile = false;
+ 		this.#cancelSubagentPreviewTick();
++		this.#cancelBackgroundJobsTick();
+ 	}
+ 
+ 	#renderTodoList(): void {
+@@ -5412,6 +5588,92 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		}
+ 	}
+ 
++	/**
++	 * Follow `manager` so the Background tasks shelf and the job counts repaint when a
++	 * job starts running or settles; returns the unsubscribe.
++	 */
++	#followBackgroundJobs(manager: AsyncJobManager): () => void {
++		const refresh = (): void => {
++			this.#renderBackgroundJobsShelf();
++			this.ui.requestRender();
++		};
++		const stopSettled = manager.onJobSettled(refresh);
++		const stopStarted = manager.onJobStarted(refresh);
++		return () => {
++			stopSettled();
++			stopStarted();
++		};
++	}
++
++	/**
++	 * Anchored shelf of running background tasks, directly above the Subagents shelf
++	 * and styled like it: the running bash and eval jobs of the viewed session and the
++	 * subagents under it (see `isHudBackgroundJob`) plus that session's services.
++	 * Driven by job start and settle events, so it clears itself once the last task ends.
++	 * While a task runs, a repaint is armed once a second to advance the elapsed times;
++	 * nothing is armed while the list is empty. Returns whether the shelf changed.
++	 */
++	#renderBackgroundJobsShelf(): boolean {
++		this.#cancelBackgroundJobsTick();
++		const view = this.#buildBackgroundJobsView();
++		if (!view) {
++			const changed = this.backgroundJobsContainer.children.length > 0;
++			if (changed) this.backgroundJobsContainer.clear();
++			this.#backgroundJobsHudKey = "";
++			return changed;
++		}
++		this.#armBackgroundJobsTick(view.tickMs);
++		const key = JSON.stringify([view.lines, view.toggleRow]);
++		if (key === this.#backgroundJobsHudKey && this.backgroundJobsContainer.children.length > 0) return false;
++		this.#backgroundJobsHudKey = key;
++		const hud = this.backgroundJobsContainer.children[0];
++		if (hud instanceof SubagentHudComponent) hud.update(view.lines, [], view.toggleRow);
++		else {
++			this.backgroundJobsContainer.addChild(
++				new SubagentHudComponent(view.lines, [], view.toggleRow, PINNED_JOBS_TOGGLE_ID),
++			);
++		}
++		return true;
++	}
++
++	/** Inputs for one shelf paint; undefined when the shelf is off or nothing is running. */
++	#buildBackgroundJobsView():
++		| { lines: string[]; toggleRow: number | undefined; tickMs: number | undefined }
++		| undefined {
++		const mode = cfgDisplayPinnedJobs.get(settings);
++		if (mode === "off") return undefined;
++		const viewed = this.viewSession;
++		const rows = backgroundTaskRows(
++			viewed.getAsyncJobTree({ recentLimit: 0 })?.running ?? [],
++			listLiveServices(viewed.sessionManager.getSessionId()),
++		);
++		const expanded = this.#pinnedJobsOverride ?? mode === "full";
++		const lines = renderBackgroundJobsHudLines(rows, this.ui.terminal.columns, expanded);
++		if (lines.length === 0) return undefined;
++		return {
++			lines,
++			toggleRow: layoutPinnedHud(rows.length, expanded).toggleRow,
++			tickMs: agentPauseGate.paused ? undefined : nextBackgroundTasksTickMs(rows.length),
++		};
++	}
++
++	#armBackgroundJobsTick(tickMs: number | undefined): void {
++		if (tickMs === undefined) return;
++		this.#backgroundJobsTickTimer = setTimeout(() => {
++			this.#backgroundJobsTickTimer = undefined;
++			this.#renderBackgroundJobsShelf();
++			this.ui.requestRender();
++		}, tickMs);
++		this.#backgroundJobsTickTimer.unref?.();
++	}
++
++	#cancelBackgroundJobsTick(): void {
++		if (this.#backgroundJobsTickTimer) {
++			clearTimeout(this.#backgroundJobsTickTimer);
++			this.#backgroundJobsTickTimer = undefined;
++		}
++	}
++
+ 	#vibeParentSession(): VibeParentSession {
+ 		return {
+ 			getAgentId: () => this.session.getAgentId() ?? null,
+@@ -9509,6 +9771,8 @@ export class InteractiveMode implements InteractiveModeContext {
+ 
+ 	async reloadTodos(source: AgentSession = this.session): Promise<void> {
+ 		await this.#loadTodoList(source);
++		// A session switch or focus change moves the viewed session, whose background tasks the shelf lists.
++		this.#renderBackgroundJobsShelf();
+ 		this.ui.requestRender();
+ 	}
+ 
+diff --git a/packages/coding-agent/src/modes/settings.ts b/packages/coding-agent/src/modes/settings.ts
+index bfed9f8c64..3b5700542e 100644
+--- a/packages/coding-agent/src/modes/settings.ts
++++ b/packages/coding-agent/src/modes/settings.ts
+@@ -640,6 +640,25 @@ export const cfgDisplayPinnedAgents = register({
+ 	},
+ });
+ 
++export const cfgDisplayPinnedJobs = register({
++	id: "display.pinnedJobs",
++	type: "enum",
++	values: ["off", "collapsed", "full"] as const,
++	default: "collapsed",
++	ui: {
++		tab: "appearance",
++		group: "Display",
++		label: "Pinned Background Tasks",
++		description:
++			"Pinned background-task shelf above the subagent shelf (off hides it; collapsed shows a few rows with an expander; full lists all)",
++		options: [
++			{ value: "off", label: "Off", description: "Hide the background-task shelf" },
++			{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
++			{ value: "full", label: "Full", description: "Always list every running background task" },
++		],
++	},
++});
++
+ export const cfgDisplaySubagentLivePreview = register({
+ 	id: "display.subagentLivePreview",
+ 	type: "boolean",
+diff --git a/packages/coding-agent/src/modes/types.ts b/packages/coding-agent/src/modes/types.ts
+index 2a0c3b08db..f3b33e0a2e 100644
+--- a/packages/coding-agent/src/modes/types.ts
++++ b/packages/coding-agent/src/modes/types.ts
+@@ -169,6 +169,7 @@ export interface InteractiveModeContext {
+ 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
+ 	readonly statusRowOccupied: boolean;
+ 	todoContainer: Container;
++	backgroundJobsContainer: Container;
+ 	subagentContainer: Container;
+ 	btwContainer: Container;
+ 	omfgContainer: Container;
+@@ -234,6 +235,8 @@ export interface InteractiveModeContext {
+ 	cancelLinkHints(): void;
+ 	/** Flip the pinned jump list between its collapsed few and the full list. */
+ 	togglePinnedHudExpanded(): void;
++	/** Flip the Background tasks shelf between its collapsed few and the full list. */
++	togglePinnedJobsExpanded(): void;
+ 	/** Point the inline hover band at a click-candidate id (or clear it). */
+ 	setClickHoverId(id: string | undefined): void;
+ 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. `viewOnly`
+diff --git a/packages/coding-agent/src/task/output-manager.ts b/packages/coding-agent/src/task/output-manager.ts
+index 23d4888556..54d64e3f46 100644
+--- a/packages/coding-agent/src/task/output-manager.ts
++++ b/packages/coding-agent/src/task/output-manager.ts
+@@ -14,6 +14,8 @@ import * as fs from "node:fs/promises";
+ import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
+ /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
+ export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
++/** Background tasks shelf expander click target, reserved the same way. */
++export const PINNED_JOBS_TOGGLE_ID = "@omp:toggle-pinned-jobs";
+ 
+ /**
+  * Manages agent output ID allocation to ensure uniqueness.
+@@ -40,6 +42,7 @@ export class AgentOutputManager {
+ 		// Reserve the pinned-HUD toggle sentinel the same way: a colliding agent
+ 		// id would be indistinguishable from the expander row in click routing.
+ 		this.#taken.add(PINNED_HUD_TOGGLE_ID);
++		this.#taken.add(PINNED_JOBS_TOGGLE_ID);
+ 	}
+ 
+ 	/**
+diff --git a/packages/coding-agent/test/background-jobs-shelf.test.ts b/packages/coding-agent/test/background-jobs-shelf.test.ts
+new file mode 100644
+index 0000000000..72a5cac85b
+--- /dev/null
++++ b/packages/coding-agent/test/background-jobs-shelf.test.ts
+@@ -0,0 +1,409 @@
++/**
++ * Contract: the pinned Background tasks shelf sits directly above the Subagents
++ * shelf, lists every running background job (bash commands, eval cells) and service
++ * but no job that merely runs a subagent, and clears itself once nothing runs. It
++ * follows `display.pinnedJobs`, collapses a long list like the Subagents shelf, and
++ * repaints elapsed times only while something runs.
++ */
++import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
++import * as path from "node:path";
++import { Agent } from "@oh-my-pi/pi-agent-core";
++import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { clearLiveServices, recordLiveService } from "@oh-my-pi/pi-coding-agent/launch/live-services";
++import {
++	backgroundTaskRows,
++	InteractiveMode,
++	isHudBackgroundJob,
++	nextBackgroundTasksTickMs,
++	renderBackgroundJobsHudLines,
++	SubagentHudComponent,
++} from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
++import { cfgDisplayPinnedJobs } from "@oh-my-pi/pi-coding-agent/modes/settings";
++import { type AsyncJobSnapshotItem, AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { type SubagentLifecyclePayload, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
++import { PINNED_JOBS_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
++import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
++import { initTheme } from "@oh-my-pi/pi-tui/theme";
++import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
++import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
++import { TempDir } from "@oh-my-pi/pi-utils";
++
++const NOW = 1_000_000;
++
++function job(overrides: Partial<AsyncJobSnapshotItem> & { id: string }): AsyncJobSnapshotItem {
++	return {
++		type: "bash",
++		status: "running",
++		label: overrides.id,
++		startTime: NOW - 5_000,
++		...overrides,
++	};
++}
++
++function shelfText(jobs: AsyncJobSnapshotItem[], columns = 120, expanded = false, now = NOW): string {
++	const rows = backgroundTaskRows(jobs, []);
++	return Bun.stripANSI(renderBackgroundJobsHudLines(rows, columns, expanded, now).join("\n"));
++}
++
++describe("Background tasks shelf lines", () => {
++	beforeAll(async () => {
++		await initTheme();
++	});
++
++	it("shows a running job's id, command preview and elapsed time", () => {
++		const text = shelfText([
++			job({
++				id: "bg_1099",
++				command: "cargo build --release",
++				label: "cargo build...",
++				startTime: NOW - 125_000,
++			}),
++		]);
++		expect(text).toContain("bg_1099");
++		expect(text).toContain("cargo build --release");
++		expect(text).toContain("2m5s");
++	});
++
++	it("falls back to the label when the job runs no process", () => {
++		expect(shelfText([job({ id: "eval_1", type: "eval", label: "load fixtures" })])).toContain("load fixtures");
++	});
++
++	it("collapses newlines, strips control sequences and shortens home paths in the preview", () => {
++		const home = process.env.HOME ?? "/home/user";
++		const command = `\x1b[31mecho one\x1b[0m\n\necho two ${home}/project/file.txt`;
++		const lines = renderBackgroundJobsHudLines(
++			backgroundTaskRows([job({ id: "bg_1", command })], []),
++			160,
++			false,
++			NOW,
++		);
++		const text = Bun.stripANSI(lines.join("\n"));
++		expect(lines.every(line => !line.includes("\n"))).toBe(true);
++		expect(text).toContain("echo one");
++		expect(text).toContain("echo two");
++		expect(text).not.toContain("\x1b[31m");
++		expect(text).not.toContain(home);
++	});
++
++	it("right-aligns the elapsed time after the preview", () => {
++		const text = shelfText([job({ id: "bg_1", command: "make", startTime: NOW - 61_000 })], 80);
++		const row = text.split("\n").find(line => line.includes("bg_1"));
++		expect(row).toBeDefined();
++		expect(row?.trimEnd().endsWith("1m1s")).toBe(true);
++	});
++
++	it("does not list task jobs, which are agent work the Subagents shelf covers", () => {
++		const jobs = [
++			job({ id: "Scout", type: "task", agentId: "Scout" }),
++			job({ id: "bg_2", command: "sleep 60" }),
++			job({ id: "batch-1", type: "task", label: "work pool batch" }),
++			job({ id: "eval_3", type: "eval", label: "warm cache" }),
++		];
++		expect(jobs.map(isHudBackgroundJob)).toEqual([false, true, false, true]);
++		const text = shelfText(jobs);
++		expect(text).toContain("bg_2");
++		expect(text).toContain("eval_3");
++		expect(text).not.toContain("Scout");
++		expect(text).not.toContain("batch-1");
++	});
++
++	it("does not list settled jobs", () => {
++		expect(isHudBackgroundJob(job({ id: "bg_3", status: "completed" }))).toBe(false);
++		expect(isHudBackgroundJob(job({ id: "bg_4", status: "failed" }))).toBe(false);
++		expect(isHudBackgroundJob(job({ id: "bg_5", status: "cancelled" }))).toBe(false);
++	});
++
++	it("renders nothing when no task runs", () => {
++		expect(renderBackgroundJobsHudLines(backgroundTaskRows([], []), 120, false, NOW)).toEqual([]);
++		expect(
++			renderBackgroundJobsHudLines(backgroundTaskRows([job({ id: "bg_6", status: "completed" })], []), 120),
++		).toEqual([]);
++	});
++
++	it("lists jobs and services oldest first", () => {
++		const rows = backgroundTaskRows(
++			[job({ id: "bg_late", startTime: NOW - 1_000 }), job({ id: "bg_early", startTime: NOW - 9_000 })],
++			[{ owner: "s", name: "dev-server", id: "d1", startedAt: NOW - 4_000, state: "ready", command: "npm run dev" }],
++		);
++		expect(rows.map(row => row.id)).toEqual(["bg_early", "dev-server", "bg_late"]);
++		expect(rows[1]?.text).toBe("npm run dev");
++	});
++
++	it("never overflows a narrow terminal", () => {
++		const jobs = [
++			job({
++				id: "bg_1099",
++				command: "cd /var/tmp/wt-yaml && cargo build 2>&1 | tail -1; ".repeat(6),
++				startTime: NOW - 400_000,
++			}),
++			job({ id: "a-rather-long-service-name-for-a-row", command: "x", startTime: NOW - 2_000 }),
++			job({ id: "bg_3", command: "sleep 9" }),
++			job({ id: "bg_4", command: "sleep 9" }),
++		];
++		for (const columns of [60, 40, 24, 14, 8]) {
++			for (const expanded of [false, true]) {
++				const rows = renderBackgroundJobsHudLines(backgroundTaskRows(jobs, []), columns, expanded, NOW);
++				const painted = new SubagentHudComponent(rows, [], undefined, PINNED_JOBS_TOGGLE_ID).render(columns);
++				for (const row of painted) expect(visibleWidth(row)).toBeLessThanOrEqual(columns);
++			}
++		}
++	});
++
++	it("keeps the id and drops the elapsed time when a row is too narrow for both", () => {
++		const text = shelfText([job({ id: "bg_1099", command: "sleep 5", startTime: NOW - 61_000 })], 16);
++		expect(text).toContain("bg_1099");
++		expect(text).not.toContain("1m1s");
++	});
++
++	it("collapses a long list behind an expander and lists everything when expanded", () => {
++		const jobs = Array.from({ length: 5 }, (_, index) =>
++			job({ id: `bg_${index + 1}`, command: `job ${index}`, startTime: NOW - (10 - index) * 1_000 }),
++		);
++		const collapsed = shelfText(jobs);
++		expect(collapsed).toContain("bg_3");
++		expect(collapsed).not.toContain("bg_4");
++		expect(collapsed).toContain("2 more");
++
++		const expanded = shelfText(jobs, 120, true);
++		expect(expanded).toContain("bg_5");
++		expect(expanded).not.toContain("2 more");
++	});
++
++	it("resolves the expander row to its own click target", () => {
++		const rows = backgroundTaskRows(
++			Array.from({ length: 4 }, (_, index) => job({ id: `bg_${index + 1}` })),
++			[],
++		);
++		const lines = renderBackgroundJobsHudLines(rows, 120, false, NOW);
++		const toggleRow = lines.length - 1;
++		const component = new SubagentHudComponent(lines, [], toggleRow, PINNED_JOBS_TOGGLE_ID);
++		component.render(120);
++		expect(component.getClickAgentAtRow(toggleRow)).toBe(PINNED_JOBS_TOGGLE_ID);
++		expect(component.getClickAgentAtRow(2)).toBeUndefined();
++	});
++
++	it("arms a repaint only while something runs", () => {
++		expect(nextBackgroundTasksTickMs(0)).toBeUndefined();
++		expect(nextBackgroundTasksTickMs(1)).toBeGreaterThan(0);
++	});
++});
++
++describe("InteractiveMode Background tasks shelf", () => {
++	let tempDir: TempDir;
++	let authStorage: AuthStorage;
++	let manager: AsyncJobManager;
++	let session: AgentSession;
++	let mode: InteractiveMode;
++	let eventBus: EventBus;
++	let gate: PromiseWithResolvers<string>;
++
++	const shelf = () => Bun.stripANSI(mode.backgroundJobsContainer.render(120).join("\n"));
++	const subagents = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
++	const startBash = (command: string, label = command): string =>
++		manager.register("bash", label, () => gate.promise, {
++			ownerId: "main",
++			process: { command, cwd: "/tmp", pids: () => [] },
++		});
++
++	beforeAll(async () => {
++		await initTheme();
++	});
++
++	beforeEach(async () => {
++		resetSettingsForTest();
++		tempDir = TempDir.createSync("@pi-background-shelf-");
++		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "startup.quiet": true } });
++		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
++		const modelRegistry = new ModelRegistry(authStorage);
++		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
++		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
++		gate = Promise.withResolvers<string>();
++		setSystemTime(NOW);
++		eventBus = new EventBus();
++		manager = new AsyncJobManager({});
++		session = new AgentSession({
++			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
++			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
++			settings: Settings.isolated({ "startup.quiet": true }),
++			modelRegistry,
++			asyncJobManager: manager,
++			agentId: "main",
++		});
++		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, eventBus);
++	});
++
++	afterEach(async () => {
++		// Teardown awaits real timers (job manager dispose), so fake ones go first.
++		vi.useRealTimers();
++		clearLiveServices(session.sessionManager.getSessionId());
++		mode?.stop();
++		gate.resolve("done");
++		manager.cancelAll();
++		await manager.dispose({ timeoutMs: 1_000 });
++		await session?.dispose();
++		authStorage?.close();
++		tempDir?.removeSync();
++		setSystemTime();
++		vi.restoreAllMocks();
++		resetSettingsForTest();
++	});
++
++	it("appears when a job starts and clears when it settles", async () => {
++		await mode.init({ suppressWelcomeIntro: true });
++		expect(mode.backgroundJobsContainer.render(120)).toEqual([]);
++
++		const id = startBash("cargo test --workspace --no-fail-fast", "cargo test...");
++		expect(shelf()).toContain(id);
++		expect(shelf()).toContain("cargo test --workspace --no-fail-fast");
++
++		gate.resolve("done");
++		await manager.getJob(id)?.promise;
++		expect(mode.backgroundJobsContainer.render(120)).toEqual([]);
++	});
++
++	it("shows a foreground-backed command only once it is promoted to the background", async () => {
++		await mode.init({ suppressWelcomeIntro: true });
++		const id = manager.register("bash", "make all", () => gate.promise, { ownerId: "main", foreground: true });
++		expect(mode.backgroundJobsContainer.render(120)).toEqual([]);
++
++		manager.backgroundJob(id);
++		expect(shelf()).toContain(id);
++	});
++
++	it("lists an eval cell by its label and leaves a subagent's job to the Subagents shelf", async () => {
++		await mode.init({ suppressWelcomeIntro: true });
++		manager.register("eval", "warm the cache", () => gate.promise, { ownerId: "main" });
++		manager.register("task", "Scout", () => gate.promise, { ownerId: "main", agentId: "Scout" });
++
++		expect(shelf()).toContain("warm the cache");
++		expect(shelf()).not.toContain("Scout");
++	});
++
++	it("lists a service the session owns and drops it when it ends", async () => {
++		await mode.init({ suppressWelcomeIntro: true });
++		const owner = session.sessionManager.getSessionId();
++		const daemon: DaemonSnapshot = {
++			name: "dev-server",
++			id: "daemon-1",
++			state: "ready",
++			createdAt: NOW - 30_000,
++			startedAt: NOW - 30_000,
++			restartCount: 0,
++			outputBytes: 0,
++			owner,
++			persist: false,
++			detached: false,
++		};
++		recordLiveService(owner, daemon, "npm run dev");
++		expect(shelf()).toContain("dev-server");
++		expect(shelf()).toContain("npm run dev");
++		expect(shelf()).toContain("30.0s");
++
++		recordLiveService(owner, { ...daemon, state: "exited" });
++		expect(mode.backgroundJobsContainer.render(120)).toEqual([]);
++	});
++
++	it("sits directly above the Subagents shelf, and both show at once", async () => {
++		const setRuntimeChildren = vi.spyOn(mode.composer, "setRuntimeChildren");
++		await mode.init({ suppressWelcomeIntro: true });
++		const order = setRuntimeChildren.mock.calls[0]?.[0] ?? [];
++		expect(order.indexOf(mode.backgroundJobsContainer)).toBeGreaterThanOrEqual(0);
++		expect(order.indexOf(mode.backgroundJobsContainer) + 1).toBe(order.indexOf(mode.subagentContainer));
++
++		vi.useFakeTimers();
++		const lifecycle: SubagentLifecyclePayload = {
++			id: "Scout",
++			index: 0,
++			agent: "task",
++			agentSource: "bundled",
++			description: "scan the repo",
++			status: "started",
++			parentToolCallId: "tool-call",
++			detached: true,
++		};
++		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle);
++		await Promise.resolve();
++		vi.advanceTimersByTime(100);
++		const id = startBash("sleep 600");
++
++		expect(shelf()).toContain(id);
++		expect(subagents()).toContain("Scout");
++		expect(shelf()).not.toContain("Scout");
++		expect(subagents()).not.toContain(id);
++	});
++
++	it("is hidden by display.pinnedJobs=off and returns when the setting changes back", async () => {
++		cfgDisplayPinnedJobs.override(Settings.instance, "off");
++		await mode.init({ suppressWelcomeIntro: true });
++		const id = startBash("sleep 600");
++		expect(mode.backgroundJobsContainer.render(120)).toEqual([]);
++
++		cfgDisplayPinnedJobs.override(Settings.instance, "collapsed");
++		mode.applyPinnedJobsSetting();
++		expect(shelf()).toContain(id);
++
++		cfgDisplayPinnedJobs.override(Settings.instance, "off");
++		mode.applyPinnedJobsSetting();
++		expect(mode.backgroundJobsContainer.render(120)).toEqual([]);
++	});
++
++	it("collapses behind an expander, and a click override gives way to the setting", async () => {
++		await mode.init({ suppressWelcomeIntro: true });
++		const ids = Array.from({ length: 5 }, (_, index) => startBash(`job ${index}`));
++		expect(shelf()).toContain(ids[2]!);
++		expect(shelf()).not.toContain(ids[4]!);
++
++		mode.togglePinnedJobsExpanded();
++		expect(shelf()).toContain(ids[4]!);
++
++		mode.applyPinnedJobsSetting();
++		expect(shelf()).not.toContain(ids[4]!);
++	});
++
++	it("advances elapsed times once a second while a task runs, and stays quiet when none does", async () => {
++		await mode.init({ suppressWelcomeIntro: true });
++		vi.useFakeTimers({ now: NOW });
++		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
++		// A cancelled job settles without queueing a result delivery. A delivery queued while fake timers
++		// are active would park on a timer that never fires, and `session.dispose` would wait on it.
++		const id = manager.register(
++			"bash",
++			"sleep 600",
++			({ signal }) =>
++				new Promise<string>((_resolve, reject) => {
++					signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
++				}),
++			{ ownerId: "main", process: { command: "sleep 600", cwd: "/tmp", pids: () => [] } },
++		);
++		const hud = mode.backgroundJobsContainer.children[0];
++		expect(shelf()).toContain("0ms");
++
++		vi.advanceTimersByTime(1_000);
++		expect(mode.backgroundJobsContainer.children[0]).toBe(hud);
++		expect(shelf()).toContain("1.0s");
++
++		vi.advanceTimersByTime(1_000);
++		expect(shelf()).toContain("2.0s");
++
++		manager.cancel(id);
++		await manager.getJob(id)?.promise;
++		expect(mode.backgroundJobsContainer.render(120)).toEqual([]);
++		requestRender.mockClear();
++		vi.advanceTimersByTime(60_000);
++		expect(requestRender).not.toHaveBeenCalled();
++	});
++
++	it("arms no timer while nothing runs", async () => {
++		await mode.init({ suppressWelcomeIntro: true });
++		vi.useFakeTimers();
++		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
++		mode.applyPinnedJobsSetting();
++		requestRender.mockClear();
++		vi.advanceTimersByTime(30_000);
++		expect(requestRender).not.toHaveBeenCalled();
++	});
++});

@@ -18,6 +18,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0005-task-model-price-tiers`|`model` can be `$` to `$$$$`. Tiers are quarters of the price across all loaded chat models. Usage from `stats.db` breaks ties, weighted exact model over family over provider. `$$$$` is very rare.|
 |`0006-subagent-shelf-usage`|Each row in the pinned subagent shelf shows that subagent's total tokens and API cost.|
 |`0007-task-model-switch`|Change a running subagent's model mid-run: `write proc://<id>/model` for the main agent (role, tier or exact ID), and `/switch` inside the subagent view for you.|
+|`0008-background-tasks-shelf`|A `Background tasks` shelf above `Subagents` lists running backgrounded bash commands, eval cells and services, with id, command and elapsed time. `display.pinnedJobs` sets it to `collapsed`, `full` or `off`.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
@@ -42,6 +43,8 @@ just install    # ~/.local/bin/omp
 |`host` (default)|Cargo build for this machine. No Bazel.|
 |`bazel`|Both Linux x64 addons through Bazel, as release CI does.|
 |`prebuilt`|Copy `pi_natives.*.node` from `NATIVES_DIR`. Use only for the same upstream version.|
+
+The build uses the Bun version upstream asks for in `packageManager`. If the system Bun is older, `build/bun` gets a private copy and the system Bun stays as it is.
 
 `revision` holds the fork revision. The binary reports `X.Y.Z-fork.N`. Raise `N` when you ship changed patches for an
 upstream version you already shipped.
