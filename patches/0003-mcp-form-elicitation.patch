@@ -1,0 +1,988 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index fca9ab2039..bb6a410bad 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -6,6 +6,7 @@
+ 
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
++- Answer MCP form elicitation requests (`elicitation/create`) with a dialog. Dismissing the dialog, or having no screen, cancels the request and never accepts it. URL mode is refused.
+ 
+ ### Changed
+ 
+diff --git a/packages/coding-agent/src/mcp/client.ts b/packages/coding-agent/src/mcp/client.ts
+index 65e7c9d782..efec9f79a6 100644
+--- a/packages/coding-agent/src/mcp/client.ts
++++ b/packages/coding-agent/src/mcp/client.ts
+@@ -92,6 +92,8 @@ async function initializeConnection(
+ 	transport: MCPTransport,
+ 	options?: {
+ 		signal?: AbortSignal;
++		/** Declare form elicitation. Set only when a person can answer the server's questions. */
++		elicitation?: boolean;
+ 		/** Called after notifications/initialized succeeds. */
+ 		onInitialized?: () => void | Promise<void>;
+ 	},
+@@ -100,6 +102,7 @@ async function initializeConnection(
+ 		protocolVersion: MCP_PROTOCOL_VERSION,
+ 		capabilities: {
+ 			roots: { listChanged: false },
++			...(options?.elicitation ? { elicitation: { form: {} } } : {}),
+ 		},
+ 		clientInfo: CLIENT_INFO,
+ 	};
+@@ -153,6 +156,11 @@ export async function connectToServer(
+ 	config: MCPServerConfig,
+ 	options?: {
+ 		signal?: AbortSignal;
++		/**
++		 * Declare form elicitation. Only honoured together with `onRequest`, which must answer
++		 * `elicitation/create`. Set it only when a person can see and answer the questions.
++		 */
++		elicitation?: boolean;
+ 		onNotification?: (method: string, params: unknown) => void;
+ 		onRequest?: (method: string, params: unknown) => Promise<unknown>;
+ 	},
+@@ -185,6 +193,7 @@ export async function connectToServer(
+ 			signal.throwIfAborted();
+ 			const initResult = await initializeConnection(transport, {
+ 				signal,
++				elicitation: options?.elicitation === true && options.onRequest !== undefined,
+ 				async onInitialized() {
+ 					// Open the optional GET SSE stream only after the initialized
+ 					// notification makes the session ready for further traffic.
+diff --git a/packages/coding-agent/src/mcp/elicitation.ts b/packages/coding-agent/src/mcp/elicitation.ts
+new file mode 100644
+index 0000000000..a57386bea7
+--- /dev/null
++++ b/packages/coding-agent/src/mcp/elicitation.ts
+@@ -0,0 +1,402 @@
++/**
++ * MCP form elicitation.
++ *
++ * A server can ask the person using the client a question mid-call (`elicitation/create`). This is
++ * how a gateway such as Executor asks "may I run this action?". The answer must come from a person,
++ * so anything that is not an explicit answer is a `cancel`: no UI, a dismissed dialog, a bad schema
++ * or a failure never becomes an `accept`. Dialogs carry no timeout for the same reason.
++ */
++import type { ExtensionUIContext } from "../extensibility/extensions/types";
++import type { MCPElicitationParams, MCPElicitationProperty, MCPElicitationResult, MCPElicitationValue } from "./types";
++
++/** The dialogs a question needs. Narrower than the whole UI context so tests can script them. */
++export type ElicitationDialogs = Pick<ExtensionUIContext, "select" | "input" | "notify">;
++
++const MAX_MESSAGE_CHARS = 2000;
++const MAX_TITLE_CHARS = 200;
++const MAX_ATTEMPTS = 5;
++const JSON_RPC_INVALID_PARAMS = -32602;
++
++const ACCEPT = "Accept";
++const DECLINE = "Decline";
++const ANSWER = "Answer the questions";
++const SUBMIT = "Submit";
++const DONE = "Done";
++const SKIP = "(skip)";
++const YES = "Yes";
++const NO = "No";
++
++/**
++ * Text from a server is shown in a terminal. Strip control characters, including the escape that
++ * starts terminal sequences, so a server cannot repaint the screen or hide part of its own question.
++ */
++function clean(text: unknown, limit: number): string {
++	const raw = typeof text === "string" ? text : "";
++	const stripped = raw.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
++	return stripped.length > limit ? `${stripped.slice(0, limit - 1)}\u2026` : stripped;
++}
++
++class ElicitationSchemaError extends Error {
++	readonly code = JSON_RPC_INVALID_PARAMS;
++}
++
++interface Choice {
++	value: string;
++	label: string;
++}
++
++interface FieldBase {
++	key: string;
++	title: string;
++	description: string;
++	required: boolean;
++}
++
++type Field =
++	| (FieldBase & { kind: "boolean"; default?: boolean })
++	| (FieldBase & {
++			kind: "string";
++			default?: string;
++			minLength?: number;
++			maxLength?: number;
++			format?: string;
++	  })
++	| (FieldBase & { kind: "number"; integer: boolean; default?: number; minimum?: number; maximum?: number })
++	| (FieldBase & { kind: "choice"; choices: Choice[]; default?: string })
++	| (FieldBase & {
++			kind: "multi";
++			choices: Choice[];
++			default?: string[];
++			minItems?: number;
++			maxItems?: number;
++	  });
++
++function readChoices(property: MCPElicitationProperty, key: string): Choice[] | undefined {
++	if (property.oneOf) {
++		return property.oneOf.map(option => ({
++			value: option.const,
++			label: clean(option.title ?? option.const, MAX_TITLE_CHARS),
++		}));
++	}
++	if (property.enum) {
++		return property.enum.map((value, index) => ({
++			value,
++			label: clean(property.enumNames?.[index] ?? value, MAX_TITLE_CHARS),
++		}));
++	}
++	if (property.type === "array") {
++		const items = property.items;
++		if (items?.anyOf) {
++			return items.anyOf.map(option => ({
++				value: option.const,
++				label: clean(option.title ?? option.const, MAX_TITLE_CHARS),
++			}));
++		}
++		if (items?.enum) return items.enum.map(value => ({ value, label: clean(value, MAX_TITLE_CHARS) }));
++		throw new ElicitationSchemaError(`Field "${key}" is an array without enum items.`);
++	}
++	return undefined;
++}
++
++/** Turn the flat JSON Schema a server sends into fields. Anything the spec does not allow is refused. */
++function readFields(params: MCPElicitationParams): Field[] {
++	const properties = params.requestedSchema?.properties ?? {};
++	const required = new Set(params.requestedSchema?.required ?? []);
++	const fields: Field[] = [];
++	for (const [key, property] of Object.entries(properties)) {
++		const base: FieldBase = {
++			key,
++			title: clean(property.title ?? key, MAX_TITLE_CHARS) || key,
++			description: clean(property.description, MAX_MESSAGE_CHARS),
++			required: required.has(key),
++		};
++		const choices = readChoices(property, key);
++		if (property.type === "array") {
++			fields.push({
++				...base,
++				kind: "multi",
++				choices: choices ?? [],
++				...(Array.isArray(property.default) ? { default: property.default.map(String) } : {}),
++				...(property.minItems === undefined ? {} : { minItems: property.minItems }),
++				...(property.maxItems === undefined ? {} : { maxItems: property.maxItems }),
++			});
++		} else if (choices) {
++			fields.push({
++				...base,
++				kind: "choice",
++				choices,
++				...(typeof property.default === "string" ? { default: property.default } : {}),
++			});
++		} else if (property.type === "boolean") {
++			fields.push({
++				...base,
++				kind: "boolean",
++				...(typeof property.default === "boolean" ? { default: property.default } : {}),
++			});
++		} else if (property.type === "number" || property.type === "integer") {
++			fields.push({
++				...base,
++				kind: "number",
++				integer: property.type === "integer",
++				...(typeof property.default === "number" ? { default: property.default } : {}),
++				...(property.minimum === undefined ? {} : { minimum: property.minimum }),
++				...(property.maximum === undefined ? {} : { maximum: property.maximum }),
++			});
++		} else if (property.type === "string") {
++			fields.push({
++				...base,
++				kind: "string",
++				...(typeof property.default === "string" ? { default: property.default } : {}),
++				...(property.minLength === undefined ? {} : { minLength: property.minLength }),
++				...(property.maxLength === undefined ? {} : { maxLength: property.maxLength }),
++				...(property.format === undefined ? {} : { format: property.format }),
++			});
++		} else {
++			throw new ElicitationSchemaError(`Field "${key}" has an unsupported type.`);
++		}
++	}
++	return fields;
++}
++
++const FORMAT_CHECKS: Record<string, (text: string) => boolean> = {
++	email: text => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text),
++	uri: text => URL.canParse(text),
++	date: text => /^\d{4}-\d{2}-\d{2}$/.test(text) && !Number.isNaN(Date.parse(text)),
++	"date-time": text => !Number.isNaN(Date.parse(text)),
++};
++
++/** A reason the text is not acceptable, or undefined when it is. */
++function stringProblem(field: Extract<Field, { kind: "string" }>, text: string): string | undefined {
++	if (field.minLength !== undefined && text.length < field.minLength) {
++		return `At least ${field.minLength} characters.`;
++	}
++	if (field.maxLength !== undefined && text.length > field.maxLength) {
++		return `At most ${field.maxLength} characters.`;
++	}
++	const check = field.format ? FORMAT_CHECKS[field.format] : undefined;
++	if (check && !check(text)) return `Not a valid ${field.format}.`;
++	return undefined;
++}
++
++function numberProblem(field: Extract<Field, { kind: "number" }>, text: string): string | number {
++	const value = Number(text);
++	if (text.trim() === "" || !Number.isFinite(value)) return "Enter a number.";
++	if (field.integer && !Number.isInteger(value)) return "Enter a whole number.";
++	if (field.minimum !== undefined && value < field.minimum) return `At least ${field.minimum}.`;
++	if (field.maximum !== undefined && value > field.maximum) return `At most ${field.maximum}.`;
++	return value;
++}
++
++/** What a question returned: an answer, "no answer, leave it out", or the person backed out. */
++type Asked = { kind: "value"; value: MCPElicitationValue } | { kind: "skip" } | { kind: "cancel" };
++
++const CANCEL: Asked = { kind: "cancel" };
++
++function heading(field: Field): string {
++	return field.description
++		? `${field.title}${field.required ? "" : " (optional)"}\n${field.description}`
++		: `${field.title}${field.required ? "" : " (optional)"}`;
++}
++
++function labels(choices: Choice[]): string[] {
++	const seen = new Set<string>();
++	return choices.map(choice => {
++		// Two options can share a title. Add the value so the person can tell them apart.
++		const label = seen.has(choice.label) ? `${choice.label} (${choice.value})` : choice.label;
++		seen.add(choice.label);
++		return label;
++	});
++}
++
++async function askChoice(ui: ElicitationDialogs, field: Extract<Field, { kind: "choice" }>): Promise<Asked> {
++	const shown = labels(field.choices);
++	const options = field.required ? shown : [...shown, SKIP];
++	const initial = field.default === undefined ? undefined : field.choices.findIndex(c => c.value === field.default);
++	const picked = await ui.select(
++		heading(field),
++		options,
++		initial !== undefined && initial >= 0 ? { initialIndex: initial } : undefined,
++	);
++	if (picked === undefined) return CANCEL;
++	if (picked === SKIP) return { kind: "skip" };
++	const index = shown.indexOf(picked);
++	const choice = field.choices[index];
++	return choice ? { kind: "value", value: choice.value } : CANCEL;
++}
++
++async function askMulti(ui: ElicitationDialogs, field: Extract<Field, { kind: "multi" }>): Promise<Asked> {
++	const shown = labels(field.choices);
++	const chosen = new Set<number>(
++		(field.default ?? []).map(value => field.choices.findIndex(c => c.value === value)).filter(i => i >= 0),
++	);
++	for (let attempt = 0; attempt < 100; attempt += 1) {
++		const options = [...shown.map((label, i) => `${chosen.has(i) ? "[x]" : "[ ]"} ${label}`), DONE];
++		const picked = await ui.select(`${heading(field)}\nSelect each one you want, then choose ${DONE}.`, options);
++		if (picked === undefined) return CANCEL;
++		if (picked === DONE) {
++			const count = chosen.size;
++			if (field.minItems !== undefined && count < field.minItems) {
++				ui.notify(`Choose at least ${field.minItems}.`, "warning");
++				continue;
++			}
++			if (field.maxItems !== undefined && count > field.maxItems) {
++				ui.notify(`Choose at most ${field.maxItems}.`, "warning");
++				continue;
++			}
++			if (count === 0 && !field.required) return { kind: "skip" };
++			const value = [...chosen]
++				.sort((a, b) => a - b)
++				.flatMap(i => (field.choices[i] ? [field.choices[i].value] : []));
++			return { kind: "value", value };
++		}
++		const index = options.indexOf(picked);
++		if (index < 0 || index >= shown.length) return CANCEL;
++		if (chosen.has(index)) chosen.delete(index);
++		else chosen.add(index);
++	}
++	return CANCEL;
++}
++
++async function askText(ui: ElicitationDialogs, field: Extract<Field, { kind: "string" | "number" }>): Promise<Asked> {
++	const hint = field.default === undefined ? "" : ` Press Enter for ${String(field.default)}.`;
++	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
++		const text = await ui.input(heading(field), hint.trim() || undefined);
++		if (text === undefined) return CANCEL;
++		let value: string | number;
++		if (text === "") {
++			if (field.default !== undefined) return { kind: "value", value: field.default };
++			if (!field.required) return { kind: "skip" };
++			ui.notify(`${field.title} is required.`, "warning");
++			continue;
++		}
++		let problem: string | undefined;
++		if (field.kind === "number") {
++			const parsed = numberProblem(field, text);
++			if (typeof parsed === "string") problem = parsed;
++			value = typeof parsed === "number" ? parsed : 0;
++			if (!problem) return { kind: "value", value };
++		} else {
++			problem = stringProblem(field, text);
++			if (!problem) return { kind: "value", value: text };
++		}
++		ui.notify(problem ?? "Not valid.", "warning");
++	}
++	return CANCEL;
++}
++
++async function askField(ui: ElicitationDialogs, field: Field): Promise<Asked> {
++	switch (field.kind) {
++		case "boolean": {
++			const options = field.default === false ? [NO, YES] : [YES, NO];
++			const picked = await ui.select(heading(field), options);
++			if (picked === undefined) return CANCEL;
++			return { kind: "value", value: picked === YES };
++		}
++		case "choice":
++			return askChoice(ui, field);
++		case "multi":
++			return askMulti(ui, field);
++		default:
++			return askText(ui, field);
++	}
++}
++
++function show(value: MCPElicitationValue, field: Field): string {
++	if (Array.isArray(value)) {
++		const names = value.map(v => {
++			const choice = field.kind === "multi" ? field.choices.find(c => c.value === v) : undefined;
++			return choice?.label ?? v;
++		});
++		return names.join(", ") || "(none)";
++	}
++	if (field.kind === "choice") return field.choices.find(c => c.value === value)?.label ?? String(value);
++	return String(value);
++}
++
++/** Run one form: ask, review, answer. Never returns `accept` without an explicit yes. */
++export async function runElicitationForm(
++	ui: ElicitationDialogs,
++	serverName: string,
++	params: MCPElicitationParams,
++): Promise<MCPElicitationResult> {
++	const fields = readFields(params);
++	const message = clean(params.message, MAX_MESSAGE_CHARS);
++	const title = `MCP server "${clean(serverName, MAX_TITLE_CHARS)}" asks:\n${message}`;
++
++	if (fields.length === 0) {
++		const picked = await ui.select(title, [ACCEPT, DECLINE]);
++		if (picked === ACCEPT) return { action: "accept", content: {} };
++		return { action: picked === DECLINE ? "decline" : "cancel" };
++	}
++
++	const outline = fields.map(field => `- ${field.title}${field.required ? "" : " (optional)"}`).join("\n");
++	const gate = await ui.select(`${title}\n\nIt wants to know:\n${outline}`, [ANSWER, DECLINE]);
++	if (gate !== ANSWER) return { action: gate === DECLINE ? "decline" : "cancel" };
++
++	const content: Record<string, MCPElicitationValue> = {};
++	for (const field of fields) {
++		const asked = await askField(ui, field);
++		if (asked.kind === "cancel") return { action: "cancel" };
++		if (asked.kind === "value") content[field.key] = asked.value;
++	}
++
++	const review = fields
++		.filter(field => content[field.key] !== undefined)
++		.map(field => `- ${field.title}: ${show(content[field.key] as MCPElicitationValue, field)}`)
++		.join("\n");
++	const final = await ui.select(
++		`Send these answers to "${clean(serverName, MAX_TITLE_CHARS)}"?\n${review || "(no answers)"}`,
++		[SUBMIT, DECLINE],
++	);
++	if (final === SUBMIT) return { action: "accept", content };
++	return { action: final === DECLINE ? "decline" : "cancel" };
++}
++
++/**
++ * Holds the current dialogs and answers `elicitation/create` for every server. Questions are asked
++ * one at a time, so two servers cannot put dialogs on top of each other.
++ */
++export class ElicitationBroker {
++	#ui: ElicitationDialogs | undefined;
++	#tail: Promise<unknown> = Promise.resolve();
++
++	/** Set when the session has a screen a person can answer on. Clear it when it goes away. */
++	setUI(ui: ElicitationDialogs | undefined): void {
++		this.#ui = ui;
++	}
++
++	get hasUI(): boolean {
++		return this.#ui !== undefined;
++	}
++
++	handle(serverName: string, params: unknown): Promise<MCPElicitationResult> {
++		const run = this.#tail.then(
++			() => this.#ask(serverName, params),
++			() => this.#ask(serverName, params),
++		);
++		this.#tail = run.catch(() => undefined);
++		return run;
++	}
++
++	async #ask(serverName: string, params: unknown): Promise<MCPElicitationResult> {
++		const request = params as Partial<MCPElicitationParams> | null;
++		if (typeof request !== "object" || request === null || typeof request.message !== "string") {
++			throw Object.assign(new Error("elicitation/create needs a message."), { code: JSON_RPC_INVALID_PARAMS });
++		}
++		if (request.mode !== undefined && request.mode !== "form") {
++			// Only form mode is declared. A server that sends another mode gets a clear refusal.
++			throw Object.assign(new Error(`Elicitation mode "${String(request.mode)}" is not supported.`), {
++				code: JSON_RPC_INVALID_PARAMS,
++			});
++		}
++		const ui = this.#ui;
++		if (!ui) return { action: "cancel" };
++		try {
++			return await runElicitationForm(ui, serverName, request as MCPElicitationParams);
++		} catch (error) {
++			if (error instanceof ElicitationSchemaError) throw error;
++			// A failing dialog is not an answer.
++			return { action: "cancel" };
++		}
++	}
++}
+diff --git a/packages/coding-agent/src/mcp/manager.ts b/packages/coding-agent/src/mcp/manager.ts
+index f93cb7183c..77ec6353ba 100644
+--- a/packages/coding-agent/src/mcp/manager.ts
++++ b/packages/coding-agent/src/mcp/manager.ts
+@@ -11,6 +11,7 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+ import { resolveConfigValue } from "../config/resolve-config-value";
+ import type { CustomTool } from "../extensibility/custom-tools/types";
++import { ElicitationBroker, type ElicitationDialogs } from "./elicitation";
+ import type { AuthStorage } from "../session/auth-storage";
+ import {
+ 	MCPConnectionTimeoutError,
+@@ -351,6 +352,11 @@ export class MCPManager {
+ 	 */
+ 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
+ 
++	/** Whether new connections declare form elicitation. Set only for sessions that can show a dialog. */
++	#elicitationEnabled = false;
++	/** Answers `elicitation/create` for every server, one question at a time. */
++	readonly #elicitation = new ElicitationBroker();
++
+ 	constructor(
+ 		private cwd: string,
+ 		private toolCache: MCPToolCache | null = null,
+@@ -596,6 +602,22 @@ export class MCPManager {
+ 			});
+ 	}
+ 
++	/**
++	 * Let servers ask the user questions (form elicitation). Affects connections made after the call,
++	 * because the capability is declared at initialize. Enable it only for a session with a screen.
++	 */
++	setElicitationEnabled(enabled: boolean): void {
++		this.#elicitationEnabled = enabled;
++	}
++
++	/**
++	 * Dialogs for answering elicitation. Without them, every question is cancelled, never accepted.
++	 * Pass undefined when the screen goes away.
++	 */
++	setElicitationUI(ui: ElicitationDialogs | undefined): void {
++		this.#elicitation.setUI(ui);
++	}
++
+ 	setNotificationsEnabled(enabled: boolean): void {
+ 		const wasEnabled = this.#notificationsEnabled;
+ 		this.#notificationsEnabled = enabled;
+@@ -855,8 +877,9 @@ export class MCPManager {
+ 						this.#handleServerNotification(name, method, params);
+ 					},
+ 					onRequest: (method, params) => {
+-						return this.#handleServerRequest(method, params);
++						return this.#handleServerRequest(name, method, params);
+ 					},
++					elicitation: this.#elicitationEnabled,
+ 				});
+ 			})().then(
+ 				async connection => {
+@@ -1150,12 +1173,15 @@ export class MCPManager {
+ 	}
+ 
+ 	/** Handle server-to-client JSON-RPC requests (e.g. ping, roots/list). */
+-	async #handleServerRequest(method: string, _params: unknown): Promise<unknown> {
++	async #handleServerRequest(serverName: string, method: string, params: unknown): Promise<unknown> {
+ 		switch (method) {
+ 			case "ping":
+ 				return {};
+ 			case "roots/list":
+ 				return this.#getRoots();
++			case "elicitation/create":
++				// Declared only for sessions with a screen. Anything a person does not answer is a cancel.
++				return this.#elicitation.handle(serverName, params);
+ 			default:
+ 				throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
+ 		}
+@@ -1703,8 +1729,9 @@ export class MCPManager {
+ 				this.#handleServerNotification(name, method, params);
+ 			},
+ 			onRequest: (method, params) => {
+-				return this.#handleServerRequest(method, params);
++				return this.#handleServerRequest(name, method, params);
+ 			},
++			elicitation: this.#elicitationEnabled,
+ 		});
+ 
+ 		connection.config = config;
+diff --git a/packages/coding-agent/src/mcp/types.ts b/packages/coding-agent/src/mcp/types.ts
+index 1c03ae05d2..7f16ef6a92 100644
+--- a/packages/coding-agent/src/mcp/types.ts
++++ b/packages/coding-agent/src/mcp/types.ts
+@@ -202,9 +202,49 @@ export interface MCPImplementation {
+ export interface MCPClientCapabilities {
+ 	roots?: { listChanged?: boolean };
+ 	sampling?: Record<string, never>;
++	/** Form-mode elicitation: the server may ask the user questions through this client. */
++	elicitation?: { form?: Record<string, never> };
+ 	experimental?: Record<string, unknown>;
+ }
+ 
++/** One property of a form elicitation schema (the flat subset the MCP spec allows). */
++export interface MCPElicitationProperty {
++	type?: "string" | "number" | "integer" | "boolean" | "array";
++	title?: string;
++	description?: string;
++	default?: unknown;
++	enum?: string[];
++	enumNames?: string[];
++	oneOf?: Array<{ const: string; title?: string }>;
++	minLength?: number;
++	maxLength?: number;
++	format?: string;
++	minimum?: number;
++	maximum?: number;
++	minItems?: number;
++	maxItems?: number;
++	items?: { enum?: string[]; anyOf?: Array<{ const: string; title?: string }> };
++}
++
++/** Params of a server's `elicitation/create` request. */
++export interface MCPElicitationParams {
++	mode?: "form" | "url";
++	message: string;
++	requestedSchema?: {
++		type?: "object";
++		properties?: Record<string, MCPElicitationProperty>;
++		required?: string[];
++	};
++}
++
++export type MCPElicitationValue = string | number | boolean | string[];
++
++/** The client's answer. Only `accept` carries `content`. */
++export interface MCPElicitationResult {
++	action: "accept" | "decline" | "cancel";
++	content?: Record<string, MCPElicitationValue>;
++}
++
+ /** MCP server capabilities */
+ export interface MCPServerCapabilities {
+ 	tools?: { listChanged?: boolean };
+diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
+index 8a0bf56cda..b379d77e16 100644
+--- a/packages/coding-agent/src/sdk.ts
++++ b/packages/coding-agent/src/sdk.ts
+@@ -2700,6 +2700,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				const cacheStorage = settings.getStorage();
+ 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+ 				mcpManager.setAuthStorage(authStorage);
++				// This branch only runs for sessions with a screen (`hasUI`), so servers may ask the user questions.
++				mcpManager.setElicitationEnabled(true);
+ 				toolSession.mcpManager = mcpManager;
+ 
+ 				if (cfgMcpNotifications.get(settings)) {
+@@ -4542,6 +4544,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 
+ 		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
+ 			toolContextStore.setUIContext(uiContext, hasUI);
++			// A subagent borrows its parent's manager and must not replace the parent's dialogs.
++			if (mcpManager && !options.mcpManager) mcpManager.setElicitationUI(hasUI ? uiContext : undefined);
+ 		};
+ 
+ 		const initialTools = initialToolNames
+diff --git a/packages/coding-agent/test/mcp-elicitation.test.ts b/packages/coding-agent/test/mcp-elicitation.test.ts
+new file mode 100644
+index 0000000000..9b05d189e2
+--- /dev/null
++++ b/packages/coding-agent/test/mcp-elicitation.test.ts
+@@ -0,0 +1,359 @@
++import { afterEach, describe, expect, it } from "bun:test";
++import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
++import { ElicitationBroker, type ElicitationDialogs } from "@oh-my-pi/pi-coding-agent/mcp/elicitation";
++import type { MCPElicitationResult } from "@oh-my-pi/pi-coding-agent/mcp/types";
++
++const encoder = new TextEncoder();
++
++let server: Bun.Server<undefined> | null = null;
++
++afterEach(() => {
++	server?.stop(true);
++	server = null;
++});
++
++interface Reply {
++	result?: unknown;
++	error?: { code: number; message: string };
++}
++
++interface TestServer {
++	url: string;
++	/** `initialize` params the client sent. */
++	initialize: () => { capabilities: Record<string, unknown> } | undefined;
++}
++
++/**
++ * A minimal MCP server over Streamable HTTP. `tools/call` asks the client `elicitation/create` on
++ * the response stream, waits for the client's reply, then returns that reply as the tool result.
++ */
++function startServer(elicitation: Record<string, unknown>): TestServer {
++	let initializeParams: { capabilities: Record<string, unknown> } | undefined;
++	const replies = new Map<string, PromiseWithResolvers<Reply>>();
++	server = Bun.serve({
++		port: 0,
++		async fetch(req) {
++			if (req.method === "GET") return new Response(null, { status: 405 });
++			if (req.method === "DELETE") return new Response(null, { status: 204 });
++			const body = (await req.json()) as {
++				id?: string | number;
++				method?: string;
++				params?: { capabilities: Record<string, unknown> };
++				result?: unknown;
++				error?: { code: number; message: string };
++			};
++
++			// A response to the request the server sent.
++			if (body.method === undefined && body.id !== undefined) {
++				replies.get(String(body.id))?.resolve({ result: body.result, error: body.error });
++				return new Response(null, { status: 202 });
++			}
++			if (body.method === "initialize") {
++				initializeParams = body.params;
++				return Response.json(
++					{
++						jsonrpc: "2.0",
++						id: body.id,
++						result: {
++							protocolVersion: "2025-11-25",
++							capabilities: { tools: {} },
++							serverInfo: { name: "elicit-test", version: "1.0.0" },
++						},
++					},
++					{ headers: { "Mcp-Session-Id": "elicit-test" } },
++				);
++			}
++			if (body.method === "tools/call") {
++				const pending = Promise.withResolvers<Reply>();
++				replies.set("ask-1", pending);
++				const stream = new ReadableStream<Uint8Array>({
++					async start(controller) {
++						const send = (message: unknown) =>
++							controller.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`));
++						send({ jsonrpc: "2.0", id: "ask-1", method: "elicitation/create", params: elicitation });
++						const reply = await pending.promise;
++						send({ jsonrpc: "2.0", id: body.id, result: { content: [], reply } });
++						controller.close();
++					},
++				});
++				return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
++			}
++			return new Response(null, { status: 202 });
++		},
++	});
++	return {
++		url: `http://127.0.0.1:${server.port}/mcp`,
++		initialize: () => initializeParams,
++	};
++}
++
++/** Answers dialogs from a script. A `undefined` entry is a dismissed dialog (Escape). */
++function scriptedDialogs(selects: Array<string | undefined>, inputs: Array<string | undefined> = []) {
++	const shown: string[] = [];
++	const notices: string[] = [];
++	const dialogs: ElicitationDialogs = {
++		select: async (title, options) => {
++			shown.push(`${title}\n${options.map(o => (typeof o === "string" ? o : o.label)).join(" | ")}`);
++			return selects.shift();
++		},
++		input: async title => {
++			shown.push(title);
++			return inputs.shift();
++		},
++		notify: message => {
++			notices.push(message);
++		},
++	};
++	return { dialogs, shown, notices };
++}
++
++async function askThroughServer(
++	elicitation: Record<string, unknown>,
++	broker: ElicitationBroker,
++): Promise<{ reply: Reply & MCPElicitationResult; server: TestServer }> {
++	const test = startServer(elicitation);
++	const connection = await connectToServer(
++		"elicit-test",
++		{ type: "http", url: test.url, timeout: 5000 },
++		{
++			elicitation: true,
++			onRequest: async (method, params) => {
++				if (method === "elicitation/create") return broker.handle("elicit-test", params);
++				return {};
++			},
++		},
++	);
++	try {
++		const out = await connection.transport.request<{ reply: Reply & MCPElicitationResult }>("tools/call", {
++			name: "ask",
++			arguments: {},
++		});
++		return { reply: out.reply, server: test };
++	} finally {
++		await connection.transport.close();
++	}
++}
++
++describe("MCP form elicitation: capability", () => {
++	it("declares form elicitation only when asked to and a handler exists", async () => {
++		const on = startServer({ message: "x" });
++		const connectedOn = await connectToServer(
++			"on",
++			{ type: "http", url: on.url, timeout: 5000 },
++			{ elicitation: true, onRequest: async () => ({}) },
++		);
++		await connectedOn.transport.close();
++		expect(on.initialize()?.capabilities.elicitation).toEqual({ form: {} });
++		expect(on.initialize()?.capabilities.roots).toEqual({ listChanged: false });
++		server?.stop(true);
++
++		const off = startServer({ message: "x" });
++		const connectedOff = await connectToServer(
++			"off",
++			{ type: "http", url: off.url, timeout: 5000 },
++			{ onRequest: async () => ({}) },
++		);
++		await connectedOff.transport.close();
++		expect(off.initialize()?.capabilities.elicitation).toBeUndefined();
++		server?.stop(true);
++
++		// A flag with no handler would leave the server's question unanswered, so it is not declared.
++		const orphan = startServer({ message: "x" });
++		const connectedOrphan = await connectToServer(
++			"orphan",
++			{ type: "http", url: orphan.url, timeout: 5000 },
++			{ elicitation: true },
++		);
++		await connectedOrphan.transport.close();
++		expect(orphan.initialize()?.capabilities.elicitation).toBeUndefined();
++	});
++});
++
++describe("MCP form elicitation: a server asks, a person answers", () => {
++	it("accepts an approval only when the person picks Accept", async () => {
++		const broker = new ElicitationBroker();
++		const ui = scriptedDialogs(["Accept"]);
++		broker.setUI(ui.dialogs);
++		const { reply } = await askThroughServer(
++			{ message: "Send this email to Sam?", requestedSchema: { type: "object", properties: {} } },
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "accept", content: {} });
++		expect(ui.shown[0]).toContain('MCP server "elicit-test" asks:');
++		expect(ui.shown[0]).toContain("Send this email to Sam?");
++	});
++
++	it("declines when the person picks Decline", async () => {
++		const broker = new ElicitationBroker();
++		broker.setUI(scriptedDialogs(["Decline"]).dialogs);
++		const { reply } = await askThroughServer(
++			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "decline" });
++	});
++
++	it("cancels, never accepts, when the dialog is dismissed", async () => {
++		const broker = new ElicitationBroker();
++		broker.setUI(scriptedDialogs([undefined]).dialogs);
++		const { reply } = await askThroughServer(
++			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "cancel" });
++	});
++
++	it("cancels when there is no screen to ask on", async () => {
++		const broker = new ElicitationBroker();
++		const { reply } = await askThroughServer(
++			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "cancel" });
++	});
++
++	it("cancels when the dialog throws", async () => {
++		const broker = new ElicitationBroker();
++		broker.setUI({
++			select: async () => {
++				throw new Error("the screen went away");
++			},
++			input: async () => undefined,
++			notify: () => {},
++		});
++		const { reply } = await askThroughServer(
++			{ message: "Delete it?", requestedSchema: { type: "object", properties: {} } },
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "cancel" });
++	});
++
++	it("collects typed answers, rejects bad ones, and asks again", async () => {
++		const broker = new ElicitationBroker();
++		const ui = scriptedDialogs(
++			["Answer the questions", "Production", "Yes", "Submit"],
++			["abc", "7.5", "7", "me@example.com"],
++		);
++		broker.setUI(ui.dialogs);
++		const { reply } = await askThroughServer(
++			{
++				message: "Provision a database",
++				requestedSchema: {
++					type: "object",
++					properties: {
++						replicas: { type: "integer", title: "Replicas", minimum: 1, maximum: 9 },
++						env: {
++							type: "string",
++							title: "Environment",
++							oneOf: [
++								{ const: "prod", title: "Production" },
++								{ const: "dev", title: "Development" },
++							],
++						},
++						backups: { type: "boolean", title: "Enable backups" },
++						owner: { type: "string", title: "Owner email", format: "email" },
++					},
++					required: ["replicas", "env", "backups", "owner"],
++				},
++			},
++			broker,
++		);
++		expect(reply.result).toEqual({
++			action: "accept",
++			content: { replicas: 7, env: "prod", backups: true, owner: "me@example.com" },
++		});
++		expect(ui.notices).toEqual(["Enter a number.", "Enter a whole number."]);
++		// The person sees their answers before anything is sent.
++		expect(ui.shown.at(-1)).toContain("- Replicas: 7");
++		expect(ui.shown.at(-1)).toContain("- Environment: Production");
++	});
++
++	it("cancels when the person backs out partway through", async () => {
++		const broker = new ElicitationBroker();
++		broker.setUI(scriptedDialogs(["Answer the questions"], [undefined]).dialogs);
++		const { reply } = await askThroughServer(
++			{
++				message: "Name it",
++				requestedSchema: {
++					type: "object",
++					properties: { name: { type: "string", title: "Name" } },
++					required: ["name"],
++				},
++			},
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "cancel" });
++	});
++
++	it("does not accept when the final review is dismissed", async () => {
++		const broker = new ElicitationBroker();
++		broker.setUI(scriptedDialogs(["Answer the questions", undefined], ["hello"]).dialogs);
++		const { reply } = await askThroughServer(
++			{
++				message: "Name it",
++				requestedSchema: {
++					type: "object",
++					properties: { name: { type: "string", title: "Name" } },
++					required: ["name"],
++				},
++			},
++			broker,
++		);
++		expect(reply.result).toEqual({ action: "cancel" });
++	});
++
++	it("refuses URL mode and a schema it cannot ask, with an invalid-params error", async () => {
++		const broker = new ElicitationBroker();
++		broker.setUI(scriptedDialogs(["Accept"]).dialogs);
++		const url = await askThroughServer({ mode: "url", message: "Sign in", url: "https://example.com" }, broker);
++		expect(url.reply.error?.code).toBe(-32602);
++
++		server?.stop(true);
++		const bad = await askThroughServer(
++			{ message: "Odd", requestedSchema: { type: "object", properties: { nested: { type: "object" } } } },
++			broker,
++		);
++		expect(bad.reply.error?.code).toBe(-32602);
++	});
++
++	it("strips terminal control sequences from what the server says", async () => {
++		const broker = new ElicitationBroker();
++		const ui = scriptedDialogs(["Decline"]);
++		broker.setUI(ui.dialogs);
++		await askThroughServer(
++			{ message: "Harmless\u001b[2J\u001b[31m text\u0007", requestedSchema: { type: "object", properties: {} } },
++			broker,
++		);
++		expect(ui.shown[0]).not.toContain("\u001b");
++		expect(ui.shown[0]).not.toContain("\u0007");
++		expect(ui.shown[0]).toContain("Harmless[2J[31m text");
++	});
++
++	it("asks one question at a time when two servers ask together", async () => {
++		const broker = new ElicitationBroker();
++		const order: string[] = [];
++		const gate = Promise.withResolvers<string | undefined>();
++		const firstOpened = Promise.withResolvers<void>();
++		broker.setUI({
++			select: async title => {
++				order.push(`open:${title.includes("first") ? "first" : "second"}`);
++				if (title.includes("first")) firstOpened.resolve();
++				if (title.includes("first")) return gate.promise;
++				return "Accept";
++			},
++			input: async () => undefined,
++			notify: () => {},
++		});
++		const schema = { type: "object", properties: {} };
++		const first = broker.handle("a", { message: "first", requestedSchema: schema });
++		const second = broker.handle("b", { message: "second", requestedSchema: schema });
++		await firstOpened.promise;
++		// Let the queue run as far as it can. If it were not serial, the second dialog would open here.
++		for (let tick = 0; tick < 20; tick++) await Promise.resolve();
++		expect(order).toEqual(["open:first"]);
++		gate.resolve("Decline");
++		expect(await first).toEqual({ action: "decline" });
++		expect(await second).toEqual({ action: "accept", content: {} });
++		expect(order).toEqual(["open:first", "open:second"]);
++	});
++});

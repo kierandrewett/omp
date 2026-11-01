@@ -1,0 +1,168 @@
+diff --git a/docs/tools/task.md b/docs/tools/task.md
+index 0b2dd8fac9..6bbad6cd50 100644
+--- a/docs/tools/task.md
++++ b/docs/tools/task.md
+@@ -66,7 +66,7 @@ Restricted folders cover task files as well as the working directory. `always-as
+ 
+ Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. A user-tagged `^provider/model` agent grants its tagged model for per-call selection, subject to `task.perCallModelAllow`. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
+ 
+-When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models from the operator's settings and the narrowing allowlist; project settings never add a model and can only narrow the list.
++When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models from the operator's settings and the narrowing allowlist; project settings never add a model and can only narrow the list. The task description lists each configured role as `@role` with its model, tells the agent to pass the role when the user names a model or tier (never a guessed version or ID), to omit `model` when the user names none, and to call `ask` with the roles as options when it cannot tell which model the user means.
+ 
+ Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape. Settled results report the requested and actual model; extension routing, auth fallback, and runtime retry fallback can switch the actual model under the existing policies.
+ 
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index bb6a410bad..a7e80ac7c9 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -7,6 +7,7 @@
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
+ - Answer MCP form elicitation requests (`elicitation/create`) with a dialog. Dismissing the dialog, or having no screen, cancels the request and never accepts it. URL mode is refused.
++- The task tool description now lists your model roles as `@role` and tells agents to pass the role when you name a model or tier such as "haiku", instead of guessing a model version. When the agent cannot tell which model you mean, it asks with the `ask` tool.
+ 
+ ### Changed
+ 
+diff --git a/packages/coding-agent/src/prompts/tools/task.md b/packages/coding-agent/src/prompts/tools/task.md
+index a75b459f99..d61d6708e7 100644
+--- a/packages/coding-agent/src/prompts/tools/task.md
++++ b/packages/coding-agent/src/prompts/tools/task.md
+@@ -22,7 +22,13 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
+ {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
+ {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
+ {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
+-{{/if}}{{#if perCallModelEnabled}}`model`: one exact `provider/model-id[@upstream][:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. `@upstream` pins an aggregator route and is part of the model identity. A role named below may be written as `@role` and resolves to its current approved model. Only operator-approved models; no arrays, globs or partial IDs. Approved: {{#list perCallModelAdvertisement.roles join=", "}}{{#list patterns join=", "}}`{{this}}`{{/list}} ({{role}}){{/list}}{{#if perCallModelAdvertisement.roles.length}}; {{/if}}{{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model. A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.{{#if perCallModelAdvertisement.allowlist.length}} Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).{{/if}} An agent's `task.agentModelOverrides` entry conflicts with `model`. Omit to let automatic selection pick a configured role from the task; if none is usable, the agent's normal routing applies. Requested model unavailable → stop and report; NEVER substitute another. Every request requires an approved model; retry fallback, context promotion and prewalk are off.
++{{/if}}{{#if perCallModelEnabled}}`model`: for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Pick in this order:
++1. User names a model or tier ("haiku", "use sonnet", "the cheap one") → pass the configured role of that name as `@role`. A role is the user's own choice of model for that name. NEVER swap in a version or ID you know (not `claude-haiku-4-5` for "haiku"), and never a bare word.
++2. User names none → omit `model`; automatic selection picks a configured role from the task. If none is usable, the agent's normal routing applies.
++3. Exact `provider/model-id[@upstream][:level]` only when the user typed that exact ID. `@upstream` pins an aggregator route and is part of the model identity.
++Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{/list}}{{else}}none{{/if}}.
++Unsure (wording fits several roles or none, or the user's intent is unclear)? Do not guess: call `ask` with the roles as options before spawning, if you have `ask`. Rare. NEVER ask when one role clearly matches.
++Only operator-approved models; no arrays, globs or partial IDs. Also approved: {{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model. A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.{{#if perCallModelAdvertisement.allowlist.length}} Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).{{/if}} An agent's `task.agentModelOverrides` entry conflicts with `model`. Requested model unavailable → stop and report; NEVER substitute another. Every request requires an approved model; retry fallback, context promotion and prewalk are off.
+ {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
+ {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
+ {{else}}`isolated`: worktree; changes retained, not applied.
+diff --git a/packages/coding-agent/test/task/task-model-roles-prompt.test.ts b/packages/coding-agent/test/task/task-model-roles-prompt.test.ts
+new file mode 100644
+index 0000000000..008d7fa6cc
+--- /dev/null
++++ b/packages/coding-agent/test/task/task-model-roles-prompt.test.ts
+@@ -0,0 +1,41 @@
++import { afterEach, describe, expect, it, vi } from "bun:test";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
++import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
++import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++
++const ROLES = { haiku: "anthropic/claude-haiku-5-5", sonnet: "anthropic/claude-sonnet-5-5" };
++
++async function describeTool(overrides: Record<string, unknown>): Promise<string> {
++	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
++		agents: [{ name: "task", description: "General-purpose task agent", systemPrompt: "s", source: "bundled" }],
++		projectAgentsDir: null,
++	});
++	const session = {
++		cwd: "/tmp/omp-task-model-roles-prompt",
++		hasUI: false,
++		settings: Settings.isolated({ modelRoles: ROLES, ...overrides }),
++		getSessionFile: () => null,
++		getSessionSpawns: () => "*",
++		getSessionAgents: () => [],
++	} as unknown as ToolSession;
++	return (await TaskTool.create(session)).description;
++}
++
++describe("task description model roles", () => {
++	afterEach(() => {
++		vi.restoreAllMocks();
++	});
++
++	it("shows the operator's roles as @role with their models when per-call models are on", async () => {
++		const description = await describeTool({ "task.perCallModel": "on" });
++		expect(description).toContain("`@haiku` = `anthropic/claude-haiku-5-5`");
++		expect(description).toContain("`@sonnet` = `anthropic/claude-sonnet-5-5`");
++	});
++
++	it("does not mention roles or `model` when per-call models are off", async () => {
++		const description = await describeTool({ "task.perCallModel": "off" });
++		expect(description).not.toContain("@haiku");
++		expect(description).not.toContain("`model`:");
++	});
++});
+diff --git a/packages/coding-agent/test/task/task-schema.test.ts b/packages/coding-agent/test/task/task-schema.test.ts
+index e7e39014b0..ab57e2b3d9 100644
+--- a/packages/coding-agent/test/task/task-schema.test.ts
++++ b/packages/coding-agent/test/task/task-schema.test.ts
+@@ -297,14 +297,14 @@ describe("task spawn validation", () => {
+ 		};
+ 		for (const mode of ["off", "eval"]) {
+ 			const text = await description(mode);
+-			for (const guidance of ["`model`: one exact", "anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) {
++			for (const guidance of ["`model`: for this spawn only", "anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) {
+ 				expect(text).not.toContain(guidance);
+ 			}
+ 		}
+ 		const text = await description("on");
+-		expect(text).toContain("`model`: one exact");
++		expect(text).toContain("`model`: for this spawn only");
+ 		// The allowlist admits only slow's model; smol's would be refused at dispatch.
+-		expect(text).toContain("`openai/gpt-5.5` (slow)");
++		expect(text).toContain("`@slow` = `openai/gpt-5.5`");
+ 		expect(text).not.toContain("anthropic/claude-haiku-4-5");
+ 	});
+ 
+@@ -330,7 +330,17 @@ describe("task spawn validation", () => {
+ 		);
+ 		const text = tool.description;
+ 		for (const advertised of ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) expect(text).toContain(advertised);
+-		for (const omitted of ["hidden/image", "hidden/judge", "`@smol`", "`pi/slow`", "`*`", "`default`", "`inherit`"]) {
++		// `alias` only points at another role, so it is not a role the agent can name.
++		for (const omitted of [
++			"hidden/image",
++			"hidden/judge",
++			"`@alias`",
++			"= `@smol`",
++			"`pi/slow`",
++			"`*`",
++			"`default`",
++			"`inherit`",
++		]) {
+ 			expect(text).not.toContain(omitted);
+ 		}
+ 	});
+@@ -346,7 +356,7 @@ describe("task spawn validation", () => {
+ 		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
+ 		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
+ 		const text = (await TaskTool.create(session)).description;
+-		expect(text).toContain("`mock/second:high`, `mock/first` (review)");
++		expect(text).toContain("`@review` = `mock/second:high` | `mock/first`");
+ 		expect(text).not.toContain("mock/*");
+ 		expect(catalogLookup).not.toHaveBeenCalled();
+ 	});
+@@ -359,8 +369,8 @@ describe("task spawn validation", () => {
+ 		});
+ 		Object.assign(session, { modelRegistry: { getAll: () => [model], getAvailable: () => [model] } });
+ 		const text = (await TaskTool.create(session)).description;
+-		expect(text).toContain("`mock/target` (review)");
+-		expect(text).not.toContain("`target` (review)");
++		expect(text).toContain("`@review` = `mock/target`");
++		expect(text).not.toContain("= `target`");
+ 	});
+ 
+ 	it("offers the caller's own model only when one selector can name it", async () => {
+@@ -398,13 +408,13 @@ describe("task spawn validation", () => {
+ 			},
+ 		});
+ 		const tool = await TaskTool.create(session);
+-		expect(tool.description).toContain("`mock/original-role` (smol)");
++		expect(tool.description).toContain("`@smol` = `mock/original-role`");
+ 		expect(tool.description).toContain("mock/original-allowed");
+ 
+ 		session.settings.overrideModelRoles({ smol: "mock/replacement-role" });
+ 		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement-role", "mock/replacement-allowed"]);
+ 		const refreshed = tool.description;
+-		expect(refreshed).toContain("`mock/replacement-role` (smol)");
++		expect(refreshed).toContain("`@smol` = `mock/replacement-role`");
+ 		expect(refreshed).toContain("mock/replacement-allowed");
+ 		expect(refreshed).not.toContain("mock/original");
+ 
