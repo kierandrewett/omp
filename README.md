@@ -76,17 +76,71 @@ This moves the submodule and rebuilds `work/src`. A patch that no longer applies
 markers in `work/src`. Fix them, commit, run `just export`, then `git add upstream patches` and commit.
 Never drop a patch to make an update pass.
 
+## Packages
+
+[pkgsmith](https://github.com/kierandrewett/pkgsmith) writes the packages. It builds nothing: `scripts/install-prefix.sh`
+puts the built binary in `build/prefix` (a folder laid out like an installed system), and `pkgsmith.star` describes the
+packages made from it. One script writes every format from the same prefix.
+
+```sh
+just build              # dist/omp-linux-<arch>
+just prefix             # build/prefix/usr/bin/omp and the third-party notice
+just plan               # which packages, and what each one carries
+just package            # dist/packages
+just smoke-packages     # install each one in a throwaway container and run omp (podman or docker)
+```
+
+|Format|File|Checked on|
+|---|---|---|
+|rpm|`omp-18.14.2-2.x86_64.rpm`|`fedora:latest`|
+|deb|`omp_18.14.2-2_amd64.deb`|`debian:12`|
+|archlinux|`omp-18.14.2-2-x86_64.pkg.tar.zst`|`archlinux:latest`|
+|tar|`omp-18.14.2-amd64.tar.xz`|`fedora:latest`|
+
+The package version is the upstream version and the release is the fork revision, so `18.14.2` with revision `2` is
+`omp-18.14.2-2` and sorts above revision 1. arm64 packages carry `arm64` or `aarch64` in the same places.
+
+pkgsmith is not on crates.io, and its only tag (v0.1.0) is older than the script design this repo uses. So
+`scripts/get-pkgsmith.sh` builds it from the commit in `scripts/pkgsmith-commit`. Change that file to move to a newer
+pkgsmith.
+
+**No apk for the glibc build.** The binary links to glibc, and Alpine has musl. On plain Alpine it reports `not found`.
+With `gcompat` it fails with `__pthread_key_create: symbol not found`. `scripts/package.sh` reads the C library and the
+architecture from the ELF headers of the binary in the prefix, and writes an apk only for a binary whose interpreter is
+musl. Then it writes only the apk. That path was checked with a stand-in musl binary, not with a musl build of omp.
+Upstream builds musl binaries (`linux-musl-x64` and `linux-musl-arm64`, with `linux-musl-x64-baseline` and
+`linux-musl-arm64` addons). Adding them here means two more addon builds, a `LIBC` dimension in `scripts/build.sh`, and
+an Alpine install check. They are not part of this repo yet.
+
+**`omp update` and packages.** The updater treats a plain file at `/usr/bin/omp` as a standalone binary and would try
+to replace it. Update a package install with the package manager. Making `omp update` stand down for package-owned
+paths needs a new patch.
+
 ## Releases
 
-`omp update` reads the releases of this repository, `kierandrewett/omp`. It takes the latest stable release, checks
-`omp-linux-x64` against `SHA256SUMS.txt`, and replaces the running binary. Only Linux x64 is built.
+A tag that starts with `v` runs `.github/workflows/release.yml`. It builds omp for amd64 and arm64, writes the
+packages, installs each package in a container of its distro, and publishes one release that holds:
 
-`.github/workflows/release.yml` publishes them. It runs when `patches/`, `revision`, `upstream` or `scripts/` change
-on `main`, and from the Actions tab. The tag is the pinned upstream tag plus `revision`, for example
-`v18.14.2-fork.2`. A published release is never overwritten and the run skips it, so raise `revision` when you ship
-changed patches for an upstream tag you already released. A run builds with `NATIVES=bazel`, which makes both the
-modern and the baseline native addon. A local `just build` uses `NATIVES=host` and makes only this machine's addon,
-so install it here but do not publish it.
+* the raw binaries `omp-linux-x64` and `omp-linux-arm64`, which `omp update` reads,
+* every package,
+* `SHA256SUMS.txt` for all of them.
+
+The tag must equal the release the commit describes, which is the pinned upstream tag plus `revision`, for example
+`v18.14.2-fork.2`. `scripts/release-info.sh` prints it. Raise `revision` and commit before you push the tag. The run
+stops when the tag differs or when a release for it exists, and a published release is never overwritten.
+
+```sh
+scripts/release-info.sh          # fork_tag=v18.14.2-fork.3 after you raise revision to 3
+git tag v18.14.2-fork.3 && git push origin v18.14.2-fork.3
+```
+
+A manual run from the Actions tab is a dry run. It builds everything, checks the packages, and uploads the files and
+`SHA256SUMS.txt` as workflow artifacts. It never creates a release or a tag, even on a tag ref.
+
+The addons for both architectures are cross-built on one x64 runner with Bazel, as upstream does, so the binary keeps a
+low glibc floor. Then each architecture builds its own binary on its own runner (`ubuntu-24.04` and
+`ubuntu-24.04-arm`) and checks it there. A local `just build` uses `NATIVES=host` and makes only this machine's addon, so
+install it here but do not publish it.
 
 ## Licence
 
@@ -95,4 +149,5 @@ licence text. The files added in this repository have no licence of their own ye
 
 ## Not here yet
 
-* Packages from pkgsmith. They wait for pkgsmith 0.1.0.
+* A musl build and an apk.
+* arm64 has not run end to end.

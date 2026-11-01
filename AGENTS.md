@@ -11,6 +11,12 @@ Patch series for Kieran's fork of can1357/oh-my-pi. Read `README.md` first.
 * Do not change git config. Commit with the configured identity. Do not pass `-c user.name` or `-c user.email`.
 * Pass absolute paths to `git -C upstream worktree add`. A relative path resolves inside the submodule.
 * `build/`, `work/` and `dist/` are ignored. Do not commit them.
+* A pushed tag that starts with `v` publishes a release. Do not create or push tags, and do not publish, unless Kieran
+  says so. A manual run of the release workflow is a dry run and is safe.
+* What a package holds is decided in `scripts/install-prefix.sh` and `pkgsmith.star`. pkgsmith builds nothing.
+* Do not add a flag that sets the C library or the architecture of a package. `scripts/package.sh` reads both from the
+  ELF headers of the binary, so an apk cannot be written for a glibc binary. A glibc binary does not run on Alpine.
+* The pkgsmith commit is pinned in `scripts/pkgsmith-commit`. pkgsmith is not on crates.io.
 * Do not run `just install` without Kieran's say-so. It replaces the `omp` he is running.
 
 ## Upstream code rules
