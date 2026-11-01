@@ -12,12 +12,12 @@ index 48baa7e0e9..0502c732ee 100644
  
  Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
 diff --git a/docs/tools/task.md b/docs/tools/task.md
-index 57cb4e3034..c3950ef027 100644
+index 9bc61b9dc3..512ae0785e 100644
 --- a/docs/tools/task.md
 +++ b/docs/tools/task.md
 @@ -70,6 +70,12 @@ When per-call selection is enabled for a surface, the task/eval tool description
  
- **Price tiers.** A task item's `model` may also be `$`, `$$`, `$$$` or `$$$$` (task calls only; eval calls need an exact selector). The tiers are quarters of the blended price (input plus output per million tokens) across every loaded chat model, so a tier means the same thing whichever providers you are signed in to. Models with no price (free tiers, subscriptions, local models) take no tier. A tier resolves to the configured role in that tier, or in the nearest tier when there is none (the cheaper side wins a tie), and from there it is approved, dispatched and revived exactly like that role. Within a tier the most used role wins. Usage is the share of the last 90 days of requests in `stats.db` (read-only, from the hourly rollup), weighted by how specific the match is: the exact `provider/model-id` counts 0.6, the same model family 0.3 and the same provider 0.1. With no history the order falls back to the role name. The task description shows each configured role's tier, tells agents to use the cheapest tier that does the work reliably, and calls `$$$$` very rare. The judge that picks a role for a call without `model` is shown the same tiers and usage shares.
+ **Price tiers.** A task item's `model` may also be `$`, `$$`, `$$$` or `$$$$` (task calls only; eval calls need an exact selector). The tiers are quarters of the blended price (input plus output per million tokens) across every loaded chat model that has a price, so a tier means the same thing whichever providers you are signed in to. The scale is set by the whole loaded catalogue; only the role choice is limited to roles you configured. A model with no price (free tiers, subscriptions, local models) cannot be placed on a price scale, so it takes no tier and is never picked by one. A tier resolves to the configured role in that tier, or in the nearest tier when there is none (the cheaper side wins a tie), and from there it is approved, dispatched and revived exactly like that role. Within a tier the most used role wins. Usage is the share of the last 90 days of requests in `stats.db` (read-only, from the hourly rollup), weighted by how specific the match is: the exact `provider/model-id` counts 0.6, the same model family 0.3 and the same provider 0.1. With no history the order falls back to the role name. The task description shows each configured role's tier, tells agents to use the cheapest tier that does the work reliably, and calls `$$$$` very rare. The judge that picks a role for a call without `model` is shown the same tiers and usage shares.
  
 +### Changing a running subagent's model
 +
@@ -522,7 +522,7 @@ index 70d6d7b039..8ac2523af8 100644
  					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
  					keepTodo: prewalk !== undefined,
 diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
-index 72e562836a..adf4e35378 100644
+index 72e562836a..ecaf88f708 100644
 --- a/packages/coding-agent/src/task/index.ts
 +++ b/packages/coding-agent/src/task/index.ts
 @@ -60,7 +60,9 @@ import { InternalUrlRouter } from "../internal-urls/router";
@@ -535,15 +535,17 @@ index 72e562836a..adf4e35378 100644
  import { type TieredModelAdvertisement, tierAdvertisedRoles } from "./model-economy";
  import { generateTaskName } from "./name-generator";
  import { AgentOutputManager } from "./output-manager";
-@@ -1103,6 +1105,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
- 	 * Create a TaskTool instance with async agent discovery.
- 	 */
- 	static async create(session: ToolSession): Promise<TaskTool> {
-+		// `write proc://<id>/model` reaches the task module through this registration, not an import.
-+		registerSubagentModelSwitcher(switchSubagentModelAsCaller);
- 		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
- 		return new TaskTool(session, agents);
- 	}
+@@ -98,6 +100,10 @@ import {
+ 	perCallModelEnabled,
+ } from "./settings";
+ 
++// `write proc://<id>/model` reaches the task layer through this registration, not an import (see proc-protocol.ts).
++// It runs when this module loads, so every way of spawning a subagent (task tool, eval agent(), workpool()) has it.
++registerSubagentModelSwitcher(switchSubagentModelAsCaller);
++
+ function createUsageTotals(): Usage {
+ 	return {
+ 		input: 0,
 diff --git a/packages/coding-agent/src/task/model-switch.ts b/packages/coding-agent/src/task/model-switch.ts
 new file mode 100644
 index 0000000000..28ecea8aee
@@ -999,7 +1001,7 @@ index 1c083586bf..bc8bd6be81 100644
  				showError,
 diff --git a/packages/coding-agent/test/task/subagent-model-switch.test.ts b/packages/coding-agent/test/task/subagent-model-switch.test.ts
 new file mode 100644
-index 0000000000..d10fcb9c2e
+index 0000000000..04ed7c1580
 --- /dev/null
 +++ b/packages/coding-agent/test/task/subagent-model-switch.test.ts
 @@ -0,0 +1,464 @@
@@ -1027,7 +1029,9 @@ index 0000000000..d10fcb9c2e
 +import { getModelMatchPreferences } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 +import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 +import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
-+import { ProcProtocolHandler, registerSubagentModelSwitcher } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
++import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
++// Loading the task module registers the switcher the proc protocol calls, exactly as in the running app.
++import "@oh-my-pi/pi-coding-agent/task";
 +import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 +import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 +import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -1036,7 +1040,6 @@ index 0000000000..d10fcb9c2e
 +import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 +import type { PerCallModelGrants } from "@oh-my-pi/pi-coding-agent/task/model-approval";
 +import * as modelUsageModule from "@oh-my-pi/pi-coding-agent/task/model-usage";
-+import { switchSubagentModelAsCaller } from "@oh-my-pi/pi-coding-agent/task/model-switch";
 +import { switchSubagentModelAsOperator } from "@oh-my-pi/pi-coding-agent/task/subagent-model-policy";
 +import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 +import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -1062,8 +1065,6 @@ index 0000000000..d10fcb9c2e
 +}
 +
 +beforeEach(async () => {
-+	// The proc protocol reaches the task module through a registration that TaskTool.create normally makes.
-+	registerSubagentModelSwitcher(switchSubagentModelAsCaller);
 +	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 +	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-subagent-model-switch-"));
 +	const home = path.join(root, "home");
@@ -1248,8 +1249,9 @@ index 0000000000..d10fcb9c2e
 +describe("the parent agent switching a running subagent's model", () => {
 +	it("accepts a price tier and switches to the configured role in that tier", async () => {
 +		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
-+		// Far below every priced catalog model, so `haiku` sits in the cheapest tier.
-+		const harness = await startSubagent({ haikuCost: { input: 0.0001, output: 0.0001, cacheRead: 0, cacheWrite: 0 } });
++		// Positive but below any real price, so `haiku` is the cheapest priced model and sits in the cheapest tier
++		// whatever else the catalogue holds.
++		const harness = await startSubagent({ haikuCost: { input: 1e-9, output: 1e-9, cacheRead: 0, cacheWrite: 0 } });
 +		try {
 +			const result = await writeModel(harness, CHILD_ID, "$");
 +			expect(result?.details?.proc).toMatchObject({

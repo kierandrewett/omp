@@ -53,10 +53,10 @@ index 65e7c9d782..efec9f79a6 100644
  					// notification makes the session ready for further traffic.
 diff --git a/packages/coding-agent/src/mcp/elicitation.ts b/packages/coding-agent/src/mcp/elicitation.ts
 new file mode 100644
-index 0000000000..a57386bea7
+index 0000000000..d9e9e31dde
 --- /dev/null
 +++ b/packages/coding-agent/src/mcp/elicitation.ts
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,419 @@
 +/**
 + * MCP form elicitation.
 + *
@@ -73,6 +73,7 @@ index 0000000000..a57386bea7
 +
 +const MAX_MESSAGE_CHARS = 2000;
 +const MAX_TITLE_CHARS = 200;
++const MAX_META_CHARS = 1200;
 +const MAX_ATTEMPTS = 5;
 +const JSON_RPC_INVALID_PARAMS = -32602;
 +
@@ -372,6 +373,22 @@ index 0000000000..a57386bea7
 +	return String(value);
 +}
 +
++/**
++ * What a server attached in `_meta`, as plain text. Servers put the terms of an approval there, for example
++ * what accepting permits and whether it lasts, so the person has to see them before saying yes. OMP never
++ * acts on `_meta`: nothing is remembered or widened because a server asked for it.
++ */
++function describeMeta(meta: unknown): string {
++	if (typeof meta !== "object" || meta === null || Array.isArray(meta) || Object.keys(meta).length === 0) return "";
++	let text: string;
++	try {
++		text = JSON.stringify(meta, null, 1);
++	} catch {
++		return "";
++	}
++	return `\n\nThe server attached these terms (OMP applies none of them beyond this one answer):\n${clean(text, MAX_META_CHARS)}`;
++}
++
 +/** Run one form: ask, review, answer. Never returns `accept` without an explicit yes. */
 +export async function runElicitationForm(
 +	ui: ElicitationDialogs,
@@ -380,7 +397,7 @@ index 0000000000..a57386bea7
 +): Promise<MCPElicitationResult> {
 +	const fields = readFields(params);
 +	const message = clean(params.message, MAX_MESSAGE_CHARS);
-+	const title = `MCP server "${clean(serverName, MAX_TITLE_CHARS)}" asks:\n${message}`;
++	const title = `MCP server "${clean(serverName, MAX_TITLE_CHARS)}" asks:\n${message}${describeMeta(params._meta)}`;
 +
 +	if (fields.length === 0) {
 +		const picked = await ui.select(title, [ACCEPT, DECLINE]);
@@ -546,10 +563,10 @@ index f93cb7183c..77ec6353ba 100644
  
  		connection.config = config;
 diff --git a/packages/coding-agent/src/mcp/types.ts b/packages/coding-agent/src/mcp/types.ts
-index 1c03ae05d2..7f16ef6a92 100644
+index 1c03ae05d2..dc5d826832 100644
 --- a/packages/coding-agent/src/mcp/types.ts
 +++ b/packages/coding-agent/src/mcp/types.ts
-@@ -202,9 +202,49 @@ export interface MCPImplementation {
+@@ -202,9 +202,51 @@ export interface MCPImplementation {
  export interface MCPClientCapabilities {
  	roots?: { listChanged?: boolean };
  	sampling?: Record<string, never>;
@@ -581,6 +598,8 @@ index 1c03ae05d2..7f16ef6a92 100644
 +export interface MCPElicitationParams {
 +	mode?: "form" | "url";
 +	message: string;
++	/** Server-defined extra terms, for example what an approval permits. Shown to the person, never acted on. */
++	_meta?: Record<string, unknown>;
 +	requestedSchema?: {
 +		type?: "object";
 +		properties?: Record<string, MCPElicitationProperty>;
@@ -623,10 +642,10 @@ index 8a0bf56cda..b379d77e16 100644
  		const initialTools = initialToolNames
 diff --git a/packages/coding-agent/test/mcp-elicitation.test.ts b/packages/coding-agent/test/mcp-elicitation.test.ts
 new file mode 100644
-index 0000000000..9b05d189e2
+index 0000000000..1b2b88f07f
 --- /dev/null
 +++ b/packages/coding-agent/test/mcp-elicitation.test.ts
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,394 @@
 +import { afterEach, describe, expect, it } from "bun:test";
 +import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 +import { ElicitationBroker, type ElicitationDialogs } from "@oh-my-pi/pi-coding-agent/mcp/elicitation";
@@ -943,6 +962,41 @@ index 0000000000..9b05d189e2
 +			broker,
 +		);
 +		expect(bad.reply.error?.code).toBe(-32602);
++	});
++
++	it("shows the terms a server attaches in _meta, cleaned, and never treats them as consent", async () => {
++		const broker = new ElicitationBroker();
++		const ui = scriptedDialogs([undefined]);
++		broker.setUI(ui.dialogs);
++		const { reply } = await askThroughServer(
++			{
++				message: "Send this email?",
++				requestedSchema: { type: "object", properties: {} },
++				_meta: { persist: "always", scope: "all mail\u001b[2J" },
++			},
++			broker,
++		);
++		expect(ui.shown[0]).toContain("Send this email?");
++		expect(ui.shown[0]).toContain('"persist": "always"');
++		// The escape character arrives spelled out as text, so it cannot repaint the terminal.
++		expect(ui.shown[0]).toContain("all mail\\u001b[2J");
++		expect(ui.shown[0]).not.toContain("\u001b");
++		// A server that asks for a lasting approval still gets only the person's one answer.
++		expect(reply.result).toEqual({ action: "cancel" });
++	});
++
++	it("adds nothing to the dialog when _meta is absent, empty or not an object", async () => {
++		for (const meta of [undefined, {}, [], "terms", null]) {
++			const broker = new ElicitationBroker();
++			const ui = scriptedDialogs(["Decline"]);
++			broker.setUI(ui.dialogs);
++			await askThroughServer(
++				{ message: "Plain", requestedSchema: { type: "object", properties: {} }, _meta: meta },
++				broker,
++			);
++			expect(ui.shown[0]).not.toContain("server attached");
++			server?.stop(true);
++		}
 +	});
 +
 +	it("strips terminal control sequences from what the server says", async () => {
