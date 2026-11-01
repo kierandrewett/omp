@@ -19,6 +19,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0006-subagent-shelf-usage`|Each row in the pinned subagent shelf shows that subagent's total tokens and API cost.|
 |`0007-task-model-switch`|Change a running subagent's model mid-run: `write proc://<id>/model` for the main agent (role, tier or exact ID), and `/switch` inside the subagent view for you.|
 |`0008-background-tasks-shelf`|A `Background tasks` shelf above `Subagents` lists running backgrounded bash commands, eval cells and services, with id, command and elapsed time. `display.pinnedJobs` sets it to `collapsed`, `full` or `off`.|
+|`0009-musl-x64-modern-addon`|Adds a `linux-musl-x64-modern` Bazel target, which upstream lacks, so musl x64 has the same two addon variants as glibc.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
@@ -41,8 +42,21 @@ just install    # ~/.local/bin/omp
 |Value|Meaning|
 |---|---|
 |`host` (default)|Cargo build for this machine. No Bazel.|
-|`bazel`|Both Linux x64 addons through Bazel, as release CI does.|
+|`bazel`|The Linux addons through Bazel, as release CI does: baseline and modern for x64, one for arm64.|
 |`prebuilt`|Copy `pi_natives.*.node` from `NATIVES_DIR`. Use only for the same upstream version.|
+
+`LIBC` picks the C library of the binary: `glibc` (default) or `musl`. Alpine runs musl, so only a musl binary gets an apk.
+A musl build uses upstream's `linux-musl-<arch>` binary targets and addons, which Bazel cross-builds on a glibc machine:
+
+```sh
+LIBC=musl NATIVES=bazel scripts/build.sh     # dist/omp-linux-musl-<arch>
+```
+
+* A `NATIVES=prebuilt` musl build needs its own `NATIVES_DIR`, because upstream's musl addons keep the file names of the glibc ones.
+* `scripts/build.sh` checks what each addon links to and stops on the wrong one.
+* `NATIVES=host` works only for the C library of the machine.
+* `build.sh` does not run a musl binary on a glibc machine.
+* The glibc names `omp-linux-x64` and `omp-linux-arm64` do not change.
 
 The build uses the Bun version upstream asks for in `packageManager`. If the system Bun is older, `build/bun` gets a private copy and the system Bun stays as it is.
 
@@ -90,27 +104,32 @@ just package            # dist/packages
 just smoke-packages     # install each one in a throwaway container and run omp (podman or docker)
 ```
 
-|Format|File|Checked on|
-|---|---|---|
-|rpm|`omp-18.14.2-2.x86_64.rpm`|`fedora:latest`|
-|deb|`omp_18.14.2-2_amd64.deb`|`debian:12`|
-|archlinux|`omp-18.14.2-2-x86_64.pkg.tar.zst`|`archlinux:latest`|
-|tar|`omp-18.14.2-amd64.tar.xz`|`fedora:latest`|
+|Format|File|Binary|Checked on|
+|---|---|---|---|
+|rpm|`omp-18.14.2-4.x86_64.rpm`|glibc|`fedora:latest`|
+|deb|`omp_18.14.2-4_amd64.deb`|glibc|`debian:12`|
+|archlinux|`omp-18.14.2-4-x86_64.pkg.tar.zst`|glibc|`archlinux:latest`|
+|apk|`omp-18.14.2-r4-x86_64.apk`|musl|`alpine:3`|
+|tar|`omp-18.14.2-amd64.tar.xz`|glibc|`fedora:latest`|
 
-The package version is the upstream version and the release is the fork revision, so `18.14.2` with revision `2` is
-`omp-18.14.2-2` and sorts above revision 1. arm64 packages carry `arm64` or `aarch64` in the same places.
+The package version is the upstream version and the release is the fork revision, so `18.14.2` with revision `4` is
+`omp-18.14.2-4` and sorts above revision 3. arm64 packages carry `arm64` or `aarch64` in the same places.
 
 pkgsmith is not on crates.io, and its only tag (v0.1.0) is older than the script design this repo uses. So
 `scripts/get-pkgsmith.sh` builds it from the commit in `scripts/pkgsmith-commit`. Change that file to move to a newer
 pkgsmith.
 
-**No apk for the glibc build.** The binary links to glibc, and Alpine has musl. On plain Alpine it reports `not found`.
-With `gcompat` it fails with `__pthread_key_create: symbol not found`. `scripts/package.sh` reads the C library and the
-architecture from the ELF headers of the binary in the prefix, and writes an apk only for a binary whose interpreter is
-musl. Then it writes only the apk. That path was checked with a stand-in musl binary, not with a musl build of omp.
-Upstream builds musl binaries (`linux-musl-x64` and `linux-musl-arm64`, with `linux-musl-x64-baseline` and
-`linux-musl-arm64` addons). Adding them here means two more addon builds, a `LIBC` dimension in `scripts/build.sh`, and
-an Alpine install check. They are not part of this repo yet.
+**The apk is a musl build.** The glibc binary does not run on Alpine. Plain Alpine reports `not found`, and with `gcompat`
+it fails with `__pthread_key_create: symbol not found`. So the apk holds its own musl binary, and the other four packages
+hold the glibc one.
+
+* `scripts/package.sh` reads the C library and the architecture from the ELF headers of the binary in the prefix. A musl
+  binary gets only the apk. A glibc binary gets the other four.
+* The apk depends on `libstdc++` and `libgcc`, because Bun's musl binaries link to them dynamically. Upstream's own
+  Alpine smoke test installs the same two.
+* pkgsmith names an apk `omp-18.14.2-r4.apk`, with no architecture. `scripts/package.sh build` renames it to
+  `omp-18.14.2-r4-x86_64.apk` (`aarch64` on arm64), so one release can hold both. `just plan` still shows the pkgsmith
+  name. apk reads the package name and version from inside the file.
 
 **`omp update` and packages.** The updater treats a plain file at `/usr/bin/omp` as a standalone binary and would try
 to replace it. Update a package install with the package manager. Making `omp update` stand down for package-owned
@@ -118,29 +137,37 @@ paths needs a new patch.
 
 ## Releases
 
-A tag that starts with `v` runs `.github/workflows/release.yml`. It builds omp for amd64 and arm64, writes the
-packages, installs each package in a container of its distro, and publishes one release that holds:
+A tag that starts with `v` runs `.github/workflows/release.yml`. It builds omp for amd64 and arm64, each as a glibc and
+a musl binary, writes the packages, installs each package in a container of its distro (the apk in Alpine), and
+publishes one release that holds:
 
-* the raw binaries `omp-linux-x64` and `omp-linux-arm64`, which `omp update` reads,
-* every package,
+* the raw glibc binaries `omp-linux-x64` and `omp-linux-arm64`, which `omp update` reads,
+* every package: rpm, deb, Arch, apk and tar, for both architectures (ten files),
 * `SHA256SUMS.txt` for all of them.
+
+The raw musl binaries are not published. `omp update` reads the glibc names only, so those do not change.
 
 The tag must equal the release the commit describes, which is the pinned upstream tag plus `revision`, for example
 `v18.14.2-fork.2`. `scripts/release-info.sh` prints it. Raise `revision` and commit before you push the tag. The run
 stops when the tag differs or when a release for it exists, and a published release is never overwritten.
 
 ```sh
-scripts/release-info.sh          # fork_tag=v18.14.2-fork.3 after you raise revision to 3
-git tag v18.14.2-fork.3 && git push origin v18.14.2-fork.3
+scripts/release-info.sh          # fork_tag=v18.14.2-fork.4 after you raise revision to 4
+git tag v18.14.2-fork.4 && git push origin v18.14.2-fork.4
 ```
 
 A manual run from the Actions tab is a dry run. It builds everything, checks the packages, and uploads the files and
 `SHA256SUMS.txt` as workflow artifacts. It never creates a release or a tag, even on a tag ref.
 
-The addons for both architectures are cross-built on one x64 runner with Bazel, as upstream does, so the binary keeps a
-low glibc floor. Then each architecture builds its own binary on its own runner (`ubuntu-24.04` and
-`ubuntu-24.04-arm`) and checks it there. A local `just build` uses `NATIVES=host` and makes only this machine's addon, so
-install it here but do not publish it.
+How the release builds:
+
+* The glibc addons for both architectures are cross-built on one x64 runner with Bazel, as upstream does, so the binary
+  keeps a low glibc floor.
+* The musl addons are cross-built the same way in a parallel job and their own artifact, because they share file names
+  with the glibc addons.
+* Each architecture and C library then builds its own binary on a runner of that architecture (`ubuntu-24.04` and
+  `ubuntu-24.04-arm`) and checks it there. The musl packages are installed in `alpine:3`.
+* A local `just build` uses `NATIVES=host` and makes only this machine's addon. Install it here and do not publish it.
 
 ## Licence
 
@@ -149,16 +176,23 @@ licence text. The files added in this repository have no licence of their own ye
 
 ## Checked, and not checked
 
-Checked in a dry run of the release workflow on real runners (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`):
-both binaries build, the rpm, deb and tar install in a container of their distro and pass `omp --version` and
-`omp --smoke-test`, and the Arch package is checked by its contents on arm64 (Arch Linux has no official arm64 image).
-The addons built by CI need only glibc (`libc`, `libm`, `libpthread`, `libdl`, `libutil`) and symbols up to glibc 2.17
-on both architectures. A local `just build` makes a different addon: it needs glibc 2.39 and `libgcc_s`, so a locally
-built package will not load its addon on an older distro.
+Every run of the release workflow checks this on real runners (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`):
+
+* Each package installs in a container of its distro: `fedora:latest` for the rpm and the tar, `debian:12` for the deb,
+  `archlinux:latest` for the Arch package and `alpine:3` for the apk.
+* The package manager owns `/usr/bin/omp`, and `omp --version` and `omp --smoke-test` pass.
+* On x64 the smoke test runs again with `PI_NATIVE_VARIANT=modern` and with `baseline`. The check needs the matching
+  addon to be unpacked under `~/.omp/natives`, so both embedded addons are in each x64 package and load there.
+* On arm64 the Arch package is checked by its contents only, because Arch Linux has no official arm64 image.
+* The collect step stops unless the release holds two files of each of the five formats.
+
+The glibc addons that CI builds need only libraries from glibc and symbols up to glibc 2.17, on both architectures. A
+local `just build` makes a different addon. It needs glibc 2.39 and `libgcc_s`, so a locally built package will not load
+its addon on an older distro.
 
 Not checked:
 
-* The publish step, because no tag has been pushed. It has never run.
-* A musl build and an apk. No apk is written for the glibc build, and omp on Alpine has not been tested. The apk path was
-  only exercised for its format, with a busybox stand-in.
-* Whether `--smoke-test` loads the native addon. The container checks show that the binary starts and reports its version.
+* The publish step. A dry run never runs it. Only a pushed tag does.
+* The modern musl x64 addon comes from patch 0009. Upstream does not build or test it. Only the check above covers it.
+* Alpine versions other than the current `alpine:3` tag, and any architecture other than amd64 and arm64.
+* `omp update` on Alpine. An apk install is updated with apk, as the other packages are updated with their managers.
