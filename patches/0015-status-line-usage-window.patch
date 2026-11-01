@@ -1,0 +1,826 @@
+diff --git a/docs/settings.md b/docs/settings.md
+index 93db02e7ce..581e2dcf91 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -897,6 +897,7 @@ tui:
+ | `statusLine.sessionAccent`    | boolean | `true`           | Tint the editor border with the session color.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+ | `statusLine.transparent`      | boolean | `false`          | Use the terminal background for the status line.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `statusLine.showHookStatus`   | boolean | `true`           | Show hook status messages.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
++| `statusLine.usageWindow`      | enum    | `weekly`         | `weekly`, `session`, `worst`: the 7 Day, 5 Hour or most used window the `usage_bar` segment draws.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+ | `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+ | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+ | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+@@ -915,7 +916,7 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
+ 
+ The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
+ 
+-The `usage_bar` segment draws a five-cell progress bar and a percent for the active account of the active provider (`━━─── 42%`, or `==--- 42%` with the ASCII symbol set), warning-coloured from 50% and error-coloured from 80%. It shows the most constraining quota window: the 5 Hour window by default, and the 7 Day window, tagged `7d`, when that is more used (daily and monthly windows count too for providers that report them; a tie keeps the 5 Hour window). It reads the same cached usage reports as the `usage` segment, refreshed no more often than every five minutes, and renders nothing when the provider reports no such window. It sits right after `context_pct` in the `default` preset; add `usage_bar` to `statusLine.leftSegments` or `statusLine.rightSegments` with `statusLine.preset: custom` to use it in a custom line.
++The `usage_bar` segment draws a five-cell progress bar, the percent used and the window it shows (`━━━━━ 100% 7d`, or `=====` glyphs with the ASCII symbol set) for the active account of the active provider, warning-coloured from 50% and error-coloured from 80%. `statusLine.usageWindow` chooses the window: `weekly` (default) draws the 7 Day window, `session` the 5 Hour window, `worst` whichever is more used. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` draws the more used of the shared 7 Day row and that model's row, tagged `7d fable`, the way credential ranking scopes a model's weekly limit. A provider with no 7 Day window falls back to its longest reported window (monthly, then daily, then 5 Hour) under that window's own tag (`mo`, `1d`, `5h`), never a shorter window labelled `7d`; `session` likewise falls back to the shortest window it has. The bar reads the same cached usage reports as the `usage` segment, refreshed no more often than every five minutes, picks the report of the session's own account (nothing is drawn while a provider with several accounts has no resolved account), and renders nothing when the provider reports no such window. It sits right after `context_pct` in the `default` preset; add `usage_bar` to `statusLine.leftSegments` or `statusLine.rightSegments` with `statusLine.preset: custom` to use it in a custom line.
+ 
+ When a provider holds two or more stored OAuth accounts, the `model` segment names the session's account by its stored position, the order `omp usage accounts` prints (A is the first): `Anthropic (B) > Sonnet 5.5`, and the footer shows the raw id as `anthropic-b/claude-sonnet-5-5`. A provider with one account is unchanged, and model ids themselves are never rewritten.
+ 
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index ab156b95f4..37e30ed9c6 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -5,7 +5,7 @@
+ ### Added
+ 
+ - Added the `retry.accountMode` setting (`sequential` by default, or `balanced`). With `sequential`, Anthropic accounts are used one at a time: every session and subagent follows the account that served last until it is blocked or spent, then moves to the next.
+-- New `usage_bar` status-line segment, in the `default` preset right after the context percent (add it to `statusLine.leftSegments` or `rightSegments` in a custom line): a five-cell progress bar and percent for the active account's most constraining usage window, the 5 Hour window by default and the 7 Day window, tagged `7d`, when that is higher. It renders nothing when the provider reports no usage windows.
++- New `usage_bar` status-line segment, in the `default` preset right after the context percent: a five-cell progress bar, the percent used and the window tag (`━━━━━ 100% 7d`) for the active account. New `statusLine.usageWindow` setting (`weekly` by default, `session`, `worst`) chooses the 7 Day window, the 5 Hour window or the more used one. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` uses the more used of the shared and the model's 7 Day row, tagged `7d fable`; a provider without a 7 Day window falls back to its longest reported window under its own tag. It renders nothing when the provider reports no usage windows, or when several accounts have no resolved one.
+ - When a provider holds two or more stored OAuth accounts, the status line names the session's account in the model: `Anthropic (B) > Sonnet 5.5`, and the footer's raw model id reads `anthropic-b/claude-sonnet-5-5`. The letter is the account's position in `omp usage accounts` order (A first) and follows an account change mid-session. Single-account providers look as before.
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+index a0332a2037..47308e04e0 100644
+--- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
++++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+@@ -248,15 +248,37 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+ 			];
+ 		case "usage_bar":
+ 			return [
+-				{ label: "5 hour window", context: { usage: { fiveHour: { percent: 24, resetMinutes: 75 } } } },
+ 				{
+-					label: "7 day window is higher",
++					label: "weekly (default)",
+ 					context: {
+ 						usage: { fiveHour: { percent: 32, resetMinutes: 71 }, sevenDay: { percent: 68, resetHours: 52 } },
+ 					},
+ 				},
+-				{ label: "warning", context: { usage: { fiveHour: { percent: 65, resetMinutes: 75 } } } },
+-				{ label: "error", context: { usage: { fiveHour: { percent: 92, resetMinutes: 75 } } } },
++				{
++					label: "session window",
++					context: {
++						usageWindow: "session",
++						usage: { fiveHour: { percent: 32, resetMinutes: 71 }, sevenDay: { percent: 68, resetHours: 52 } },
++					},
++				},
++				{
++					label: "worst window",
++					context: {
++						usageWindow: "worst",
++						usage: { fiveHour: { percent: 92, resetMinutes: 71 }, sevenDay: { percent: 68, resetHours: 52 } },
++					},
++				},
++				{
++					label: "model tier weekly row",
++					context: {
++						usage: { sevenDay: { percent: 40 }, modelSevenDay: { percent: 88, resetHours: 52, tier: "fable" } },
++					},
++				},
++				{
++					label: "no weekly window (falls back)",
++					context: { usage: { fiveHour: { percent: 21, resetMinutes: 75 } } },
++				},
++				{ label: "weekly cap reached", context: { usage: { sevenDay: { percent: 100, resetHours: 52 } } } },
+ 				{ label: "no usage data", context: { usage: null } },
+ 			];
+ 		case "collab":
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index 1517fdfeda..76e8554b5d 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -407,6 +407,7 @@ import {
+ 	cfgStatusLineSessionAccent,
+ 	cfgStatusLineShowHookStatus,
+ 	cfgStatusLineTransparent,
++	cfgStatusLineUsageWindow,
+ 	cfgSymbolPreset,
+ 	cfgTerminalProgramStatus,
+ 	cfgTerminalShowImages,
+@@ -507,6 +508,7 @@ const cfgLiveUiSettings = combine({
+ 	"statusLine.segmentOptions": cfgStatusLineSegmentOptions,
+ 	"statusLine.compactThinkingLevel": cfgStatusLineCompactThinkingLevel,
+ 	"statusLine.contextLine": cfgStatusLineContextLine,
++	"statusLine.usageWindow": cfgStatusLineUsageWindow,
+ 	"git.enabled": cfgGitEnabled,
+ 	"advisor.enabled": cfgAdvisorEnabled,
+ 	"advisor.maxNotesPerUpdate": cfgAdvisorMaxNotesPerUpdate,
+@@ -4521,6 +4523,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 				"statusLine.segmentOptions",
+ 				"statusLine.compactThinkingLevel",
+ 				"statusLine.contextLine",
++				"statusLine.usageWindow",
+ 				"git.enabled",
+ 			)
+ 		) {
+diff --git a/packages/coding-agent/src/modes/settings.ts b/packages/coding-agent/src/modes/settings.ts
+index 3b5700542e..e82cecaaaf 100644
+--- a/packages/coding-agent/src/modes/settings.ts
++++ b/packages/coding-agent/src/modes/settings.ts
+@@ -10,6 +10,7 @@ import {
+ 	STATUS_LINE_PRESET_VALUES,
+ 	STATUS_LINE_SEGMENT_IDS,
+ 	STATUS_LINE_SEPARATOR_VALUES,
++	STATUS_LINE_USAGE_WINDOW_VALUES,
+ } from "@oh-my-pi/pi-tui/status-line/schema";
+ import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
+ import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
+@@ -225,6 +226,28 @@ export const cfgStatusLineContextLine = register({
+ 	},
+ });
+ 
++export const cfgStatusLineUsageWindow = register({
++	id: "statusLine.usageWindow",
++	type: "enum",
++	values: STATUS_LINE_USAGE_WINDOW_VALUES,
++	default: "weekly",
++	ui: {
++		tab: "appearance",
++		group: "Status Line",
++		label: "Usage Bar Window",
++		description: "Which quota window the usage_bar status-line segment draws",
++		options: [
++			{
++				value: "weekly",
++				label: "Weekly",
++				description: "The 7 Day window, tagged 7d; the longest window a provider reports when it has no weekly one",
++			},
++			{ value: "session", label: "Session", description: "The 5 Hour window, tagged 5h" },
++			{ value: "worst", label: "Worst", description: "Whichever reported window is most used" },
++		],
++	},
++});
++
+ export const cfgStatusLineSessionAccent = register({
+ 	id: "statusLine.sessionAccent",
+ 	type: "boolean",
+diff --git a/packages/coding-agent/src/modes/status-line-host.ts b/packages/coding-agent/src/modes/status-line-host.ts
+index ffa8a9c934..79c1ec2bf5 100644
+--- a/packages/coding-agent/src/modes/status-line-host.ts
++++ b/packages/coding-agent/src/modes/status-line-host.ts
+@@ -19,6 +19,7 @@ import {
+ 	cfgStatusLineSegmentOptions,
+ 	cfgStatusLineSeparator,
+ 	cfgStatusLineSessionAccent,
++	cfgStatusLineUsageWindow,
+ 	cfgStatusLineShowHookStatus,
+ 	cfgStatusLineTransparent,
+ 	cfgTuiCodexResetFireworks,
+@@ -51,6 +52,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
+ 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),
+ 	// Read per frame: skip the `settings` proxy trap and hit the instance getter directly.
+ 	getSettingsRevision: () => Settings.instance.revision,
++	usageWindow: () => cfgStatusLineUsageWindow.get(settings),
+ 	getSessionSettingsIdentity: session => session.settings,
+ 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,
+ 	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
+diff --git a/packages/coding-agent/test/status-line-usage-bar.test.ts b/packages/coding-agent/test/status-line-usage-bar.test.ts
+new file mode 100644
+index 0000000000..f15f50f88b
+--- /dev/null
++++ b/packages/coding-agent/test/status-line-usage-bar.test.ts
+@@ -0,0 +1,201 @@
++/**
++ * The `usage_bar` segment reads the cached usage reports the status line already fetches. These tests feed it
++ * reports shaped like `omp usage --json` for two Anthropic accounts: one over its weekly cap with no 5 Hour row,
++ * one with a busy session and a quiet week.
++ */
++import { afterAll, beforeAll, describe, expect, it } from "bun:test";
++import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
++import { cfgStatusLineUsageWindow } from "@oh-my-pi/pi-coding-agent/modes/settings";
++import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
++import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
++import { StatusLineTestComponents } from "./helpers/status-line";
++
++const statusLines = new StatusLineTestComponents();
++
++beforeAll(async () => {
++	resetSettingsForTest();
++	await Settings.init({ inMemory: true });
++	await initTheme();
++});
++
++afterAll(() => {
++	statusLines.dispose();
++	resetSettingsForTest();
++});
++
++const RESET_AT = Date.now() + 48 * 3_600_000;
++
++interface FixtureLimit {
++	windowId: "5h" | "7d";
++	used: number;
++	tier?: string;
++}
++
++function report(account: { email: string; accountId: string; orgId: string }, limits: FixtureLimit[]) {
++	return {
++		provider: "anthropic",
++		fetchedAt: Date.now(),
++		metadata: { ...account },
++		limits: limits.map(limit => ({
++			id: `anthropic:${limit.windowId}${limit.tier ? `:${limit.tier}` : ""}`,
++			label: limit.windowId,
++			scope: {
++				provider: "anthropic",
++				windowId: limit.windowId,
++				...(limit.tier ? { tier: limit.tier } : { shared: true }),
++			},
++			window: { id: limit.windowId, resetsAt: RESET_AT },
++			amount: { usedFraction: limit.used },
++		})),
++	};
++}
++
++const ACCOUNT_A = { email: "a@example.com", accountId: "acc-a", orgId: "org-a" };
++const ACCOUNT_B = { email: "b@example.com", accountId: "acc-b", orgId: "org-b" };
++
++/** A: weekly cap reached, no 5 Hour row reported; Fable counter far lower. B: busy session, quiet week, hot Fable counter. */
++const REPORTS = [
++	report(ACCOUNT_A, [
++		{ windowId: "7d", used: 1 },
++		{ windowId: "7d", used: 0.14, tier: "fable" },
++	]),
++	report(ACCOUNT_B, [
++		{ windowId: "5h", used: 0.29 },
++		{ windowId: "7d", used: 0.08 },
++		{ windowId: "7d", used: 0.9, tier: "fable" },
++	]),
++];
++
++function bar(filled: number): string {
++	return theme.progress.filled.repeat(filled) + theme.progress.empty.repeat(5 - filled);
++}
++
++async function flush(): Promise<void> {
++	const timer = Promise.withResolvers<void>();
++	setTimeout(timer.resolve, 0);
++	await timer.promise;
++	for (let i = 0; i < 4; i++) await Promise.resolve();
++}
++
++/** A status line whose session is on `account` (undefined: no resolved identity), with usage already fetched. */
++async function makeBar(
++	account: typeof ACCOUNT_A | undefined,
++	modelId = "claude-sonnet-5-5",
++	reports: unknown = REPORTS,
++): Promise<StatusLineComponent> {
++	const model = { id: modelId, contextWindow: 1000, provider: "anthropic" };
++	const component = statusLines.track(
++		new StatusLineComponent(
++			{
++				state: { messages: [], model },
++				model,
++				sessionManager: {
++					getUsageStatistics: () => ({
++						input: 0,
++						output: 0,
++						cacheRead: 0,
++						cacheWrite: 0,
++						totalTokens: 0,
++						orchestrationInput: 0,
++						orchestrationOutput: 0,
++						orchestrationCacheRead: 0,
++						premiumRequests: 0,
++						cost: 0,
++					}),
++				},
++				fetchUsageReports: async () => reports,
++				modelRegistry: { authStorage: { oauth: { identity: () => account } } },
++				getAsyncJobSnapshot: () => ({ running: [] }),
++				getContextUsage: () => undefined,
++			} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
++			statusLineHost,
++		),
++	);
++	component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: ["usage_bar"], sessionAccent: false });
++	component.refreshUsageInBackground();
++	await flush();
++	return component;
++}
++
++function barText(component: StatusLineComponent): string {
++	return Bun.stripANSI(component.getTopBorder(200).content).replace(/[─]{6,}/g, "");
++}
++
++async function renderBar(account: typeof ACCOUNT_A | undefined, modelId?: string, reports?: unknown): Promise<string> {
++	return barText(await makeBar(account, modelId, reports)).trim();
++}
++
++describe("usage_bar reads the active account's report", () => {
++	it("draws a full weekly bar for an account whose 7 Day row is 100% used", async () => {
++		expect(await renderBar(ACCOUNT_A)).toContain(`${bar(5)} 100% 7d`);
++	});
++
++	it("draws the second account's own windows, not the first report's", async () => {
++		const b = await renderBar(ACCOUNT_B);
++
++		expect(b).toContain(`${bar(0)} 8% 7d`);
++		expect(b).not.toContain("100%");
++	});
++
++	it("follows the session account's 5 Hour row under `session`, and falls back to 7d when it has none", async () => {
++		cfgStatusLineUsageWindow.override(settings, "session");
++		try {
++			expect(await renderBar(ACCOUNT_B)).toContain(`${bar(1)} 29% 5h`);
++			expect(await renderBar(ACCOUNT_A)).toContain("100% 7d");
++		} finally {
++			cfgStatusLineUsageWindow.clearOverride(settings);
++		}
++	});
++
++	it("shows the most used window under `worst`", async () => {
++		cfgStatusLineUsageWindow.override(settings, "worst");
++		try {
++			expect(await renderBar(ACCOUNT_B)).toContain("29% 5h");
++		} finally {
++			cfgStatusLineUsageWindow.clearOverride(settings);
++		}
++	});
++
++	it("uses the Fable weekly row for a Fable model when it is the more used one", async () => {
++		expect(await renderBar(ACCOUNT_B, "claude-fable-5")).toContain("90% 7d fable");
++		// A's shared weekly row (100%) outranks its Fable row (14%), as credential ranking sees it.
++		expect(await renderBar(ACCOUNT_A, "claude-fable-5")).toContain("100% 7d");
++		expect(await renderBar(ACCOUNT_A, "claude-fable-5")).not.toContain("fable");
++		// A non-Fable model ignores the Fable counter.
++		expect(await renderBar(ACCOUNT_B, "claude-sonnet-5-5")).toContain("8% 7d");
++	});
++
++	it("shows nothing rather than a mixed account when no account identity is resolved", async () => {
++		expect(await renderBar(undefined)).not.toContain("%");
++	});
++
++	it("still shows the only report's windows when the session has no resolved identity", async () => {
++		expect(await renderBar(undefined, "claude-sonnet-5-5", [REPORTS[1]])).toContain("8% 7d");
++	});
++});
++
++describe("statusLine.usageWindow", () => {
++	it("defaults to weekly and is read live by the status-line host", () => {
++		expect(statusLineHost.usageWindow?.()).toBe("weekly");
++		cfgStatusLineUsageWindow.override(settings, "session");
++		try {
++			expect(statusLineHost.usageWindow?.()).toBe("session");
++		} finally {
++			cfgStatusLineUsageWindow.clearOverride(settings);
++		}
++		expect(statusLineHost.usageWindow?.()).toBe("weekly");
++	});
++
++	it("repaints an already rendered bar when the setting changes", async () => {
++		const component = await makeBar(ACCOUNT_B);
++		expect(barText(component)).toContain("8% 7d");
++
++		cfgStatusLineUsageWindow.override(settings, "session");
++		try {
++			expect(barText(component)).toContain("29% 5h");
++		} finally {
++			cfgStatusLineUsageWindow.clearOverride(settings);
++		}
++	});
++});
+diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
+index 81a72430b9..1f392e6682 100644
+--- a/packages/tui/CHANGELOG.md
++++ b/packages/tui/CHANGELOG.md
+@@ -5,6 +5,8 @@
+ ### Added
+ 
+ - Added the `usage_bar` status-line segment id and `StatusLineHost.modelAccount` / `FooterHost.modelAccount`, which let a host qualify the model with the session's account (`Anthropic (B) > Sonnet 5.5`, raw `anthropic-b/claude-sonnet-5-5`).
++- Added `StatusLineHost.usageWindow`, `SegmentContext.usageWindow` and `STATUS_LINE_USAGE_WINDOW_VALUES` (`weekly`, `session`, `worst`) so a host picks which quota window the `usage_bar` segment draws; `SegmentContext.usage.modelSevenDay` carries the active model's own weekly counter.
++- The status-line usage readout shows nothing, instead of one merged account, when the active account is unresolved and the provider has several usage reports.
+ 
+ ## [18.14.2] - 2026-10-31
+ 
+diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
+index e1208f4e13..3db022e8e5 100644
+--- a/packages/tui/src/status-line/component.ts
++++ b/packages/tui/src/status-line/component.ts
+@@ -5,6 +5,7 @@ import {
+ 	getAntigravityCounterKeyForModel,
+ 	scopeAntigravityLimitsForModel,
+ } from "@oh-my-pi/pi-ai/usage/google-antigravity";
++import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
+ import { getNextTimeBasedPricingTransition } from "@oh-my-pi/pi-catalog/models";
+ import type { Model, ModelCost } from "@oh-my-pi/pi-catalog/types";
+ import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
+@@ -184,6 +185,28 @@ interface UsageWindowCandidate {
+ 	resetsAt?: number;
+ }
+ 
++/**
++ * Weekly tier counter the active model answers to: Claude's model-scoped 7 Day rows (Fable, Mythos,
++ * Opus, Sonnet) apply only to their own family, the same mapping `findClaudeSecondaryLimit` in
++ * `packages/ai/src/usage/claude.ts` uses when ranking credentials. Undefined for every other model.
++ */
++function modelWeeklyTier(provider: string | undefined, modelId: string | undefined): string | undefined {
++	if (provider !== "anthropic" || !modelId) return undefined;
++	const { family } = classifyModel(provider, modelId, { lenient: true });
++	return family === "opus" || family === "sonnet" || family === "fable" || family === "mythos" ? family : undefined;
++}
++
++/** Reports of `provider` (any provider when undefined) that carry a limit list. */
++function countProviderUsageReports(reports: readonly unknown[], provider: string | undefined): number {
++	let count = 0;
++	for (const report of reports) {
++		if (!report || typeof report !== "object" || !("limits" in report) || !Array.isArray(report.limits)) continue;
++		if (provider && (!("provider" in report) || report.provider !== provider)) continue;
++		count++;
++	}
++	return count;
++}
++
+ /** Limits sharing one model/tier scope, ranked as an indivisible display unit. */
+ interface UsageScopeGroup {
+ 	priority: number;
+@@ -802,6 +825,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 		fiveHour?: { percent: number; resetMinutes?: number };
+ 		daily?: { percent: number; resetMinutes?: number };
+ 		sevenDay?: { percent: number; resetHours?: number };
++		modelSevenDay?: { percent: number; resetHours?: number; tier: string };
+ 		monthly?: { percent: number; resetHours?: number };
+ 		resetCredits?: {
+ 			bankedCount: number;
+@@ -2247,6 +2271,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 		fiveHour?: { percent: number; resetMinutes?: number };
+ 		daily?: { percent: number; resetMinutes?: number };
+ 		sevenDay?: { percent: number; resetHours?: number };
++		modelSevenDay?: { percent: number; resetHours?: number; tier: string };
+ 		monthly?: { percent: number; resetHours?: number };
+ 		resetCredits?: {
+ 			bankedCount: number;
+@@ -2266,6 +2291,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 		const monthlySubscriptionProvider =
+ 			context.provider !== undefined && MONTHLY_SUBSCRIPTION_PROVIDERS[context.provider] === true;
+ 		const scopeGroups = new Map<string, UsageScopeGroup>();
++		const weeklyTier = modelWeeklyTier(context.provider, context.modelId);
++		let tierSevenDay: UsageWindowCandidate | undefined;
++		// Without an active account identity there is no way to tell which report is the session's:
++		// several accounts' windows would merge into one (account A's 7 Day beside account B's 5 Hour),
++		// so show nothing rather than a mixed account.
++		if (!context.identity && countProviderUsageReports(reports, context.provider) > 1) return null;
+ 		for (const report of reports) {
+ 			if (!report || typeof report !== "object") continue;
+ 			const provider = "provider" in report ? report.provider : undefined;
+@@ -2340,6 +2371,21 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 					(typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined) ??
+ 					(typeof rawPlanType === "string" && rawPlanType.trim() ? rawPlanType.trim() : undefined);
+ 				const normalizedTier = normalizeUsageScopeValue(tier);
++				if (
++					weeklyTier &&
++					windowClass === "7d" &&
++					!modelId &&
++					normalizeUsageScopeValue(rawTier) === weeklyTier &&
++					typeof fraction === "number" &&
++					(!tierSevenDay || fraction > tierSevenDay.fraction)
++				) {
++					const tierResetValue = window && "resetsAt" in window ? window.resetsAt : undefined;
++					tierSevenDay = {
++						windowClass,
++						fraction,
++						resetsAt: typeof tierResetValue === "number" ? tierResetValue : undefined,
++					};
++				}
+ 				const scopeKey = `${modelId ?? ""}\0${normalizedTier ?? ""}`;
+ 				// Exact-model groups outrank provider-wide groups; within either
+ 				// specificity, untiered limits preserve the historical preference.
+@@ -2453,8 +2499,19 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 				}
+ 			}
+ 		}
+-		if (!fiveHour && !daily && !sevenDay && !monthly && !resetCredits) return null;
+-		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly, resetCredits };
++		const modelSevenDay =
++			weeklyTier && tierSevenDay
++				? {
++						percent: tierSevenDay.fraction * 100,
++						resetHours:
++							typeof tierSevenDay.resetsAt === "number"
++								? Math.max(0, Math.round((tierSevenDay.resetsAt - now) / 3_600_000))
++								: undefined,
++						tier: weeklyTier,
++					}
++				: undefined;
++		if (!fiveHour && !daily && !sevenDay && !monthly && !modelSevenDay && !resetCredits) return null;
++		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, modelSevenDay, monthly, resetCredits };
+ 	}
+ 
+ 	/**
+@@ -2609,6 +2666,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 			options: segmentOptions ?? {},
+ 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
+ 			modelAccount: this.#modelAccount(state.model?.provider),
++			usageWindow: this.host.usageWindow?.() ?? "weekly",
+ 			hookStatuses: this.#sortedHookStatuses,
+ 			planMode: this.#planModeStatus,
+ 			loopMode: this.#loopModeStatus,
+diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
+index fea060b373..8fc37e2855 100644
+--- a/packages/tui/src/status-line/host.ts
++++ b/packages/tui/src/status-line/host.ts
+@@ -3,6 +3,7 @@ import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+ import type { Model } from "@oh-my-pi/pi-catalog/types";
+ import type { JobWidgetEntry } from "../tools/job-widget";
+ import type { CompactionBoundaries } from "./context-usage";
++import type { StatusLineUsageWindow } from "./schema";
+ import type { StatusLineSettings, StatusResetExpiry } from "./types";
+ 
+ export interface StatusAccountIdentity {
+@@ -104,6 +105,8 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
+ 	gitEnabled(): boolean;
+ 	codexResetFireworksEnabled(): boolean;
+ 	getSettingsRevision(): number;
++	/** `statusLine.usageWindow`, read live on every render; `weekly` when the host has no such setting. */
++	usageWindow?(): StatusLineUsageWindow;
+ 	getSessionSettingsIdentity(session: TSession): unknown;
+ 	getSessionSettingsRevision(session: TSession): number;
+ 	goalStatusInFooter(session: TSession): boolean;
+diff --git a/packages/tui/src/status-line/schema.ts b/packages/tui/src/status-line/schema.ts
+index 3f437eac5b..8d7948e852 100644
+--- a/packages/tui/src/status-line/schema.ts
++++ b/packages/tui/src/status-line/schema.ts
+@@ -44,6 +44,12 @@ export const CUSTOM_STATUS_LINE_DEFAULTS: {
+ 
+ export const CONTEXT_LINE_MODE_VALUES = ["off", "percentage", "annotated", "embedded"] as const;
+ export type ContextLineMode = (typeof CONTEXT_LINE_MODE_VALUES)[number];
++/**
++ * Which quota window the `usage_bar` segment draws: the weekly (7 Day) window,
++ * the session (5 Hour) window, or whichever is most used.
++ */
++export const STATUS_LINE_USAGE_WINDOW_VALUES = ["weekly", "session", "worst"] as const;
++export type StatusLineUsageWindow = (typeof STATUS_LINE_USAGE_WINDOW_VALUES)[number];
+ export const STATUS_LINE_PRESET_VALUES = ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const;
+ export type StatusLinePreset = (typeof STATUS_LINE_PRESET_VALUES)[number];
+ export const STATUS_LINE_SEPARATOR_VALUES = [
+diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
+index 1c4834be30..cade4b2eca 100644
+--- a/packages/tui/src/status-line/segments.ts
++++ b/packages/tui/src/status-line/segments.ts
+@@ -1300,8 +1300,8 @@ const usageSegment: StatusLineSegment = {
+ const USAGE_BAR_CELLS = 5;
+ 
+ interface UsageBarWindow {
+-	/** Window tag; the 5-hour default is shown without one. */
+-	tag: "5h" | "1d" | "7d" | "mo";
++	/** Window tag drawn after the percent, always shown so a window is never mistaken for another. */
++	tag: string;
+ 	/** Tooltip name of the window. */
+ 	name: string;
+ 	/** Used share, clamped to 0-100. */
+@@ -1309,30 +1309,52 @@ interface UsageBarWindow {
+ }
+ 
+ /**
+- * The window the `usage_bar` segment draws: the most constraining quota window
+- * of the active account of the active provider, i.e. the highest used percent
+- * among its 5 Hour, daily, 7 Day and monthly windows (`ctx.usage` is already
+- * scoped to that account and model). The 5 Hour window wins a tie, so it is the
+- * default; when the 7 Day window (or a daily/monthly one on providers without
+- * a 5 Hour window) is higher, that window is drawn instead and tagged (`7d`).
++ * The window the `usage_bar` segment draws, chosen by `statusLine.usageWindow`
++ * (`ctx.usageWindow`, default `weekly`) from the active account's windows of the
++ * active provider (`ctx.usage` is already scoped to that account and model):
++ *
++ * - `weekly`: the 7 Day window, tagged `7d`. When the active Claude model has its
++ *   own weekly counter (Fable, Mythos, Opus, Sonnet), the more used of the shared
++ *   7 Day row and that tier row, tagged `7d fable`; this is how Claude credential
++ *   ranking scopes a model's weekly limit. A provider that reports no 7 Day window
++ *   falls back to its longest reported window (monthly, then daily, then 5 Hour),
++ *   tagged with that window's own label, never a shorter window under `7d`.
++ * - `session`: the 5 Hour window, tagged `5h`; a provider without one falls back
++ *   to its shortest reported window (daily, then 7 Day, then monthly) under its own tag.
++ * - `worst`: the most used of every reported window. The shorter window wins a tie.
++ *
+  * Null when the provider reports none of these windows.
+  */
+ function usageBarWindow(ctx: SegmentContext): UsageBarWindow | null {
+ 	const u = ctx.usage;
+ 	if (!u) return null;
+-	const candidates: readonly (UsageBarWindow | null)[] = [
+-		u.fiveHour ? { tag: "5h", name: "5 Hour", percent: u.fiveHour.percent } : null,
+-		u.daily ? { tag: "1d", name: "Daily", percent: u.daily.percent } : null,
+-		u.sevenDay ? { tag: "7d", name: "7 Day", percent: u.sevenDay.percent } : null,
+-		u.monthly ? { tag: "mo", name: "Monthly", percent: u.monthly.percent } : null,
+-	];
+-	let binding: UsageBarWindow | null = null;
+-	for (const candidate of candidates) {
+-		if (!candidate || !Number.isFinite(candidate.percent)) continue;
+-		const percent = Math.min(100, Math.max(0, candidate.percent));
+-		if (!binding || percent > binding.percent) binding = { ...candidate, percent };
++	const clamp = (percent: number): number => Math.min(100, Math.max(0, percent));
++	const entry = (tag: string, name: string, window: { percent: number } | undefined): UsageBarWindow | null =>
++		window && Number.isFinite(window.percent) ? { tag, name, percent: clamp(window.percent) } : null;
++	const mostUsed = (...entries: readonly (UsageBarWindow | null)[]): UsageBarWindow | null => {
++		let binding: UsageBarWindow | null = null;
++		for (const candidate of entries) {
++			if (candidate && (!binding || candidate.percent > binding.percent)) binding = candidate;
++		}
++		return binding;
++	};
++	const fiveHour = entry("5h", "5 Hour", u.fiveHour);
++	const daily = entry("1d", "Daily", u.daily);
++	const sevenDay = entry("7d", "7 Day", u.sevenDay);
++	const tierSevenDay = u.modelSevenDay
++		? entry(`7d ${u.modelSevenDay.tier}`, `7 Day (${u.modelSevenDay.tier})`, u.modelSevenDay)
++		: null;
++	const monthly = entry("mo", "Monthly", u.monthly);
++	// Shared and model-tier weekly rows compete; the shared row wins a tie.
++	const weekly = mostUsed(sevenDay, tierSevenDay);
++	switch (ctx.usageWindow ?? "weekly") {
++		case "session":
++			return fiveHour ?? daily ?? weekly ?? monthly;
++		case "worst":
++			return mostUsed(fiveHour, daily, weekly, monthly);
++		default:
++			return weekly ?? monthly ?? daily ?? fiveHour;
+ 	}
+-	return binding;
+ }
+ 
+ const usageBarSegment: StatusLineSegment = {
+@@ -1350,8 +1372,7 @@ const usageBarSegment: StatusLineSegment = {
+ 				styleEmpty: text => theme.fg("dim", text),
+ 			},
+ 		});
+-		const tag = window.tag === "5h" ? "" : theme.fg("muted", ` ${window.tag}`);
+-		const text = `${bar} ${theme.fg(color, `${Math.round(window.percent)}%`)}${tag}`;
++		const text = `${bar} ${theme.fg(color, `${Math.round(window.percent)}%`)}${theme.fg("muted", ` ${window.tag}`)}`;
+ 		return { content: withIcon(theme.icon.time, text), visible: true };
+ 	},
+ 	describe(ctx) {
+@@ -1364,8 +1385,8 @@ const usageBarSegment: StatusLineSegment = {
+ 			span(theme.progress.filled.repeat(filled), color),
+ 			span(theme.progress.empty.repeat(USAGE_BAR_CELLS - filled), "dim"),
+ 			span(` ${whole}%`, color),
++			span(` ${window.tag}`, "muted"),
+ 		];
+-		if (window.tag !== "5h") spans.push(span(` ${window.tag}`, "muted"));
+ 		return { ...segView(spans, "time", toneOf(color)), title: `${window.name} window: ${whole}% used` };
+ 	},
+ };
+diff --git a/packages/tui/src/status-line/types.ts b/packages/tui/src/status-line/types.ts
+index 2455e42702..bf1a024e81 100644
+--- a/packages/tui/src/status-line/types.ts
++++ b/packages/tui/src/status-line/types.ts
+@@ -1,11 +1,17 @@
+ import type { Model } from "@oh-my-pi/pi-ai";
+ import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+ import type { NativeNode, NativeUiEvent } from "../native/node";
+-import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
++import type {
++	ContextLineMode,
++	StatusLinePreset,
++	StatusLineSegmentId,
++	StatusLineSeparatorStyle,
++	StatusLineUsageWindow,
++} from "./schema";
+ import type { ActiveRepoContext, StatusLineSession, StatusModelAccount } from "./host";
+ import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
+ 
+-export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
++export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle, StatusLineUsageWindow };
+ 
+ /** Context-window occupancy shown by the status line and exposed to extensions. */
+ export interface ContextUsage {
+@@ -89,6 +95,8 @@ export interface SegmentContext {
+ 	activeRepo: ActiveRepoContext | null;
+ 	width: number;
+ 	options: StatusLineSegmentOptions;
++	/** `statusLine.usageWindow`: which window the `usage_bar` segment draws (`weekly` when omitted). */
++	usageWindow?: StatusLineUsageWindow;
+ 	/** Render the model segment's thinking level as a compact leading glyph. */
+ 	compactThinkingLevel: boolean;
+ 	/**
+@@ -201,6 +209,11 @@ export interface SegmentContext {
+ 		fiveHour?: { percent: number; resetMinutes?: number };
+ 		daily?: { percent: number; resetMinutes?: number };
+ 		sevenDay?: { percent: number; resetHours?: number };
++		/**
++		 * The active model's own weekly counter (Claude Fable/Mythos/Opus/Sonnet tier row), when the
++		 * account's report has one; `tier` is its scope tier. The shared `sevenDay` row stays separate.
++		 */
++		modelSevenDay?: { percent: number; resetHours?: number; tier: string };
+ 		monthly?: { percent: number; resetHours?: number };
+ 		resetCredits?: {
+ 			bankedCount: number;
+diff --git a/packages/tui/test/status-line-usage-bar.test.ts b/packages/tui/test/status-line-usage-bar.test.ts
+index 1bef8e929a..60a5bdcf05 100644
+--- a/packages/tui/test/status-line-usage-bar.test.ts
++++ b/packages/tui/test/status-line-usage-bar.test.ts
+@@ -8,8 +8,8 @@ beforeAll(async () => {
+ 	await initTheme();
+ });
+ 
+-function ctxWith(usage: SegmentContext["usage"]): SegmentContext {
+-	return { usage } as unknown as SegmentContext;
++function ctxWith(usage: SegmentContext["usage"], usageWindow?: SegmentContext["usageWindow"]): SegmentContext {
++	return { usage, ...(usageWindow ? { usageWindow } : {}) } as unknown as SegmentContext;
+ }
+ 
+ function plain(ctx: SegmentContext): string {
+@@ -21,48 +21,71 @@ function bar(filled: number): string {
+ 	return theme.progress.filled.repeat(filled) + theme.progress.empty.repeat(5 - filled);
+ }
+ 
+-describe("usage_bar status-line segment", () => {
+-	it("draws the 5 Hour window as a bar and a percent, untagged", () => {
+-		const text = plain(ctxWith({ fiveHour: { percent: 42, resetMinutes: 30 }, sevenDay: { percent: 8 } }));
++describe("usage_bar status-line segment windows", () => {
++	// Account with a quiet week and a busy session: the two windows disagree.
++	const busySession = { fiveHour: { percent: 42, resetMinutes: 30 }, sevenDay: { percent: 8, resetHours: 100 } };
++	// Account with a busy week and a quiet session.
++	const busyWeek = { fiveHour: { percent: 24 }, sevenDay: { percent: 91 } };
+ 
+-		expect(text).toContain(`${bar(2)} 42%`);
+-		expect(text).not.toContain("7d");
++	it("defaults to the weekly window even when the 5 Hour window is higher", () => {
++		const text = plain(ctxWith(busySession));
++
++		expect(text).toContain(`${bar(0)} 8% 7d`);
++		expect(text).not.toContain("42%");
++		expect(plain(ctxWith(busySession, "weekly"))).toBe(text);
++	});
++
++	it("session shows the 5 Hour window, tagged", () => {
++		expect(plain(ctxWith(busySession, "session"))).toContain(`${bar(2)} 42% 5h`);
++		expect(plain(ctxWith(busyWeek, "session"))).toContain("24% 5h");
+ 	});
+ 
+-	it("draws the 7 Day window, tagged, when it is the more constraining one", () => {
+-		const text = plain(ctxWith({ fiveHour: { percent: 24 }, sevenDay: { percent: 91 } }));
++	it("worst shows the higher of the two windows", () => {
++		expect(plain(ctxWith(busySession, "worst"))).toContain("42% 5h");
++		expect(plain(ctxWith(busyWeek, "worst"))).toContain(`${bar(5)} 91% 7d`);
++	});
+ 
+-		expect(text).toContain(`${bar(5)} 91%`);
+-		expect(text).toContain("7d");
+-		expect(text).not.toContain("24%");
++	it("worst keeps the shorter window when both are equally used", () => {
++		expect(plain(ctxWith({ fiveHour: { percent: 60 }, sevenDay: { percent: 60 } }, "worst"))).toContain("60% 5h");
+ 	});
+ 
+-	it("keeps the 5 Hour window when both windows are equally used", () => {
+-		const text = plain(ctxWith({ fiveHour: { percent: 60 }, sevenDay: { percent: 60 } }));
++	it("draws a 100% weekly row as a full bar", () => {
++		expect(plain(ctxWith({ sevenDay: { percent: 100 } }))).toContain(`${bar(5)} 100% 7d`);
++		expect(plain(ctxWith({ sevenDay: { percent: 140 } }))).toContain(`${bar(5)} 100% 7d`);
++	});
+ 
+-		expect(text).toContain("60%");
+-		expect(text).not.toContain("7d");
++	it("weekly falls back to the longest reported window under that window's own tag", () => {
++		expect(plain(ctxWith({ fiveHour: { percent: 21 } }))).toContain("21% 5h");
++		expect(plain(ctxWith({ fiveHour: { percent: 21 }, daily: { percent: 33 } }))).toContain("33% 1d");
++		// Monthly outlasts a week; a weekly row still wins when the provider reports one.
++		expect(plain(ctxWith({ fiveHour: { percent: 21 }, monthly: { percent: 77 } }))).toContain("77% mo");
++		expect(
++			plain(ctxWith({ fiveHour: { percent: 21 }, sevenDay: { percent: 5 }, monthly: { percent: 77 } })),
++		).toContain("5% 7d");
++		expect(plain(ctxWith({ fiveHour: { percent: 21 } }))).not.toContain("7d");
+ 	});
+ 
+-	it("draws the only window a provider reports, tagged", () => {
+-		expect(plain(ctxWith({ sevenDay: { percent: 8 } }))).toContain(`${bar(0)} 8% 7d`);
+-		expect(plain(ctxWith({ monthly: { percent: 77 } }))).toContain("77% mo");
++	it("session falls back to the shortest reported window under its own tag", () => {
++		expect(plain(ctxWith({ sevenDay: { percent: 8 }, monthly: { percent: 77 } }, "session"))).toContain("8% 7d");
+ 	});
+ 
+-	it("clamps an over-quota window to a full bar", () => {
+-		expect(plain(ctxWith({ fiveHour: { percent: 140 } }))).toContain(`${bar(5)} 100%`);
++	it("weekly takes the model's tier row when it is more used than the shared row", () => {
++		const tierHigher = { sevenDay: { percent: 10 }, modelSevenDay: { percent: 88, tier: "fable" } };
++		const sharedHigher = { sevenDay: { percent: 100 }, modelSevenDay: { percent: 14, tier: "fable" } };
++
++		expect(plain(ctxWith(tierHigher))).toContain("88% 7d fable");
++		expect(plain(ctxWith(sharedHigher))).toMatch(/100% 7d$/);
++		// The tier counter also competes in worst, but never in session.
++		expect(plain(ctxWith({ ...tierHigher, fiveHour: { percent: 20 } }, "worst"))).toContain("88% 7d fable");
++		expect(plain(ctxWith({ ...tierHigher, fiveHour: { percent: 20 } }, "session"))).toContain("20% 5h");
+ 	});
+ 
+ 	it("warns from 50% and errors from 80% like the usage segment", () => {
+-		expect(renderSegment("usage_bar", ctxWith({ fiveHour: { percent: 30 } })).content).toContain(
+-			theme.fg("muted", "30%"),
+-		);
+-		expect(renderSegment("usage_bar", ctxWith({ fiveHour: { percent: 65 } })).content).toContain(
+-			theme.fg("warning", "65%"),
+-		);
+-		expect(renderSegment("usage_bar", ctxWith({ fiveHour: { percent: 92 } })).content).toContain(
+-			theme.fg("error", "92%"),
+-		);
++		const colored = (percent: number) => renderSegment("usage_bar", ctxWith({ sevenDay: { percent } })).content;
++
++		expect(colored(30)).toContain(theme.fg("muted", "30%"));
++		expect(colored(65)).toContain(theme.fg("warning", "65%"));
++		expect(colored(92)).toContain(theme.fg("error", "92%"));
+ 	});
+ 
+ 	it("collapses when the provider has no usage windows", () => {
+@@ -81,5 +104,10 @@ describe("usage_bar status-line segment", () => {
+ 
+ 		expect(view?.spans.map(part => part.t).join("")).toBe(`${bar(5)} 91% 7d`);
+ 		expect(view?.title).toBe("7 Day window: 91% used");
++		const session = describeSegment(
++			"usage_bar",
++			ctxWith({ fiveHour: { percent: 42 }, sevenDay: { percent: 91 } }, "session"),
++		);
++		expect(session?.spans.map(part => part.t).join("")).toBe(`${bar(2)} 42% 5h`);
+ 	});
+ });
