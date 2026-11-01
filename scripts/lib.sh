@@ -77,7 +77,9 @@ runs_here() {
 addon_libc() {
     local needed
     needed="$(readelf -d "$1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')"
-    if grep -q '^libc\.musl-' <<<"$needed"; then
+    # A musl shared library names the C library libc.so (musl's loader provides it), or libc.musl-<arch>.so.1 in some
+    # builds. Upstream's Bazel-built musl addons list libc.so, checked on the addons of the fork.4 release run.
+    if grep -Eq '^(libc\.so|libc\.musl-.*)$' <<<"$needed"; then
         printf 'musl\n'
     elif grep -qx 'libc\.so\.6' <<<"$needed"; then
         printf 'glibc\n'
