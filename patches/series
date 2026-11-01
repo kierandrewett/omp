@@ -2,3 +2,6 @@
 0002-fork-updater.patch
 0003-mcp-form-elicitation.patch
 0004-task-model-role-prompting.patch
+0005-task-model-price-tiers.patch
+0006-subagent-shelf-usage.patch
+0007-task-model-switch.patch

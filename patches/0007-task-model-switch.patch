@@ -1,0 +1,1478 @@
+diff --git a/docs/agent-hub.md b/docs/agent-hub.md
+index 48baa7e0e9..0502c732ee 100644
+--- a/docs/agent-hub.md
++++ b/docs/agent-hub.md
+@@ -74,7 +74,7 @@ For a normal local subagent, `Enter` or click focuses the main TUI on that agent
+ 
+ 1. Read its live transcript and tool activity.
+ 2. Type a message and press `Enter` to steer a running turn or prompt an idle agent.
+-3. Change its model or thinking level with `Alt+P`, `/switch`, `Ctrl+P`, `Shift+Tab`, or `/effort`. These switches are session-only and leave the main session alone. `/model` and `Alt+M` open the same session-only picker, because role assignments configure the main session.
++3. Change its model or thinking level with `Alt+P`, `/switch`, `Ctrl+P`, `Shift+Tab`, or `/effort`. These switches are session-only and leave the main session alone. `/model` and `Alt+M` open the same session-only picker, because role assignments configure the main session. A model chosen in the picker or with `/switch <selector>` never interrupts a running subagent: it finishes the request in flight on its current model and uses the new one from its next request, with its context intact, and its view shows a notice when the switch lands. As the user you are the operator, so `task.perCallModel` and its grants do not gate the choice, even for a worker started with a per-call `model`. `Ctrl+P` role cycling still switches at once, and a per-call worker refuses a cycled model its grants do not admit.
+ 4. Press `Esc` with an empty editor, or double-tap `←`, to return to the main session.
+ 
+ Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
+diff --git a/docs/tools/task.md b/docs/tools/task.md
+index 57cb4e3034..c3950ef027 100644
+--- a/docs/tools/task.md
++++ b/docs/tools/task.md
+@@ -70,6 +70,12 @@ When per-call selection is enabled for a surface, the task/eval tool description
+ 
+ **Price tiers.** A task item's `model` may also be `$`, `$$`, `$$$` or `$$$$` (task calls only; eval calls need an exact selector). The tiers are quarters of the blended price (input plus output per million tokens) across every loaded chat model, so a tier means the same thing whichever providers you are signed in to. Models with no price (free tiers, subscriptions, local models) take no tier. A tier resolves to the configured role in that tier, or in the nearest tier when there is none (the cheaper side wins a tie), and from there it is approved, dispatched and revived exactly like that role. Within a tier the most used role wins. Usage is the share of the last 90 days of requests in `stats.db` (read-only, from the hourly rollup), weighted by how specific the match is: the exact `provider/model-id` counts 0.6, the same model family 0.3 and the same provider 0.1. With no history the order falls back to the role name. The task description shows each configured role's tier, tells agents to use the cheapest tier that does the work reliably, and calls `$$$$` very rare. The judge that picks a role for a call without `model` is shown the same tiers and usage shares.
+ 
++### Changing a running subagent's model
++
++`write proc://<agentId>/model` with a configured role (`@haiku`), a price tier (`$` to `$$$$`, resolved exactly as for a task `model`) or one exact `provider/model-id[:level]` as `content` switches a running subagent that the caller spawned (the task description tells the agent to use it when the user names a model or tier for a running agent, for example "use haiku for RefactorWork"). The id is the agent's name or the id of the job running it. The call never aborts or restarts the agent: it finishes the request in flight on its current model, and its next model request uses the new one, with its context, tools and turn intact. The change is session-only (a `temporary` model change in the agent's transcript, plus a notice in its view when a queued switch lands) and is not persisted to settings or roles. An agent between requests switches immediately; a switch queued while a request is in flight is applied at the next request boundary and the newest one wins. A per-call worker's saved identity follows the switch, so a revival restores it on the model it last ran on.
++
++The model-facing route takes the approval a task `model` does: `task.perCallModel` must be `on` (project settings can only turn it off), the selector is one configured role or one exact selector, and the model must be an available chat model the operator's configuration grants, within `task.perCallModelAllow` and able to run at or below `task.maxEffort`. Grants are read from the agent's own definition and the caller's live model as for a spawn. It is refused, and nothing changes, when the agent was not spawned by the caller, does not exist, has finished (anything but `running`), or the model is not approved or unavailable. Retry fallback is unchanged: a per-call worker never falls back, and any other agent keeps its `subagent:<id>` chain. The user switching from the subagent's own view (`/switch`, the model picker) is the operator and is not gated; the view applies the same deferred switch ([Agent Hub](../agent-hub.md)), and a per-call worker's dispatch gate admits the models the user chose.
++
+ Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape. Settled results report the requested and actual model; extension routing, auth fallback, and runtime retry fallback can switch the actual model under the existing policies.
+ 
+ Batch calls reject a top-level `agent` rather than silently discarding a specialist selector and spawning the default agent. Put `agent` on each `tasks[]` item when selecting `reviewer`, `scout`, or a custom agent; the agent name is not inferred from the task text.
+@@ -182,7 +188,7 @@ Artifacts and side channels:
+    - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
+    - Shares the parent `local://` root and `ArtifactManager` with subagents.
+ - Background work / cancellation
+-   - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
++   - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session. `proc://<agentId>/model` changes a running owned subagent's model without cancelling it (see [Changing a running subagent's model](#changing-a-running-subagents-model)).
+    - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.
+ 
+ ## Limits & Caps
+diff --git a/docs/tools/wait.md b/docs/tools/wait.md
+index d60ae664b8..6f7d50a37e 100644
+--- a/docs/tools/wait.md
++++ b/docs/tools/wait.md
+@@ -29,6 +29,6 @@
+ ## Related surfaces
+ 
+ - `read proc://` lists caller-visible jobs and project services; `read proc://<id>` inspects state/output without consuming delivery.
+-- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; no `content` needed. Bare `proc://<id>` writes send stdin only to a service, including empty input.
++- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; no `content` needed. `write proc://<id>/model` (content: `@role`, a price tier `$`..`$$$$` or exact `provider/model-id[:level]`) switches a running owned subagent's model from its next request. Bare `proc://<id>` writes send stdin only to a service, including empty input.
+ - `write agent://<id>` sends a peer message; `agent://all` broadcasts to visible live peers. Bare `read history://` discovers registered agent transcripts. The final result of a subagent is delivered to its parent automatically.
+ - Start supervised services with `bash` `name` and optional `ready`; inspect and control them through `proc://`.
+diff --git a/docs/tools/write.md b/docs/tools/write.md
+index 45cdc122c7..c363d8a7f6 100644
+--- a/docs/tools/write.md
++++ b/docs/tools/write.md
+@@ -155,7 +155,7 @@ content: ""
+ 
+ - `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers. This write is read-approved and allowed in plan mode and `deviceOnlyWrite` when messaging is available. `agent://` reads remain output artifacts.
+ - `agent://<id>?progress` marks the message as an acknowledgement or progress note on something that peer asked: it answers nothing and asks nothing, so the peer's `wait` keeps blocking for the real reply, which is any later plain message. It wakes no relay turn. `agent://all?progress` is rejected.
+-- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval. Stdin and `/mode` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
++- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. `proc://<id>/model` requires `content`: a configured `@role`, a price tier `$`..`$$$$` or one exact `provider/model-id[:level]`; it switches a running subagent the caller spawned to that model from its next model request, without aborting its turn, under the same approval as a task `model` (`task.perCallModel`, grants, `task.perCallModelAllow`); a finished, unknown or foreign agent is refused. Proc writes require exec approval. Stdin, `/mode` and `/model` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill`, `/mode` and `/model` are write-only.
+ - `out://` shows `content` (Markdown, at most 64 KiB) to the user as a reply without ending the turn: the transcript draws the call as assistant prose that streams with the arguments, not as a tool card, and keeps it visible when tool activity is hidden. The URL path is ignored and the scheme is write-only. The write is read-approved and allowed in plan mode and `deviceOnlyWrite`. It is refused for subagents, and where `out.enabled` is off — by default everywhere but the interactive TUI (terminal or Tern), so print, RPC, and ACP sessions neither see nor accept it unless `out.enabled` is explicitly set. Only sessions where it is on get the system-prompt entry.
+ - A registered internal handler with a `write` hook owns its resource semantics (for example, `cfg://`, `agent://`, `proc://`). File-backed schemes (`local://`, `vault://`) have no hook: the router locates the target file (`local://` in the session-local artifact sandbox, `vault://` under the vault root) and the write follows the plain-file path.
+ - `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first, then pass one JSON object as `content`. Device schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved. The outer approval gate uses `tools.approval.<device>` before the generic `write` policy. `xd://report_issue` separately accepts a plain issue description.
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 72a311851a..ac8124e0b1 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -10,6 +10,8 @@
+ - The task tool description now lists your model roles as `@role` and tells agents to pass the role when you name a model or tier such as "haiku", instead of guessing a model version. When the agent cannot tell which model you mean, it asks with the `ask` tool.
+ - A task item's `model` can be a price tier, `$` to `$$$$`, instead of a role. Tiers are quarters of the price across all loaded chat models. A tier picks the configured role in that tier, or the nearest one, and the role you use most wins a tie. The usage weighting reads `stats.db` and counts the exact model most, then its family, then its provider. The task description shows each role's tier, and the judge that routes calls without `model` weighs price and usage too. `$$$$` is treated as very rare.
+ - Each row in the pinned subagent shelf now ends with that subagent's total tokens, cache reads included, and its API cost, for example `1.4M tok · $0.42`. Cost is left out while it is zero, and a row too narrow for both drops the usage instead of the title. Subagent progress now reports `cacheReadTokens`.
++- Change a running subagent's model without restarting it: `write proc://<agentId>/model` with a configured role such as `@haiku` or one exact `provider/model-id[:level]` switches a subagent you spawned from its next model request, keeping its context. It takes the same approval as a task `model` (`task.perCallModel`, your grants, `task.perCallModelAllow`, `task.maxEffort`) and refuses a finished, unknown or foreign agent. The task description tells the agent to use it when you name a model or tier for a running agent.
++- `/switch <model>` and the model picker, used inside a subagent's view, now switch that subagent at its next model request instead of in the middle of the one in flight, and they work on a worker started with a per-call `model`, which used to fail its next request because the model was outside its grants. `/switch` resolves its selector in the viewed session. A notice in the subagent's view reports the switch when it lands, and a per-call worker revives on the model it last ran on.
+ 
+ ### Changed
+ 
+diff --git a/packages/coding-agent/src/internal-urls/proc-protocol.ts b/packages/coding-agent/src/internal-urls/proc-protocol.ts
+index e2ef1144b7..eaa11afc6a 100644
+--- a/packages/coding-agent/src/internal-urls/proc-protocol.ts
++++ b/packages/coding-agent/src/internal-urls/proc-protocol.ts
+@@ -1,4 +1,5 @@
+ import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
++import { formatModelStringWithRouting } from "../config/model-resolver";
+ import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+ import { formatBytes, logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+ import type { AsyncJob } from "../async";
+@@ -35,9 +36,10 @@ import type {
+ } from "./types";
+ 
+ import { cfgLaunchEnabled } from "../tools/settings";
++import { switchSubagentModelAsCaller } from "../task/model-switch";
+ 
+ type ProcTarget =
+-	| { id: string; action: "stdin" | "mode" | "kill" }
++	| { id: string; action: "stdin" | "mode" | "model" | "kill" }
+ 	/** `proc://<id>/streams` lists a bash job's pipe streams; `/streams/<n>` reads one. */
+ 	| { id: string; action: "streams"; stream?: number };
+ 
+@@ -46,9 +48,13 @@ const STREAMS_PATH = /^\/streams(?:\/(\d+))?\/?$/;
+ function target(url: InternalUrl): ProcTarget {
+ 	const path = url.rawPathname ?? url.pathname;
+ 	const streams = STREAMS_PATH.exec(path);
+-	if (url.search || url.hash || (!streams && path !== "" && path !== "/" && path !== "/mode" && path !== "/kill"))
++	if (
++		url.search ||
++		url.hash ||
++		(!streams && path !== "" && path !== "/" && path !== "/mode" && path !== "/model" && path !== "/kill")
++	)
+ 		throw new Error(
+-			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/streams[/<n>], proc://<id>/kill, or proc://<id>/mode.`,
++			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/streams[/<n>], proc://<id>/kill, proc://<id>/mode, or proc://<id>/model.`,
+ 		);
+ 	const id = url.rawHost;
+ 	if (id.includes("/") || id === "." || id === "..") throw new Error(`Invalid process id: ${id}`);
+@@ -56,7 +62,7 @@ function target(url: InternalUrl): ProcTarget {
+ 		if (!id) throw new Error("proc://<id>/streams needs a job id, e.g. proc://bg_3/streams");
+ 		return { id, action: "streams", stream: streams[1] === undefined ? undefined : Number(streams[1]) };
+ 	}
+-	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
++	return { id, action: path === "/mode" ? "mode" : path === "/model" ? "model" : path === "/kill" ? "kill" : "stdin" };
+ }
+ 
+ /** `proc://<id>/kill`: cancels a job, agent, or service; needs no content and touches no files. */
+@@ -70,12 +76,36 @@ function killCall(id: string): string {
+ }
+ 
+ /** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
+-function writeOnlyError(id: string, action: "kill" | "mode"): string {
++function writeOnlyError(id: string, action: "kill" | "mode" | "model"): string {
+ 	if (action === "kill")
+ 		return `proc://${id}/kill is write-only; reading it did not stop anything. To cancel ${id}, ${killCall(id)}; read proc://${id} for its status.`;
++	if (action === "model")
++		return `proc://${id}/model is write-only; reading it did not change anything. To change a running subagent's model, call write with ${JSON.stringify({ path: `proc://${id}/model`, content: "@haiku" })} (a configured role, or an exact provider/model-id[:level]); read proc://${id} for its status.`;
+ 	return `proc://${id}/mode is write-only; modes and stdin are services-only, not available for in-process jobs or agents. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
+ }
+ 
++/**
++ * `proc://<id>/model`: switch the running subagent `id` (its agent id, or the id of the job running it)
++ * to the role or exact model `content` names. It takes effect at the subagent's next model request.
++ */
++async function switchAgentModel(session: ToolSession, id: string, selector: string): Promise<InternalWriteResult> {
++	const job = ownerJobs(session).find(item => item.id === id);
++	if (job && job.type !== "task") {
++		throw new Error(`${id} is a ${job.type} job, not a subagent; only a running subagent has a model to change.`);
++	}
++	const agentId = job?.agentId ?? id;
++	const outcome = await switchSubagentModelAsCaller(session, agentId, selector);
++	const identity = formatModelStringWithRouting(outcome.model);
++	const text =
++		outcome.state === "queued"
++			? `${agentId} will switch to ${identity} at its next model request; the request in flight finishes on its current model, and its context and turn are kept.`
++			: `${agentId} now uses ${identity}; its context is kept.`;
++	return {
++		content: [{ type: "text", text }],
++		details: { proc: { action: "model", agent: agentId, model: identity, state: outcome.state } },
++	};
++}
++
+ function ownerJobs(session: ToolSession): AsyncJob[] {
+ 	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
+ }
+@@ -266,8 +296,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
+ 		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
+ 		if (!id)
+ 			throw new Error(
+-				"Write requires proc://<service> for stdin, proc://<id>/kill, or proc://<service>/mode; stdin and modes are services-only.",
++				"Write requires proc://<service> for stdin, proc://<id>/kill, proc://<id>/model for a running subagent, or proc://<service>/mode; stdin and modes are services-only.",
+ 			);
++		if (action === "model") return switchAgentModel(session, id, content);
+ 		const ownerId = session.getAgentId?.() ?? undefined;
+ 		const jobs = ownerJobs(session);
+ 		const exactJob = jobs.find(item => item.id === id);
+diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
+index f3f1ae5b2b..c2cf6cf80a 100644
+--- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
+@@ -149,6 +149,7 @@ import {
+ 	cfgTreeFilterMode,
+ } from "../settings";
+ import { cfgTaskAgentModelOverrides } from "../../task/settings";
++import { switchSubagentModelAsOperator } from "../../task/subagent-model-policy";
+ 
+ /** First-use boundary for provider auth catalog and dialog components. */
+ async function loadProviderAuthUi() {
+@@ -763,11 +764,19 @@ export class SelectorController {
+ 		const focusedAgentId = this.ctx.focusedAgentId;
+ 		const apply = async () => {
+ 			const level = thinkingLevel ?? target.resolveTemporaryModelThinkingLevel(model);
+-			await target.setModelTemporary(model, level);
++			// A subagent keeps the request it is serving and takes the model at its next one (the operator's
++			// choice is not gated by `task.perCallModel`); the main session switches at once.
++			let state: "applied" | "queued" = "applied";
++			if (focusedAgentId) state = await switchSubagentModelAsOperator(target, model, level);
++			else await target.setModelTemporary(model, level);
+ 			this.ctx.statusLine.invalidate();
+ 			this.ctx.updateEditorBorderColor();
+ 			if (focusedAgentId) {
+-				this.ctx.showStatus(`Agent ${focusedAgentId} model: ${selector}`);
++				this.ctx.showStatus(
++					state === "queued"
++						? `Agent ${focusedAgentId} will use ${selector} from its next model request`
++						: `Agent ${focusedAgentId} model: ${selector}`,
++				);
+ 				return;
+ 			}
+ 			const roleSelectorHint = appKey(this.ctx.keybindings, "app.model.select") || formatKeyHint("alt+m");
+@@ -861,7 +870,16 @@ export class SelectorController {
+ 				onPickRole: async entry => {
+ 					if (!isCurrent() || selectOnly) return;
+ 					try {
+-						await this.ctx.viewSession.applyRoleModel(entry);
++						// The focused subagent keeps its turn: the role's model applies from its next request.
++						if (this.ctx.focusedAgentId) {
++							await switchSubagentModelAsOperator(
++								this.ctx.viewSession,
++								entry.model,
++								entry.explicitThinkingLevel ? entry.thinkingLevel : undefined,
++							);
++						} else {
++							await this.ctx.viewSession.applyRoleModel(entry);
++						}
+ 						this.ctx.statusLine.invalidate();
+ 						this.ctx.updateEditorBorderColor();
+ 						this.ctx.showModelCycleTrack(
+diff --git a/packages/coding-agent/src/prompts/internal-urls/proc.md b/packages/coding-agent/src/prompts/internal-urls/proc.md
+index 96de9320f9..fc76589a15 100644
+--- a/packages/coding-agent/src/prompts/internal-urls/proc.md
++++ b/packages/coding-agent/src/prompts/internal-urls/proc.md
+@@ -1 +1 @@
+-`proc://`: jobs, agents, and services; `proc://<id>` status/output; write sends stdin to services only (empty = Enter); `proc://<id>/kill` cancels/stops jobs, agents, and services, omit `content`; `proc://<id>/mode`: `persist`|`session`|`detached` (services only); start long-lived work as a named service when it needs stdin or lifetime controls; `proc://<id>/streams` lists a bash job's pipes, `proc://<id>/streams/<n>` reads what crossed pipe `n` so far (live under `| tail`/`| grep`; never rerun to see it).
++`proc://`: jobs, agents, and services; `proc://<id>` status/output; write sends stdin to services only (empty = Enter); `proc://<id>/kill` cancels/stops jobs, agents, and services, omit `content`; `proc://<id>/model`: `content` = a configured `@role`, a price tier `$`..`$$$$` or exact `provider/model-id[:level]`, switches a running subagent you spawned from its next model request (context kept, same approval as a task `model`; refused when it has finished); `proc://<id>/mode`: `persist`|`session`|`detached` (services only); start long-lived work as a named service when it needs stdin or lifetime controls; `proc://<id>/streams` lists a bash job's pipes, `proc://<id>/streams/<n>` reads what crossed pipe `n` so far (live under `| tail`/`| grep`; never rerun to see it).
+diff --git a/packages/coding-agent/src/prompts/tools/task.md b/packages/coding-agent/src/prompts/tools/task.md
+index 1351fd7626..b1c89768e1 100644
+--- a/packages/coding-agent/src/prompts/tools/task.md
++++ b/packages/coding-agent/src/prompts/tools/task.md
+@@ -30,6 +30,7 @@ Price counts when you choose: use the cheapest tier that does the work reliably,
+ Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{#if tier}} ({{tier}}){{/if}}{{/list}}{{else}}none{{/if}}.
+ Unsure (wording fits several roles or none, or the user's intent is unclear)? Do not guess: call `ask` with the roles as options before spawning, if you have `ask`. Rare. NEVER ask when one role clearly matches.
+ Only operator-approved models; no arrays, globs or partial IDs. Also approved: {{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model. A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.{{#if perCallModelAdvertisement.allowlist.length}} Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).{{/if}} An agent's `task.agentModelOverrides` entry conflicts with `model`. Requested model unavailable → stop and report; NEVER substitute another. Every request requires an approved model; retry fallback, context promotion and prewalk are off.
++Running agent, and the user names a model or tier for it ("use haiku for RefactorWork") → do not respawn: call `write` with `path: "proc://<agent name>/model"` and `content` the same `@role`, price tier or exact ID chosen by the rules above. The agent keeps its context and current request; its next model request uses the new model. Same approval as `model`; a finished agent is refused and changes nothing.
+ {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
+ {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
+ {{else}}`isolated`: worktree; changes retained, not applied.
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index bcea56f24b..fef1f5b406 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -126,6 +126,7 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
+ import type { ModelRegistry } from "../config/model-registry";
+ import {
+ 	disabledProviderIds,
++	formatModelStringWithRouting,
+ 	getModelMatchPreferences,
+ 	type ResolvedModelRoleValue,
+ 	resolveCliModel,
+@@ -1167,6 +1168,8 @@ export class AgentSession implements SettingsScope {
+ 	#modeExitDrainSuppressionDepth = 0;
+ 	#usagePreflightReadyForNextModelCall = false;
+ 	#usagePreflightReadyModel: Model | undefined;
++	/** A model change waiting for the next model request of the run in flight ({@link switchModelAtNextRequest}). */
++	#pendingModelSwitch: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined } | undefined;
+ 	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
+ 	#detachUsageBeforeModelCall: (() => void) | undefined;
+ 	/** Claude account lane (`cred:<id>`/`key:<hash>`) that served the latest Anthropic request. */
+@@ -2194,6 +2197,8 @@ export class AgentSession implements SettingsScope {
+ 			}
+ 		});
+ 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
++		// Runs before the usage preflight so that check, and the request itself, see the switched model.
++		this.addDisposer(this.agent.addBeforeModelCallHook(() => this.#applyPendingModelSwitch()));
+ 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+ 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
+ 			if (this.#usagePreflightReadyForNextModelCall) {
+@@ -6186,6 +6191,7 @@ export class AgentSession implements SettingsScope {
+ 		for (const dispose of this.#disposers.splice(0)) dispose();
+ 		this.#modelDiscoveryAbortController.abort();
+ 		this.#queuedMessageDrainBlocked = false;
++		this.#pendingModelSwitch = undefined;
+ 		this.#usagePreflightReadyForNextModelCall = false;
+ 		this.#detachUsageBeforeQueueDequeue?.();
+ 		this.#detachUsageBeforeQueueDequeue = undefined;
+@@ -6945,7 +6951,8 @@ export class AgentSession implements SettingsScope {
+ 	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
+ 	 * its model calls are built from, appending a newer one when either changes: signed thinking is
+ 	 * bound to the system prompt and tools, so cold revival must replay them. A per-turn override is
+-	 * stored as the base its hook was given, since the revived turn re-runs the hook. Transcripts
++	 * stored as the base its hook was given, since the revived turn re-runs the hook. A per-call
++	 * worker also keeps the model it runs on, which cold revival restores exactly. Transcripts
+ 	 * without a `session_init` are left alone.
+ 	 */
+ 	#recordModelCallSystemPrompt(prompt: string[]): void {
+@@ -6960,7 +6967,12 @@ export class AgentSession implements SettingsScope {
+ 		const base = this.#tools.baseOfSystemPrompt(prompt);
+ 		const items = this.#workPoolYieldItems;
+ 		const persistedItems = init.workPoolYieldItems ?? [];
++		// A per-call worker revives only on its exact saved model: follow a switch so the revival keeps it.
++		const model = this.model;
++		const modelIdentity = init.perCallModel && model ? formatModelStringWithRouting(model) : undefined;
++		const modelMoved = modelIdentity !== undefined && modelIdentity !== init.perCallModelIdentity;
+ 		if (
++			!modelMoved &&
+ 			base.length === init.systemPrompt.length &&
+ 			base.every((block, index) => block === init.systemPrompt[index]) &&
+ 			items.length === persistedItems.length &&
+@@ -6970,7 +6982,14 @@ export class AgentSession implements SettingsScope {
+ 		) {
+ 			return;
+ 		}
+-		cached.init = { ...init, systemPrompt: base, workPoolYieldItems: items.length > 0 ? [...items] : undefined };
++		cached.init = {
++			...init,
++			systemPrompt: base,
++			workPoolYieldItems: items.length > 0 ? [...items] : undefined,
++			...(modelMoved
++				? { perCallModelIdentity: modelIdentity, perCallThinkingLevel: this.configuredThinkingLevel() ?? null }
++				: {}),
++		};
+ 		this.sessionManager.appendSessionInit(cached.init);
+ 	}
+ 
+@@ -11672,6 +11691,54 @@ export class AgentSession implements SettingsScope {
+ 		return this.#models.setModelTemporary(model, thinkingLevel, options);
+ 	}
+ 
++	/**
++	 * Selects a model for the next model request without interrupting the turn in flight. A streaming
++	 * session finishes the request it is serving on its current model and switches before the next one,
++	 * keeping its context, tools and transcript; an idle session switches now. Only the newest queued
++	 * switch applies. The credential is checked here, so a refusal reaches the caller instead of the
++	 * request boundary.
++	 * @returns `"applied"` when the model changed now, `"queued"` when it waits for the next request
++	 * @throws Error if no API key is available for the model
++	 */
++	async switchModelAtNextRequest(
++		model: Model,
++		thinkingLevel?: ConfiguredThinkingLevel,
++	): Promise<"applied" | "queued"> {
++		if (!this.#modelRegistry.hasConfiguredAuth(model)) {
++			throw new Error(`No API key for ${model.provider}/${model.id}`);
++		}
++		if (!this.isStreaming) {
++			this.#pendingModelSwitch = undefined;
++			await this.setModelTemporary(model, thinkingLevel);
++			return "applied";
++		}
++		this.#pendingModelSwitch = { model, thinkingLevel };
++		return "queued";
++	}
++
++	/** The model a queued {@link switchModelAtNextRequest} selects at the next request; undefined when none waits. */
++	get pendingModelSwitch(): Model | undefined {
++		return this.#pendingModelSwitch?.model;
++	}
++
++	async #applyPendingModelSwitch(): Promise<void> {
++		const pending = this.#pendingModelSwitch;
++		if (!pending) return;
++		this.#pendingModelSwitch = undefined;
++		const target = `${pending.model.provider}/${pending.model.id}`;
++		try {
++			await this.setModelTemporary(pending.model, pending.thinkingLevel);
++			this.emitNotice("info", `Model switched to ${target} for the next request.`, "model-switch");
++		} catch (error) {
++			const current = this.model;
++			this.emitNotice(
++				"warning",
++				`Model switch to ${target} failed${current ? `; staying on ${current.provider}/${current.id}` : ""}: ${error instanceof Error ? error.message : String(error)}`,
++				"model-switch",
++			);
++		}
++	}
++
+ 	/** Cycles the scoped model set, or all available models when no scope exists. */
+ 	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+ 		return this.#models.cycleModel(direction);
+diff --git a/packages/coding-agent/src/slash-commands/builtin-modes.ts b/packages/coding-agent/src/slash-commands/builtin-modes.ts
+index 1b78c316b4..10f5fd59b3 100644
+--- a/packages/coding-agent/src/slash-commands/builtin-modes.ts
++++ b/packages/coding-agent/src/slash-commands/builtin-modes.ts
+@@ -495,7 +495,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+ 				runtime.ctx.showModelSelector({ temporaryOnly: true });
+ 				return;
+ 			}
+-			const resolved = resolveSessionModelSelector(selector, runtime.ctx.session, runtime.ctx.settings);
++			// The viewed session (a focused subagent's own, else the main one) owns the scope the selector resolves in.
++			const resolved = resolveSessionModelSelector(selector, runtime.ctx.viewSession, runtime.ctx.settings);
+ 			if (!resolved.model) {
+ 				runtime.ctx.showError(`Unknown model: ${selector}`);
+ 				return;
+diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
+index 70d6d7b039..8ac2523af8 100644
+--- a/packages/coding-agent/src/task/executor.ts
++++ b/packages/coding-agent/src/task/executor.ts
+@@ -29,6 +29,7 @@ import {
+ 	resolveAgentAdvisorSelection,
+ 	resolveAgentPrewalkPattern,
+ 	resolveConfiguredModelPatterns,
++	resolveExactModelIdentity,
+ 	resolveExplicitModelRole,
+ 	resolveModelOverride,
+ 	resolveModelOverrideWithAuthFallback,
+@@ -79,7 +80,7 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
+ import type { AuthStorage } from "../session/auth-storage";
+ import type { CostGate } from "../session/cost-gate";
+ import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+-import { hasConversationalHistory, SessionManager } from "../session/session-manager";
++import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
+ import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+ import {
+ 	AUTO_THINKING,
+@@ -135,6 +136,7 @@ import {
+ } from "@oh-my-pi/pi-tui/tools/task";
+ import { yieldSectionShapes } from "./yield-assembly";
+ import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
++import { SubagentModelPolicy, trackSubagentModelPolicy } from "./subagent-model-policy";
+ import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+ import {
+ 	cfgTaskPrewalk,
+@@ -4093,6 +4095,8 @@ interface WarmReviveCapture {
+ 	spec: SubagentSessionSpec;
+ 	/** A per-call worker never switches models; its warm revive keeps only the exact saved model. */
+ 	perCallModel: boolean;
++	/** Who may change this child's model while it runs; follows every revival of it. */
++	modelPolicy: SubagentModelPolicy;
+ 	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
+ 	settings: SubagentSettingsRecipe;
+ 	parentArtifactManager: ArtifactManager | undefined;
+@@ -4186,6 +4190,15 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+ 			capture.spec.preparedSession || capture.perCallModel
+ 				? undefined
+ 				: reopened.getSessionLocalModelChange()?.model;
++		// A per-call worker revives on the exact model it last ran on, which a model switch may have moved off the spawn's.
++		const savedInit = capture.perCallModel ? extractSessionInit(reopened.getEntries()) : null;
++		const spawnModel = capture.spec.options.model;
++		const switchedModel =
++			savedInit?.perCallModelIdentity &&
++			(!spawnModel || formatModelStringWithRouting(spawnModel) !== savedInit.perCallModelIdentity) &&
++			capture.spec.options.modelRegistry
++				? resolveExactModelIdentity(savedInit.perCallModelIdentity, capture.spec.options.modelRegistry)
++				: undefined;
+ 		try {
+ 			try {
+ 				const options = buildSubagentSessionOptions(
+@@ -4212,6 +4225,9 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+ 								thinkingLevel: undefined,
+ 							}
+ 						: undefined),
++					...(switchedModel
++						? { model: switchedModel, thinkingLevel: savedInit?.perCallThinkingLevel ?? undefined }
++						: undefined),
+ 					oauthAccountPools: Object.hasOwn(agentAccountPools, capture.agentName)
+ 						? agentAccountPools[capture.agentName]
+ 						: undefined,
+@@ -4222,6 +4238,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+ 			}
+ 			mcpFollower?.bind(revived);
+ 			trackSubagentSettings(revived, capture);
++			trackSubagentModelPolicy(revived, capture.modelPolicy);
+ 			trackSubagentPendingCandidate(revived, capture);
+ 			trackSubagentIrcRoster(revived, capture.spec.prompt);
+ 			const withoutParentOwnedTools = (toolNames: string[]): string[] =>
+@@ -4754,6 +4771,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 			}
+ 
+ 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
++			// What may change this child's model while it runs: its dispatch gate admits the user's own choices.
++			const modelPolicy = new SubagentModelPolicy({
++				agent: { name: agent.name, source: agent.source, model: agent.model },
++				perCallGrants: perCallModelGrants,
++				effortCeiling: spawnEffortCeiling,
++			});
+ 			// Rebuilding an equivalent session from the same JSONL file re-invokes
+ 			// createAgentSession with this spec (same agent id, tools, model, system
+ 			// prompt, artifacts dir) — only the SessionManager and settings differ.
+@@ -4781,7 +4804,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 						? {
+ 								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
+ 								assertDispatchModel: (dispatchModel: Model) => {
+-									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
++									if (!modelPolicy.admitsOperatorModel(dispatchModel)) {
++										assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
++									}
+ 									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+ 								},
+ 								disableModelFallback: true,
+@@ -4931,6 +4956,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 			sessionCreatedAt = performance.now();
+ 
+ 			monitor.setActiveSession(session);
++			trackSubagentModelPolicy(session, modelPolicy);
+ 			if (preparedSession) untrackedSession = undefined;
+ 			// Run-state notifications precede deferrable wire-level `agent_end`,
+ 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
+@@ -4960,6 +4986,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 					sessionFile,
+ 					spec: sessionSpec,
+ 					perCallModel: perCallModelGrants !== undefined,
++					modelPolicy,
+ 					settings: captureSubagentSettings(settings, subagentSettings),
+ 					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
+ 					keepTodo: prewalk !== undefined,
+diff --git a/packages/coding-agent/src/task/model-switch.ts b/packages/coding-agent/src/task/model-switch.ts
+new file mode 100644
+index 0000000000..28ecea8aee
+--- /dev/null
++++ b/packages/coding-agent/src/task/model-switch.ts
+@@ -0,0 +1,133 @@
++/**
++ * The parent agent's switch of a running subagent's model (`write proc://<id>/model`).
++ *
++ * A model-facing caller is held to the approval a task `model` passes: `task.perCallModel` must be
++ * `on` for task calls, the selector is one configured `@role` or one exact `provider/model-id[:level]`,
++ * and the model must be an available chat model the operator's configuration grants
++ * ({@link assertPerCallModelApproved}, including `task.perCallModelAllow` and `task.maxEffort`). Only the
++ * agent that spawned the subagent may switch it, and only while it runs. The switch itself applies at
++ * the subagent's next model request ({@link AgentSession.switchModelAtNextRequest}); the user's own
++ * switch in the subagent's view is ungated ({@link switchSubagentModelAsOperator}).
++ */
++import type { Api, Model } from "@oh-my-pi/pi-ai";
++import { modelKind } from "@oh-my-pi/pi-catalog/types";
++import {
++	AUTO_THINKING,
++	assertModelSupportsEffortCeiling,
++	type ConfiguredThinkingLevel,
++	clampThinkingLevelToCeiling,
++} from "@oh-my-pi/pi-tui/thinking";
++import { getModelMatchPreferences, resolveModelOverride } from "../config/model-resolver";
++import type { ToolSession } from "../tools";
++import { assertPerCallModelApproved, parentModelGrantPattern, type PerCallModelGrants } from "./model-approval";
++import { cfgTaskMaxEffort, cfgTaskPerCallModel, perCallModelEnabled } from "./settings";
++import {
++	callerModelRole,
++	callerModelTier,
++	invalidModelSelectorReason,
++	resolveCallerRoleSelector,
++	resolveCallerTierSelector,
++} from "./structured-subagent";
++import { subagentModelPolicy } from "./subagent-model-policy";
++
++export interface SubagentModelSwitchOutcome {
++	id: string;
++	model: Model<Api>;
++	/** `applied`: the subagent was between requests and changed now; `queued`: it changes at its next request. */
++	state: "applied" | "queued";
++}
++
++/**
++ * Switch the running subagent `id`, spawned by `caller`, to the model `selector` names.
++ * Throws with a message for the caller when the request is refused; nothing changes then.
++ */
++export async function switchSubagentModelAsCaller(
++	caller: ToolSession,
++	id: string,
++	selector: string,
++): Promise<SubagentModelSwitchOutcome> {
++	const { settings, modelRegistry, agentRegistry: registry } = caller;
++	const ref = registry?.get(id);
++	if (ref?.kind !== "sub") throw new Error(`Subagent not found: ${id}`);
++	const ownerId = caller.getAgentId?.() ?? undefined;
++	if (ref.parentId !== ownerId) {
++		throw new Error(`Agent ${id} was not spawned by you; its model cannot be changed.`);
++	}
++	const session = ref.session;
++	if (ref.status !== "running" || !session) {
++		throw new Error(
++			`Agent ${id} is ${ref.status}, not running; its model was not changed. A model change applies to a running agent.`,
++		);
++	}
++	if (!perCallModelEnabled(settings, "task")) {
++		const operatorMode = cfgTaskPerCallModel.get(settings.grantAuthority());
++		const mode = cfgTaskPerCallModel.get(settings);
++		throw new Error(
++			`Changing a running agent's model is disabled (task.perCallModel: ${mode === operatorMode ? mode : `${operatorMode}, project: ${mode}`}); it takes the same approval as a task \`model\`.`,
++		);
++	}
++	const requested = selector.trim();
++	if (!requested) {
++		throw new Error(
++			"Give the model as content: one configured role such as @haiku, a price tier from $ to $$$$, or one exact provider/model-id[:level].",
++		);
++	}
++	const problem = invalidModelSelectorReason(requested, "The model", { settings, invocationKind: "task" });
++	if (problem) throw new Error(problem);
++	if (!modelRegistry) throw new Error("Cannot resolve a model without a model registry.");
++	if (modelRegistry.isBackgroundRefreshPending()) await modelRegistry.awaitBackgroundRefresh();
++	const tier = callerModelTier(requested, "task");
++	const exactSelector =
++		tier !== undefined
++			? await resolveCallerTierSelector({ session: caller }, tier)
++			: callerModelRole(requested, settings, "task")
++				? await resolveCallerRoleSelector({ session: caller }, requested)
++				: requested;
++	const available = modelRegistry.getAvailable("all");
++	const resolved = resolveModelOverride([exactSelector], { getAvailable: () => available }, settings, {
++		exactOnly: true,
++	});
++	const model = resolved.model;
++	if (!model) {
++		throw new Error(
++			`No available model matches ${JSON.stringify(exactSelector)}. Use an exact provider/model-id and a supported thinking level; do not substitute another model.`,
++		);
++	}
++	if (modelKind(model) !== "chat") {
++		throw new Error(`${model.provider}/${model.id} is a ${modelKind(model)} model; a subagent needs a chat model.`);
++	}
++
++	// The same grants a task `model` is checked against; a per-call child keeps the ones its dispatch gate holds.
++	const policy = subagentModelPolicy(session);
++	const callerModel = caller.getActiveModel?.();
++	const grants: PerCallModelGrants = policy?.perCallGrants ?? {
++		settings,
++		agentName: policy?.agent.name ?? ref.history?.agent ?? ref.displayName,
++		agentSource: policy?.agent.source,
++		agentModel: policy?.agent.model,
++		// Without a tracked definition (none was recorded) the agent's own frontmatter grants nothing.
++		agentRemoved: policy?.agent.removed ?? policy === undefined,
++		parentModelPattern: callerModel ? parentModelGrantPattern(callerModel) : caller.getActiveModelString?.(),
++		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
++	};
++	assertPerCallModelApproved(model, grants, modelRegistry);
++
++	// A caller-chosen model is held to `task.maxEffort` like a per-call spawn, and so is its thinking level.
++	let thinkingLevel: ConfiguredThinkingLevel | undefined = resolved.explicitThinkingLevel
++		? resolved.thinkingLevel
++		: undefined;
++	const ceiling = cfgTaskMaxEffort.get(settings);
++	if (ceiling) {
++		assertModelSupportsEffortCeiling(model, ceiling);
++		const base = thinkingLevel ?? session.configuredThinkingLevel();
++		if (base !== undefined && base !== AUTO_THINKING) {
++			thinkingLevel = clampThinkingLevelToCeiling(model, base, ceiling);
++		}
++	}
++
++	// Resolving the selector awaited the model registry; the run may have finished meanwhile.
++	if (registry?.get(id) !== ref || ref.status !== "running" || ref.session !== session) {
++		throw new Error(`Agent ${id} finished before its model could change; its model was not changed.`);
++	}
++	return { id, model, state: await session.switchModelAtNextRequest(model, thinkingLevel) };
++}
+diff --git a/packages/coding-agent/src/task/persisted-revive.ts b/packages/coding-agent/src/task/persisted-revive.ts
+index 205e1b5ee1..d81d777cb8 100644
+--- a/packages/coding-agent/src/task/persisted-revive.ts
++++ b/packages/coding-agent/src/task/persisted-revive.ts
+@@ -48,6 +48,7 @@ import {
+ 	type PerCallModelGrants,
+ } from "./model-approval";
+ import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
++import { SubagentModelPolicy, trackSubagentModelPolicy } from "./subagent-model-policy";
+ import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
+ import { seanceIsolationOptions } from "./seance-policy";
+ import type { AgentDefinition } from "./types";
+@@ -185,6 +186,7 @@ export function createPersistedSubagentReviverFactory(
+ 					: registry.get(ref.parentId ?? "")?.session;
+ 			const parentSession = resolveParentSession();
+ 			let perCallModel: Model | undefined;
++			let configuredAgent: AgentDefinition | undefined;
+ 			let assertApprovedModel: ((model: Model) => void) | undefined;
+ 			if (init.perCallModel) {
+ 				try {
+@@ -203,7 +205,7 @@ export function createPersistedSubagentReviverFactory(
+ 					// File definitions follow the live parent's discovery scope; a missing parent
+ 					// can use current root file discovery, never unrelated root-local pseudonyms.
+ 					const discoverySession = parentSession ?? ctx.session;
+-					const configuredAgent = init.agent
++					configuredAgent = init.agent
+ 						? getAgent(
+ 								[
+ 									...(
+@@ -338,6 +340,17 @@ export function createPersistedSubagentReviverFactory(
+ 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
+ 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+ 
++			// Who may change the revived agent's model: its dispatch gate admits the user's own choices. The
++			// definition is only looked up for a per-call worker, so any other agent's frontmatter grants nothing.
++			const modelPolicy = new SubagentModelPolicy({
++				agent: {
++					name: init.agent ?? ref.displayName,
++					source: configuredAgent?.source,
++					model: configuredAgent?.model,
++					removed: configuredAgent === undefined,
++				},
++				effortCeiling: assertApprovedModel ? cfgTaskMaxEffort.get(ctx.settings) : undefined,
++			});
+ 			let session: AgentSession;
+ 			try {
+ 				({ session } = await createAgentSession({
+@@ -385,7 +398,7 @@ export function createPersistedSubagentReviverFactory(
+ 								disableModelFallback: true,
+ 								disableServerSideFallback: true,
+ 								assertDispatchModel: (model: Model) => {
+-									assertApprovedModel(model);
++									if (!modelPolicy.admitsOperatorModel(model)) assertApprovedModel(model);
+ 									assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(ctx.settings));
+ 								},
+ 							}
+@@ -443,6 +456,7 @@ export function createPersistedSubagentReviverFactory(
+ 				}
+ 			}
+ 			mcpFollower?.bind(session);
++			trackSubagentModelPolicy(session, modelPolicy);
+ 			// Clamp the active set to the persisted list: createAgentSession's
+ 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
+ 			// the original run didn't carry. Unknown/missing names are ignored.
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index 9d5b122b8f..835ddd0d70 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -365,7 +365,11 @@ function perCallModelDisabledReason(settings: Settings, invocationKind: "task" |
+  * configured that role. Roles resolve against {@link Settings.grantAuthority} only: a project
+  * file cannot define a role a caller may then select, and built-in role defaults select nothing.
+  */
+-function callerModelRole(model: unknown, settings: Settings, invocationKind: "task" | "eval"): string | undefined {
++export function callerModelRole(
++	model: unknown,
++	settings: Settings,
++	invocationKind: "task" | "eval",
++): string | undefined {
+ 	if (invocationKind !== "task" || typeof model !== "string") return undefined;
+ 	const selector = model.trim();
+ 	if (!/^@[^\s,*?[\]{}/]+$/.test(selector)) return undefined;
+@@ -375,7 +379,7 @@ function callerModelRole(model: unknown, settings: Settings, invocationKind: "ta
+ }
+ 
+ /** A `$` to `$$$$` price tier in a task call's `model`. Only task calls take one; eval calls need an exact selector. */
+-function callerModelTier(model: unknown, invocationKind: "task" | "eval"): PriceTier | undefined {
++export function callerModelTier(model: unknown, invocationKind: "task" | "eval"): PriceTier | undefined {
+ 	return invocationKind === "task" ? parseTier(model) : undefined;
+ }
+ 
+@@ -414,7 +418,10 @@ export function invalidModelSelectorReason(
+  * dispatched and revived exactly like an exact per-call model. The role is read from the operator's
+  * settings; its retry-fallback chain does not apply because a per-call worker never switches models.
+  */
+-async function resolveCallerRoleSelector(request: StructuredSubagentRequest, selector: string): Promise<string> {
++export async function resolveCallerRoleSelector(
++	request: Pick<StructuredSubagentRequest, "session">,
++	selector: string,
++): Promise<string> {
+ 	const { settings, modelRegistry } = request.session;
+ 	const fail = (message: string): never => {
+ 		throw new StructuredSubagentError("preflight", message);
+@@ -436,7 +443,10 @@ async function resolveCallerRoleSelector(request: StructuredSubagentRequest, sel
+  * The configured role a price tier stands for, so a tier request is approved, dispatched and revived like
+  * that role. The nearest tier answers when none matches; the most used role wins within a tier.
+  */
+-async function resolveCallerTierSelector(request: StructuredSubagentRequest, tier: PriceTier): Promise<string> {
++export async function resolveCallerTierSelector(
++	request: Pick<StructuredSubagentRequest, "session">,
++	tier: PriceTier,
++): Promise<string> {
+ 	const { settings, modelRegistry } = request.session;
+ 	if (!modelRegistry) {
+ 		throw new StructuredSubagentError(
+diff --git a/packages/coding-agent/src/task/subagent-model-policy.ts b/packages/coding-agent/src/task/subagent-model-policy.ts
+new file mode 100644
+index 0000000000..40b960a5cf
+--- /dev/null
++++ b/packages/coding-agent/src/task/subagent-model-policy.ts
+@@ -0,0 +1,100 @@
++/**
++ * What may change a running subagent's model, held per live session.
++ *
++ * Two parties switch a running subagent's model. The operator (the user typing `/switch` or picking a
++ * model in the subagent's view) is not gated: the choice is theirs, so the child's per-call dispatch
++ * gate admits it. The parent agent acts for a model-facing caller and must pass the approval a task
++ * `model` passes ({@link switchSubagentModelAsCaller}). Both reach the session's
++ * {@link AgentSession.switchModelAtNextRequest}, so a switch never interrupts the request in flight.
++ */
++import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
++import { assertModelSupportsEffortCeiling, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
++import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
++import { formatModelStringWithRouting } from "../config/model-resolver";
++import type { AgentSession } from "../session/agent-session";
++import type { PerCallModelGrants } from "./model-approval";
++
++/** The agent definition a child runs, as far as model grants read it. */
++export interface SubagentAgentIdentity {
++	name: string;
++	source?: AgentSource;
++	/** The definition's frontmatter `model`; it grants only for bundled and user-level agents. */
++	model?: string | string[];
++	/** The definition is no longer discovered (cold revival): its frontmatter grants nothing. */
++	removed?: boolean;
++}
++
++export interface SubagentModelPolicyOptions {
++	agent: SubagentAgentIdentity;
++	/** Set for a per-call worker: the spawn's grants, which its dispatch gate already holds every request to. */
++	perCallGrants?: PerCallModelGrants;
++	/** The spawn's `task.maxEffort` ceiling, when the child runs under one. */
++	effortCeiling?: Effort;
++}
++
++/** Per-child state shared by a running subagent's dispatch gate and both switch routes. */
++export class SubagentModelPolicy {
++	readonly agent: SubagentAgentIdentity;
++	readonly perCallGrants: PerCallModelGrants | undefined;
++	readonly effortCeiling: Effort | undefined;
++	/** Identities the operator chose in the child's view; the dispatch gate admits them without a grant. */
++	readonly #operatorModels = new Set<string>();
++
++	constructor(options: SubagentModelPolicyOptions) {
++		this.agent = options.agent;
++		this.perCallGrants = options.perCallGrants;
++		this.effortCeiling = options.effortCeiling;
++	}
++
++	/** Whether the operator chose `model` for this child, so its dispatch needs no grant. */
++	admitsOperatorModel(model: Model<Api>): boolean {
++		return this.#operatorModels.has(formatModelStringWithRouting(model));
++	}
++
++	/** Records the operator's choice; returns whether it is new. */
++	approveOperatorModel(model: Model<Api>): boolean {
++		const identity = formatModelStringWithRouting(model);
++		if (this.#operatorModels.has(identity)) return false;
++		this.#operatorModels.add(identity);
++		return true;
++	}
++
++	revokeOperatorModel(model: Model<Api>): void {
++		this.#operatorModels.delete(formatModelStringWithRouting(model));
++	}
++}
++
++const policies = new WeakMap<AgentSession, SubagentModelPolicy>();
++
++/** Binds `policy` to a live child session; spawn and both revival paths call it for every session they build. */
++export function trackSubagentModelPolicy(session: AgentSession, policy: SubagentModelPolicy): void {
++	policies.set(session, policy);
++}
++
++export function subagentModelPolicy(session: AgentSession): SubagentModelPolicy | undefined {
++	return policies.get(session);
++}
++
++/**
++ * The operator's switch: the user chose `model` for `session` in its view. Nothing but the model's own
++ * requirements apply, so `task.perCallModel`, grants and `task.perCallModelAllow` are not consulted; a
++ * child held to a `task.maxEffort` ceiling still refuses a model that cannot run at or below it. The
++ * model applies at the session's next request ({@link AgentSession.switchModelAtNextRequest}).
++ * @returns `"applied"` when the model changed now, `"queued"` when it waits for the next request
++ */
++export async function switchSubagentModelAsOperator(
++	session: AgentSession,
++	model: Model<Api>,
++	thinkingLevel?: ConfiguredThinkingLevel,
++): Promise<"applied" | "queued"> {
++	const policy = subagentModelPolicy(session);
++	if (policy?.effortCeiling) assertModelSupportsEffortCeiling(model, policy.effortCeiling);
++	// The dispatch gate must admit the model before the request that uses it.
++	const added = policy?.approveOperatorModel(model) ?? false;
++	try {
++		return await session.switchModelAtNextRequest(model, thinkingLevel);
++	} catch (error) {
++		if (added) policy?.revokeOperatorModel(model);
++		throw error;
++	}
++}
+diff --git a/packages/coding-agent/test/input-controller-focused-commands.test.ts b/packages/coding-agent/test/input-controller-focused-commands.test.ts
+index 354d21f68b..9270bb8fa7 100644
+--- a/packages/coding-agent/test/input-controller-focused-commands.test.ts
++++ b/packages/coding-agent/test/input-controller-focused-commands.test.ts
+@@ -18,6 +18,10 @@ import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/c
+ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+ import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
++import type { Model } from "@oh-my-pi/pi-ai";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
++import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+ 
+ function createFocusedContext() {
+ 	let editorText = "";
+@@ -246,6 +250,50 @@ describe("focused subagent view slash commands", () => {
+ 		expect(mainCycleRoles).not.toHaveBeenCalled();
+ 	});
+ 
++	it("applies /switch to the focused agent's session at its next request, never the main session's", async () => {
++		const focused = createFocusedContext();
++		const model = createMockModel({ id: "other" });
++		const registry = { getAll: () => [model], getAvailable: () => [model] };
++		const focusedSwitch = vi.fn(async (_picked: Model, _level?: ConfiguredThinkingLevel) => "queued" as const);
++		const mainSwitch = vi.fn(async (_picked: Model, _level?: ConfiguredThinkingLevel) => "applied" as const);
++		const mainSet = vi.fn(async () => {});
++		const focusedSet = vi.fn(async () => {});
++		Object.assign(focused.raw.viewSession, {
++			modelRegistry: registry,
++			scopedModels: [],
++			getContextUsage: () => undefined,
++			resolveTemporaryModelThinkingLevel: () => undefined,
++			switchModelAtNextRequest: focusedSwitch,
++			setModelTemporary: focusedSet,
++		});
++		Object.assign(focused.raw.session, {
++			modelRegistry: registry,
++			scopedModels: [],
++			switchModelAtNextRequest: mainSwitch,
++			setModelTemporary: mainSet,
++		});
++		const selector = new SelectorController(focused.ctx);
++		Object.assign(focused.raw, {
++			settings: Settings.isolated({}),
++			statusLine: { invalidate: vi.fn() },
++			updateEditorBorderColor: vi.fn(),
++			switchSessionModel: (picked: Model, level?: ConfiguredThinkingLevel) =>
++				selector.switchSessionModel(picked, level),
++		});
++		const controller = new InputController(focused.ctx);
++		controller.setupEditorSubmitHandler();
++		focused.editor.setText("/switch mock/other");
++		await focused.ctx.editor.onSubmit?.("/switch mock/other");
++
++		expect(focusedSwitch).toHaveBeenCalledTimes(1);
++		expect(focusedSwitch.mock.calls[0]?.[0]).toBe(model);
++		expect(mainSwitch).not.toHaveBeenCalled();
++		expect(mainSet).not.toHaveBeenCalled();
++		// The focused agent keeps its turn: nothing sets its model out from under the request in flight.
++		expect(focusedSet).not.toHaveBeenCalled();
++		expect(focused.prompt).not.toHaveBeenCalled();
++	});
++
+ 	it("keeps other commands gated to the main session, draft intact", async () => {
+ 		const { editor, prompt } = await submit("/compact");
+ 		expect(editor.getText()).toBe("/compact");
+diff --git a/packages/coding-agent/test/slash-commands/switch.test.ts b/packages/coding-agent/test/slash-commands/switch.test.ts
+index 1c083586bf..bc8bd6be81 100644
+--- a/packages/coding-agent/test/slash-commands/switch.test.ts
++++ b/packages/coding-agent/test/slash-commands/switch.test.ts
+@@ -16,6 +16,10 @@ function createRuntime() {
+ 	const showStatus = vi.fn();
+ 	const setText = vi.fn();
+ 	const settings = Settings.isolated();
++	const session = {
++		scopedModels: [],
++		modelRegistry: { getAll: () => MODELS, getAvailable: () => MODELS },
++	};
+ 	return {
+ 		showModelSelector,
+ 		switchSessionModel,
+@@ -26,10 +30,8 @@ function createRuntime() {
+ 			ctx: {
+ 				editor: { setText } as unknown as InteractiveModeContext["editor"],
+ 				settings,
+-				session: {
+-					scopedModels: [],
+-					modelRegistry: { getAll: () => MODELS, getAvailable: () => MODELS },
+-				},
++				session,
++				viewSession: session,
+ 				showModelSelector,
+ 				switchSessionModel,
+ 				showError,
+diff --git a/packages/coding-agent/test/task/subagent-model-switch.test.ts b/packages/coding-agent/test/task/subagent-model-switch.test.ts
+new file mode 100644
+index 0000000000..06f428c0c0
+--- /dev/null
++++ b/packages/coding-agent/test/task/subagent-model-switch.test.ts
+@@ -0,0 +1,461 @@
++/**
++ * A running subagent's model changes mid-run without restarting it: the request in flight finishes
++ * on its current model and the next one uses the new model, with the subagent's context intact.
++ *
++ * The parent agent's route (`write proc://<id>/model`) is held to the approval a task `model` passes;
++ * the user's route (the subagent's own view) is not.
++ *
++ * Failure mode if this regresses: a switch lands on the wrong agent, aborts the turn, is silently
++ * ignored by the next request, lets the model-facing route reach a model the operator never granted,
++ * or leaves a per-call worker failing its own dispatch gate on a model the user chose.
++ */
++import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
++import * as fs from "node:fs/promises";
++import * as os from "node:os";
++import * as path from "node:path";
++import type { Context, Model } from "@oh-my-pi/pi-ai";
++import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
++import { createMockModel, type MockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
++import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
++import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { getModelMatchPreferences } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
++import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
++import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
++import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
++import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
++import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
++import { extractSessionInit } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
++import type { PerCallModelGrants } from "@oh-my-pi/pi-coding-agent/task/model-approval";
++import * as modelUsageModule from "@oh-my-pi/pi-coding-agent/task/model-usage";
++import { switchSubagentModelAsOperator } from "@oh-my-pi/pi-coding-agent/task/subagent-model-policy";
++import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
++import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
++
++const CHILD_ID = "RefactorWork";
++const PARENT_ID = "Main";
++const MOCK_API_SOURCE = "test/subagent-model-switch";
++const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
++
++let savedEnv: Record<string, string | undefined> = {};
++let root: string;
++let manager: AsyncJobManager;
++
++function restoreEnvValue(key: string, value: string | undefined): void {
++	if (value === undefined) {
++		delete process.env[key];
++		delete Bun.env[key];
++		return;
++	}
++	process.env[key] = value;
++	Bun.env[key] = value;
++}
++
++beforeEach(async () => {
++	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
++	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-subagent-model-switch-"));
++	const home = path.join(root, "home");
++	await fs.mkdir(home, { recursive: true });
++	restoreEnvValue("HOME", home);
++	vi.spyOn(os, "homedir").mockReturnValue(home);
++	setAgentDir(path.join(home, ".omp", "agent"));
++	AgentRegistry.resetGlobalForTests();
++	AgentLifecycleManager.resetGlobalForTests();
++	IrcBus.resetGlobalForTests();
++	registerMockApi(MOCK_API_SOURCE);
++	manager = new AsyncJobManager({ maxRunningJobs: 4 });
++	AsyncJobManager.setInstance(manager);
++});
++
++afterEach(async () => {
++	await AgentLifecycleManager.global().dispose();
++	AgentLifecycleManager.resetGlobalForTests();
++	AgentRegistry.resetGlobalForTests();
++	IrcBus.resetGlobalForTests();
++	AsyncJobManager.setInstance(undefined);
++	await manager.dispose({ timeoutMs: 1_000 });
++	unregisterCustomApis(MOCK_API_SOURCE);
++	vi.restoreAllMocks();
++	for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
++	__resetDirsFromEnvForTests();
++	AgentStorage.close();
++	closeModelCache();
++	await removeWithRetries(root);
++});
++
++/** Side requests (titles) carry no `yield` tool; only the agent loop's own requests do. */
++function isLoopRequest(context: Context): boolean {
++	return (context.tools ?? []).some(tool => tool.name === "yield");
++}
++
++function yieldResult(data: string): (context: Context) => MockResponse {
++	return context => {
++		if (!isLoopRequest(context)) return { content: ["label"] };
++		if (context.messages.at(-1)?.role === "toolResult") return { content: ["ok"] };
++		return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data } }] };
++	};
++}
++
++interface Harness {
++	/** Models the subagent can run on; `primary` is where it starts. */
++	models: { primary: MockModel; haiku: MockModel; other: MockModel };
++	/** Resolves once the subagent's first loop request is being served by `primary`. */
++	firstRequestServing: Promise<void>;
++	/** Lets `primary` finish that first request (it then asks for one more turn). */
++	releaseFirstRequest(): void;
++	/** The subagent's run: settles when it yields. */
++	run: Promise<unknown>;
++	/** The tool session of the agent that spawned the subagent. */
++	parent: ToolSession;
++	settings: Settings;
++	modelRegistry: ModelRegistry;
++	close(): void;
++}
++
++/**
++ * Starts the subagent on `primary`, whose first loop request blocks and then asks for another turn,
++ * so the subagent is demonstrably mid-run when the test switches its model.
++ */
++async function startSubagent(
++	options: {
++		perCall?: boolean;
++		settings?: Record<string, unknown>;
++		/** A price for `haiku`, so a price tier can name it. Mock models are free, and a free model has no tier. */
++		haikuCost?: Model["cost"];
++	} = {},
++): Promise<Harness> {
++	const cwd = path.join(root, "home", "work");
++	const artifactsDir = path.join(root, "artifacts");
++	await fs.mkdir(cwd, { recursive: true });
++	await fs.mkdir(artifactsDir, { recursive: true });
++
++	const authStorage = createInMemoryAuthStorage();
++	authStorage.keys.setRuntime("mock", "test-key");
++	const modelRegistry = new ModelRegistry(authStorage);
++	const firstRequestServing = Promise.withResolvers<void>();
++	const releaseFirst = Promise.withResolvers<void>();
++	let loopRequests = 0;
++	const primary = createMockModel({
++		id: "primary",
++		handler: async context => {
++			if (!isLoopRequest(context)) return { content: ["label"] };
++			loopRequests++;
++			if (loopRequests === 1) {
++				firstRequestServing.resolve();
++				await releaseFirst.promise;
++				return { content: [{ type: "toolCall", name: "read", arguments: { path: "missing.txt" } }] };
++			}
++			return yieldResult("finished on primary")(context);
++		},
++	});
++	const haiku = createMockModel({
++		id: "haiku",
++		handler: yieldResult("finished on haiku"),
++		...(options.haikuCost ? { cost: options.haikuCost } : {}),
++	});
++	const other = createMockModel({ id: "other", handler: yieldResult("finished on other") });
++	const mocks = [primary, haiku, other];
++	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
++	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [...mocks, ...catalogAvailable(kind)]);
++	const catalogAll = modelRegistry.getAll.bind(modelRegistry);
++	vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [...mocks, ...catalogAll()]);
++
++	// `other` is deliberately not a configured role: the operator has not granted it.
++	const settings = Settings.isolated({
++		"task.perCallModel": "on",
++		"task.agentIdleTtlMs": 0,
++		"compaction.enabled": false,
++		"retry.enabled": false,
++		"todo.enabled": false,
++		"todo.reminders": false,
++		"advisor.enabled": false,
++		modelRoles: { default: "mock/primary", haiku: "mock/haiku" },
++		...options.settings,
++	});
++	const perCallModelGrants: PerCallModelGrants | undefined = options.perCall
++		? {
++				settings,
++				agentName: "task",
++				agentSource: "bundled",
++				matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
++			}
++		: undefined;
++	const run = runSubprocess({
++		cwd,
++		artifactsDir,
++		agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
++		task: "refactor",
++		index: 0,
++		id: CHILD_ID,
++		parentAgentId: PARENT_ID,
++		asyncJobManager: manager,
++		modelOverride: "mock/primary",
++		...(perCallModelGrants ? { perCallModelGrants } : {}),
++		authStorage,
++		modelRegistry,
++		settings,
++		enableLsp: false,
++		enableMCP: false,
++		enableIrc: false,
++	});
++	const parent = {
++		cwd,
++		hasUI: false,
++		getAgentId: () => PARENT_ID,
++		getSessionId: () => PARENT_ID,
++		getSessionFile: () => null,
++		asyncJobManager: manager,
++		agentRegistry: AgentRegistry.global(),
++		modelRegistry,
++		settings,
++	} as unknown as ToolSession;
++	await firstRequestServing.promise;
++	return {
++		models: { primary, haiku, other },
++		firstRequestServing: firstRequestServing.promise,
++		releaseFirstRequest: () => releaseFirst.resolve(),
++		run,
++		parent,
++		settings,
++		modelRegistry,
++		close: () => authStorage.close(),
++	};
++}
++
++/** Loop requests a mock model served; side requests such as titles are excluded. */
++function loopRequests(mock: MockModel): number {
++	return mock.calls.filter(call => isLoopRequest(call.context)).length;
++}
++
++function writeModel(harness: Harness, id: string, selector: string) {
++	return new ProcProtocolHandler().write(parseInternalUrl(`proc://${id}/model`), selector, {
++		session: harness.parent,
++	});
++}
++
++describe("the parent agent switching a running subagent's model", () => {
++	it("accepts a price tier and switches to the configured role in that tier", async () => {
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		// Far below every priced catalog model, so `haiku` sits in the cheapest tier.
++		const harness = await startSubagent({ haikuCost: { input: 0.0001, output: 0.0001, cacheRead: 0, cacheWrite: 0 } });
++		try {
++			const result = await writeModel(harness, CHILD_ID, "$");
++			expect(result?.details?.proc).toMatchObject({
++				action: "model",
++				agent: CHILD_ID,
++				model: "mock/haiku",
++				state: "queued",
++			});
++			harness.releaseFirstRequest();
++			expect(await harness.run).toMatchObject({ exitCode: 0 });
++			expect(AgentRegistry.global().get(CHILD_ID)?.session?.model?.id).toBe("haiku");
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++
++	it("serves the next request on the new model, keeping the turn and context", async () => {
++		const harness = await startSubagent();
++		try {
++			const result = await writeModel(harness, CHILD_ID, "@haiku");
++			expect(result?.details?.proc).toMatchObject({
++				action: "model",
++				agent: CHILD_ID,
++				model: "mock/haiku",
++				state: "queued",
++			});
++			// Nothing changed for the request in flight.
++			const session = AgentRegistry.global().get(CHILD_ID)?.session;
++			expect(session?.model?.id).toBe("primary");
++			expect(session?.pendingModelSwitch?.id).toBe("haiku");
++
++			harness.releaseFirstRequest();
++			const outcome = await harness.run;
++			expect(outcome).toMatchObject({ exitCode: 0 });
++
++			expect(loopRequests(harness.models.primary)).toBe(1);
++			expect(loopRequests(harness.models.haiku)).toBeGreaterThan(0);
++			// The second request carries the first request's turn: same transcript, new model.
++			const second = harness.models.haiku.calls.find(call => isLoopRequest(call.context));
++			expect(second?.context.messages.some(message => message.role === "assistant")).toBe(true);
++			expect(AgentRegistry.global().get(CHILD_ID)?.session?.model?.id).toBe("haiku");
++			expect(await Bun.file(path.join(root, "artifacts", `${CHILD_ID}.md`)).text()).toContain("finished on haiku");
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++
++	it("records the switch in the subagent's transcript", async () => {
++		const harness = await startSubagent();
++		try {
++			await writeModel(harness, CHILD_ID, "mock/haiku");
++			harness.releaseFirstRequest();
++			await harness.run;
++			const entries = AgentRegistry.global().get(CHILD_ID)?.session?.sessionManager.getEntries() ?? [];
++			const changes = entries.filter(entry => entry.type === "model_change");
++			expect(changes.at(-1)).toMatchObject({ model: "mock/haiku" });
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++
++	it("refuses a model the operator has not granted, and the subagent carries on unchanged", async () => {
++		const harness = await startSubagent();
++		try {
++			await expect(writeModel(harness, CHILD_ID, "mock/other")).rejects.toThrow(/not approved/);
++			harness.releaseFirstRequest();
++			await harness.run;
++			expect(loopRequests(harness.models.other)).toBe(0);
++			expect(loopRequests(harness.models.primary)).toBeGreaterThan(1);
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++
++	it("honours task.perCallModelAllow", async () => {
++		const harness = await startSubagent({ settings: { "task.perCallModelAllow": ["mock/primary"] } });
++		try {
++			await expect(writeModel(harness, CHILD_ID, "@haiku")).rejects.toThrow(/task\.perCallModelAllow/);
++			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++		} finally {
++			harness.releaseFirstRequest();
++			await harness.run;
++			harness.close();
++		}
++	}, 15_000);
++
++	it("changes nothing when the control URL is only read", async () => {
++		const harness = await startSubagent();
++		try {
++			await expect(
++				new ProcProtocolHandler().resolve(parseInternalUrl(`proc://${CHILD_ID}/model`), {
++					session: harness.parent,
++				}),
++			).rejects.toThrow(/write-only/);
++			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++		} finally {
++			harness.releaseFirstRequest();
++			await harness.run;
++			harness.close();
++		}
++	}, 15_000);
++
++	it("is refused while task.perCallModel is off", async () => {
++		const harness = await startSubagent({ settings: { "task.perCallModel": "off" } });
++		try {
++			await expect(writeModel(harness, CHILD_ID, "@haiku")).rejects.toThrow(/task\.perCallModel/);
++			harness.releaseFirstRequest();
++			await harness.run;
++			expect(loopRequests(harness.models.haiku)).toBe(0);
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++
++	it("refuses an unknown agent id", async () => {
++		const harness = await startSubagent();
++		try {
++			await expect(writeModel(harness, "NoSuchAgent", "@haiku")).rejects.toThrow(/not found/);
++		} finally {
++			harness.releaseFirstRequest();
++			await harness.run;
++			harness.close();
++		}
++	}, 15_000);
++
++	it("refuses an agent this caller did not spawn", async () => {
++		const harness = await startSubagent();
++		try {
++			const stranger = { ...harness.parent, getAgentId: () => "Stranger" } as ToolSession;
++			await expect(
++				new ProcProtocolHandler().write(parseInternalUrl(`proc://${CHILD_ID}/model`), "@haiku", {
++					session: stranger,
++				}),
++			).rejects.toThrow(/not spawned by you/);
++			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++		} finally {
++			harness.releaseFirstRequest();
++			await harness.run;
++			harness.close();
++		}
++	}, 15_000);
++
++	it("refuses a subagent that has already finished, leaving its model alone", async () => {
++		const harness = await startSubagent();
++		try {
++			harness.releaseFirstRequest();
++			await harness.run;
++			const ref = AgentRegistry.global().get(CHILD_ID);
++			expect(ref?.status).not.toBe("running");
++			const before = ref?.session?.model?.id;
++			await expect(writeModel(harness, CHILD_ID, "@haiku")).rejects.toThrow(/not running/);
++			expect(AgentRegistry.global().get(CHILD_ID)?.session?.model?.id).toBe(before);
++			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++		} finally {
++			harness.close();
++		}
++	}, 15_000);
++});
++
++describe("the user switching a subagent from its view", () => {
++	it("applies to that subagent at its next request, with no approval gate", async () => {
++		const harness = await startSubagent();
++		try {
++			const session = AgentRegistry.global().get(CHILD_ID)?.session;
++			if (!session) throw new Error("subagent has no live session");
++			// `other` is not granted to the model-facing route, yet the user may pick it.
++			expect(await switchSubagentModelAsOperator(session, harness.models.other)).toBe("queued");
++			expect(session.model?.id).toBe("primary");
++			harness.releaseFirstRequest();
++			await harness.run;
++			expect(loopRequests(harness.models.other)).toBeGreaterThan(0);
++			expect(session.model?.id).toBe("other");
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++
++	it("keeps a per-call worker's dispatch gate open for the user's choice, and its revival on that model", async () => {
++		const harness = await startSubagent({ perCall: true });
++		try {
++			const session = AgentRegistry.global().get(CHILD_ID)?.session;
++			if (!session) throw new Error("subagent has no live session");
++			// The model-facing route still cannot reach it...
++			await expect(writeModel(harness, CHILD_ID, "mock/other")).rejects.toThrow(/not approved/);
++			// ...the user's choice is the operator's.
++			await switchSubagentModelAsOperator(session, harness.models.other);
++			harness.releaseFirstRequest();
++			expect(await harness.run).toMatchObject({ exitCode: 0 });
++			expect(loopRequests(harness.models.other)).toBeGreaterThan(0);
++			// Revival restores a per-call worker on the exact model it last ran on.
++			const init = extractSessionInit(session.sessionManager.getEntries());
++			expect(init?.perCallModelIdentity).toBe("mock/other");
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++
++	it("keeps refusing an unapproved model for a per-call worker's next request when nobody chose it", async () => {
++		const harness = await startSubagent({ perCall: true });
++		try {
++			await writeModel(harness, CHILD_ID, "@haiku");
++			harness.releaseFirstRequest();
++			expect(await harness.run).toMatchObject({ exitCode: 0 });
++			expect(loopRequests(harness.models.haiku)).toBeGreaterThan(0);
++		} finally {
++			harness.releaseFirstRequest();
++			harness.close();
++		}
++	}, 15_000);
++});
+diff --git a/packages/tui/src/tools/proc-render.ts b/packages/tui/src/tools/proc-render.ts
+index 2d4dba5396..21dc6efcf7 100644
+--- a/packages/tui/src/tools/proc-render.ts
++++ b/packages/tui/src/tools/proc-render.ts
+@@ -34,10 +34,11 @@ export interface ProcReadDetails {
+ 
+ export type ProcWriteDetails =
+ 	| CoordinationDetails
+-	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string };
++	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string }
++	| { action: "model"; agent: string; model: string; state: "applied" | "queued" };
+ 
+ /** Process operation selected by a write URL, independent of its content. */
+-export type ProcWriteAction = "stdin" | "mode" | "kill";
++export type ProcWriteAction = "stdin" | "mode" | "kill" | "model";
+ 
+ function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
+ 	if (!body.trim()) return [];
+@@ -162,7 +163,11 @@ export function renderProcWrite(
+ 				icon:
+ 					result === undefined ? "pending" : result.isError ? "error" : action === "kill" ? "aborted" : "success",
+ 				title,
+-				meta: daemon ? daemonMeta(daemon, theme) : action === "mode" && content ? [safe(content)] : [],
++				meta: daemon
++					? daemonMeta(daemon, theme)
++					: (action === "mode" || action === "model") && content
++						? [safe(content)]
++						: [],
+ 			},
+ 			theme,
+ 		);
+@@ -384,7 +389,11 @@ export function describeProcWrite(
+ 	const head = toolHead(
+ 		`Proc ${action}`,
+ 		span(safe(id || "…"), "accent"),
+-		daemon ? daemonMetaText(daemon) : action === "mode" && content ? safe(content) : undefined,
++		daemon
++			? daemonMetaText(daemon)
++			: (action === "mode" || action === "model") && content
++				? safe(content)
++				: undefined,
+ 	);
+ 	if (result?.isError) {
+ 		return { head, tone: "error", body: [errorText(firstText(result) || "Process operation failed.")] };
+diff --git a/packages/tui/src/tools/write.ts b/packages/tui/src/tools/write.ts
+index 96a77989fd..00ff6bca5a 100644
+--- a/packages/tui/src/tools/write.ts
++++ b/packages/tui/src/tools/write.ts
+@@ -445,6 +445,7 @@ export interface WriteRenderContext {
+ function procWriteTarget(target: string): { id: string; action: ProcWriteAction } {
+ 	if (target.endsWith("/kill")) return { id: target.slice(0, -5), action: "kill" };
+ 	if (target.endsWith("/mode")) return { id: target.slice(0, -5), action: "mode" };
++	if (target.endsWith("/model")) return { id: target.slice(0, -6), action: "model" };
+ 	return { id: target, action: "stdin" };
+ }
+ 

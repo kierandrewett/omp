@@ -28,32 +28,54 @@ log "installing dependencies"
 bun install --frozen-lockfile --ignore-scripts
 python3 "$root/scripts/stamp-version.py" "$build_tree" "$tag" "$fork_tag"
 
-case "${NATIVES:-host}" in
-    host)
-        # Local Cargo build of the addon for this machine. No Bazel needed.
-        log "building natives for this host"
-        bun scripts/bazel-natives.ts host
-        ;;
-    bazel)
-        # Same as release CI: both Linux x64 addons through Bazel.
-        command -v bazel >/dev/null || {
-            log "installing Bazelisk"
-            npm install --prefix "$root/build/bazelisk" @bazel/bazelisk >/dev/null
-            export PATH="$root/build/bazelisk/node_modules/.bin:$PATH"
-        }
-        log "building natives with Bazel"
-        bun scripts/bazel-natives.ts linux-x64-baseline
-        bun scripts/bazel-natives.ts linux-x64-modern
-        ;;
-    prebuilt)
-        [ -n "${NATIVES_DIR:-}" ] || die "NATIVES=prebuilt needs NATIVES_DIR"
-        log "using prebuilt natives from $NATIVES_DIR"
-        cp "$NATIVES_DIR"/pi_natives.*.node packages/natives/native/
-        ;;
-    *)
-        die "NATIVES must be host, bazel or prebuilt"
-        ;;
-esac
+# Upstream commits a hash of its bundled export viewer. The hash depends on the exact Bun bundler output,
+# so it differs on any other Bun version and both `--check` runs then fail with "metadata is stale".
+# Regenerate it here, in the throwaway tree. CI=true would force check mode, so unset it for this step.
+log "regenerating export viewer metadata"
+env -u CI bun run --cwd packages/collab-web gen:export-viewer
+
+# Natives take about ten minutes to build, so keep them. The key covers everything that decides the result:
+# the upstream commit, the build mode, the staged (patched) contents of the native sources, and the Rust
+# toolchain. A patch that touches the Rust sources therefore gets its own entry.
+natives_mode="${NATIVES:-host}"
+natives_sources="$(git ls-files --stage -- crates packages/natives Cargo.toml Cargo.lock | sha256sum | cut -c1-16)"
+natives_toolchain="$(rustc --version --verbose 2>/dev/null | sha256sum | cut -c1-8)"
+natives_key="$root/build/natives-cache/${pinned:0:10}-$natives_mode-$natives_sources-$natives_toolchain"
+if [ "$natives_mode" != prebuilt ] && compgen -G "$natives_key/pi_natives.*.node" >/dev/null; then
+    log "using cached natives from $natives_key"
+    cp "$natives_key"/pi_natives.*.node packages/natives/native/
+else
+    case "$natives_mode" in
+        host)
+            # Local Cargo build of the addon for this machine. No Bazel needed.
+            log "building natives for this host"
+            bun scripts/bazel-natives.ts host
+            ;;
+        bazel)
+            # Same as release CI: both Linux x64 addons through Bazel.
+            command -v bazel >/dev/null || {
+                log "installing Bazelisk"
+                npm install --prefix "$root/build/bazelisk" @bazel/bazelisk >/dev/null
+                export PATH="$root/build/bazelisk/node_modules/.bin:$PATH"
+            }
+            log "building natives with Bazel"
+            bun scripts/bazel-natives.ts linux-x64-baseline
+            bun scripts/bazel-natives.ts linux-x64-modern
+            ;;
+        prebuilt)
+            [ -n "${NATIVES_DIR:-}" ] || die "NATIVES=prebuilt needs NATIVES_DIR"
+            log "using prebuilt natives from $NATIVES_DIR"
+            cp "$NATIVES_DIR"/pi_natives.*.node packages/natives/native/
+            ;;
+        *)
+            die "NATIVES must be host, bazel or prebuilt"
+            ;;
+    esac
+    if [ "$natives_mode" != prebuilt ]; then
+        mkdir -p "$natives_key"
+        cp packages/natives/native/pi_natives.*.node "$natives_key/"
+    fi
+fi
 
 log "building binary"
 RELEASE_TARGETS=linux-x64 bun run ci:release:build-binaries

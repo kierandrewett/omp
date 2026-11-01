@@ -1,0 +1,191 @@
+diff --git a/docs/agent-hub.md b/docs/agent-hub.md
+index 1341db394a..48baa7e0e9 100644
+--- a/docs/agent-hub.md
++++ b/docs/agent-hub.md
+@@ -87,6 +87,8 @@ While subagents run, a pinned `Subagents` block above the editor lists every liv
+ 
+ The list stays short: it shows a few rows plus an expander (`display.pinnedAgents: collapsed`, the default), lists everything (`full`), or hides entirely (`off`). Clicking the expander toggles between the two while `tui.mouse` is on.
+ 
++Each row ends with that agent's total tokens and API cost, for example `1.4M tok · $0.42`, right-aligned and dim. Tokens count everything the model processed, cache reads included, so the figure matches what the provider counts; the Hub's own `tok` figure leaves cache reads out. Cost appears once it is above zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. A row too narrow to keep a readable title drops the usage and keeps the title.
++
+ Set `display.subagentLivePreview: true` to add a second line under each row showing what that agent is doing: its current tool call (or, between calls, the most recent one) with a one-line detail, plus the elapsed time once a call runs longer than five seconds. Off by default.
+ 
+ Enable `tui.mouse` to click live subagent cards and jump-list rows directly in the main session, without opening the Hub first. A click focuses that card's most recent agent (a jump-list row focuses its exact agent); focusing a parked agent revives it. Hovering a live target lights it up first, so you can see what a click will open.
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 86b627fd91..72a311851a 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -9,6 +9,7 @@
+ - Answer MCP form elicitation requests (`elicitation/create`) with a dialog. Dismissing the dialog, or having no screen, cancels the request and never accepts it. URL mode is refused.
+ - The task tool description now lists your model roles as `@role` and tells agents to pass the role when you name a model or tier such as "haiku", instead of guessing a model version. When the agent cannot tell which model you mean, it asks with the `ask` tool.
+ - A task item's `model` can be a price tier, `$` to `$$$$`, instead of a role. Tiers are quarters of the price across all loaded chat models. A tier picks the configured role in that tier, or the nearest one, and the role you use most wins a tie. The usage weighting reads `stats.db` and counts the exact model most, then its family, then its provider. The task description shows each role's tier, and the judge that routes calls without `model` weighs price and usage too. `$$$$` is treated as very rare.
++- Each row in the pinned subagent shelf now ends with that subagent's total tokens, cache reads included, and its API cost, for example `1.4M tok · $0.42`. Cost is left out while it is zero, and a row too narrow for both drops the usage instead of the title. Subagent progress now reports `cacheReadTokens`.
+ 
+ ### Changed
+ 
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index 9c8cf13489..0beefa60a6 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -134,6 +134,8 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
+ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
+ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
+ import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
++import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
++import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+ import { registerPersistedSubagents } from "../registry/persisted-agents";
+ import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+@@ -1200,6 +1202,25 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
+ 	return truncateToWidth(`${line}${elapsedLabel}`, width, "");
+ }
+ 
++/** Columns between a shelf row's title and its usage, and the least title width worth sharing a row with it. */
++const SUBAGENT_USAGE_GAP = 2;
++const SUBAGENT_USAGE_MIN_TITLE_WIDTH = 24;
++
++/**
++ * Total tokens and API cost of one subagent, e.g. `1.4M tok · $0.42`. Tokens are everything the model
++ * processed, cache reads included, so the figure matches what the provider counts. Cost shows only once it is
++ * above zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. Empty until
++ * the subagent has used either.
++ */
++export function formatSubagentUsage(progress: AgentProgress | undefined): string {
++	if (!progress) return "";
++	const parts: string[] = [];
++	const tokens = progress.tokens + (progress.cacheReadTokens ?? 0);
++	if (tokens > 0) parts.push(`${formatNumber(tokens)} tok`);
++	if (progress.cost > 0) parts.push(formatCost(progress.cost));
++	return parts.join(theme.sep.dot);
++}
++
+ /**
+  * Build the anchored subagent HUD block: a bold accent "Subagents · N running"
+  * header (with the agent-hub key right-aligned when `hubKey` is given) plus
+@@ -1237,7 +1258,12 @@ export function renderSubagentHudLines(
+ 			items,
+ 			expanded: true,
+ 			renderItem: (session, context) => {
+-				const rowWidth = Math.max(0, contentColumns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
++				const fullWidth = Math.max(0, contentColumns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
++				const usage = formatSubagentUsage(session.progress);
++				const usageWidth = usage ? visibleWidth(usage) + SUBAGENT_USAGE_GAP : 0;
++				// A row too narrow to keep a readable title beside the usage drops the usage, not the title.
++				const showUsage = usage !== "" && fullWidth - usageWidth >= SUBAGENT_USAGE_MIN_TITLE_WIDTH;
++				const rowWidth = showUsage ? fullWidth - usageWidth : fullWidth;
+ 				const role = session.agent ?? session.progress?.agent;
+ 				const displayId = truncateToWidth(
+ 					formatTaskId(session.id),
+@@ -1285,8 +1311,11 @@ export function renderSubagentHudLines(
+ 						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
+ 					}
+ 				}
+-				const head = truncateToWidth(line, rowWidth, "");
+-				const preview = livePreview ? renderSubagentToolPreview(session, rowWidth) : undefined;
++				const titled = truncateToWidth(line, rowWidth, "");
++				const head = showUsage
++					? `${titled}${" ".repeat(Math.max(0, rowWidth - visibleWidth(titled)) + SUBAGENT_USAGE_GAP)}${theme.fg("dim", usage)}`
++					: titled;
++				const preview = livePreview ? renderSubagentToolPreview(session, fullWidth) : undefined;
+ 				itemLineCounts.set(session, preview ? 2 : 1);
+ 				return preview ? [head, preview] : head;
+ 			},
+diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
+index 680be6e17f..70d6d7b039 100644
+--- a/packages/coding-agent/src/task/executor.ts
++++ b/packages/coding-agent/src/task/executor.ts
+@@ -2141,6 +2141,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
+ 						accumulatedUsage.input += getNumberField(messageUsage, "input") ?? 0;
+ 						accumulatedUsage.output += getNumberField(messageUsage, "output") ?? 0;
+ 						accumulatedUsage.cacheRead += getNumberField(messageUsage, "cacheRead") ?? 0;
++						progress.cacheReadTokens = accumulatedUsage.cacheRead;
+ 						accumulatedUsage.cacheWrite += getNumberField(messageUsage, "cacheWrite") ?? 0;
+ 						accumulatedUsage.totalTokens += getNumberField(messageUsage, "totalTokens") ?? 0;
+ 						accumulatedUsage.reasoningTokens =
+diff --git a/packages/coding-agent/test/subagent-hud-render.test.ts b/packages/coding-agent/test/subagent-hud-render.test.ts
+index c9fc0388dc..18258b9340 100644
+--- a/packages/coding-agent/test/subagent-hud-render.test.ts
++++ b/packages/coding-agent/test/subagent-hud-render.test.ts
+@@ -277,6 +277,54 @@ describe("subagent HUD lines", () => {
+ 		expect(out).not.toContain("Complete assignment thoroughly");
+ 	});
+ 
++	describe("per-subagent usage", () => {
++		function usageRow(progress: Partial<AgentProgress>, columns = 120): string {
++			const out = render(
++				[
++					makeSession({
++						id: "Refactor",
++						description: "Refactoring the auth flow",
++						progress: makeProgress({ id: "Refactor", ...progress }),
++					}),
++				],
++				columns,
++			);
++			return out.split("\n").find(line => line.includes("Refactor")) ?? "";
++		}
++
++		it("shows total tokens, cache reads included, and the API cost at the right of the row", () => {
++			const row = usageRow({ tokens: 12_300, cacheReadTokens: 1_500_000, cost: 0.4237 });
++			expect(row).toContain("Refactor: Refactoring the auth flow");
++			expect(row.trimEnd()).toEndWith("1.5M tok · $0.424");
++			expect(row.indexOf("Refactor")).toBeLessThan(row.indexOf("1.5M tok"));
++		});
++
++		it("counts only input, output and cache-write tokens when no cache reads were reported", () => {
++			expect(usageRow({ tokens: 12_300, cost: 1.5 }).trimEnd()).toEndWith("12K tok · $1.50");
++		});
++
++		it("leaves out cost while it is zero, since a subscription model reports zero, and leaves out tokens before any are used", () => {
++			expect(usageRow({ tokens: 2_000, cost: 0 }).trimEnd()).toEndWith("2K tok");
++			expect(usageRow({ tokens: 0, cost: 0 })).not.toMatch(/tok|\$/);
++		});
++
++		it("shortens the title to make room, and drops the usage on a row too narrow to keep a readable title", () => {
++			const wide = render(
++				[
++					makeSession({
++						id: "Refactor",
++						description: "A".repeat(200),
++						progress: makeProgress({ id: "Refactor", tokens: 5_000, cost: 0.2 }),
++					}),
++				],
++				80,
++			);
++			expect(wide.split("\n").find(line => line.includes("Refactor"))?.trimEnd()).toEndWith("5K tok · $0.200");
++			for (const line of wide.split("\n")) expect(line.length).toBeLessThanOrEqual(80);
++			expect(usageRow({ tokens: 5_000, cost: 0.2 }, 36)).not.toContain("tok");
++		});
++	});
++
+ 	it("strips terminal control sequences from the assignment preview", () => {
+ 		const assignment = "\x1b]0;pwned\x07\x1b[2JAudit the corpus";
+ 		const raw = renderSubagentHudLines(
+diff --git a/packages/tui/src/tools/task.ts b/packages/tui/src/tools/task.ts
+index 37f5deeaa3..ae941aff12 100644
+--- a/packages/tui/src/tools/task.ts
++++ b/packages/tui/src/tools/task.ts
+@@ -2406,6 +2406,11 @@ export interface AgentProgress {
+ 	requests: number;
+ 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
+ 	tokens: number;
++	/**
++	 * Cumulative cacheRead tokens across all turns. Kept apart from `tokens` because every turn re-reads the
++	 * cached context; add the two for the true total of tokens the model processed.
++	 */
++	cacheReadTokens?: number;
+ 	/**
+ 	 * Current per-turn context size: latest assistant message's `usage.totalTokens`.
+ 	 * This is the number to compare against `contextWindow` — what compaction
+diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
+index d142c072b2..06e97c9cb8 100644
+--- a/packages/wire/src/index.ts
++++ b/packages/wire/src/index.ts
+@@ -271,6 +271,7 @@ export interface AgentProgress {
+ 	toolCount: number;
+ 	requests: number;
+ 	tokens: number;
++	cacheReadTokens?: number;
+ 	contextTokens?: number;
+ 	contextWindow?: number;
+ 	cost: number;

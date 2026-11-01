@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers. Source this file; do not run it.
-export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+# Plain rustup cargo first: the mbx cache shim in PATH breaks crate build scripts that call rustc.
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 upstream="$root/upstream"
