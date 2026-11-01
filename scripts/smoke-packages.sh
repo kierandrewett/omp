@@ -22,11 +22,23 @@ eval "$("$root/scripts/release-info.sh")"
 expected="omp/${fork_tag#v}"
 
 # What the program must pass once installed. HOME is empty so nothing of this machine's omp settings is read.
+# A compiled omp unpacks the addon it loads to $HOME/.omp/natives/<version>/. Run the smoke test once for each x64
+# variant (PI_NATIVE_VARIANT) in a fresh HOME and look for that file. That shows each embedded addon is in the package
+# and loads in this distro. arm64 has one addon, and the variable has no effect there.
 check='export HOME="$(mktemp -d)" XDG_DATA_HOME="$(mktemp -d)"
+echo "check: $(. /etc/os-release; echo "$PRETTY_NAME") on $(uname -m)"
 # Arch links /usr/sbin to /usr/bin, so compare the resolved path.
 test "$(readlink -f "$(command -v omp)")" = /usr/bin/omp
 test "$(omp --version)" = "'"$expected"'"
-omp --smoke-test'
+omp --smoke-test
+if [ "$(uname -m)" = x86_64 ]; then variants="modern baseline"; else variants=default; fi
+for variant in $variants; do
+    home="$(mktemp -d)"
+    if [ "$(uname -m)" = x86_64 ]; then want="pi_natives.linux-x64-$variant.node"; else want=pi_natives.linux-arm64.node; fi
+    HOME="$home" XDG_DATA_HOME="$home" PI_NATIVE_VARIANT="$variant" omp --smoke-test
+    test -s "$home"/.omp/natives/*/"$want"
+    echo "check: loaded $want"
+done'
 
 failed=0
 checked=0
