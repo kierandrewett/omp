@@ -47,7 +47,7 @@ DEPENDS = {
 
 # The formats follow the C library of the binary. A glibc binary does not run on Alpine, which has musl, so the glibc
 # prefix writes no apk. A musl binary does not run on the glibc distros, so a musl prefix writes only the apk. Build the
-# musl prefix with upstream's linux-musl target (see README.md). Until one exists no apk is written.
+# musl prefix with LIBC=musl (scripts/build.sh and scripts/install-prefix.sh); the release workflow writes both prefixes.
 FORMATS = {
     "glibc": ["rpm", "deb", "archlinux", "tar"],
     "musl": ["apk"],

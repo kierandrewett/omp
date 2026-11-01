@@ -12,6 +12,10 @@
 #   PKGSMITH  a pkgsmith binary                   default: scripts/get-pkgsmith.sh builds the pinned one
 # The architecture and the C library are read from the ELF headers of usr/bin/omp in the prefix, not from this machine
 # and not from a flag. A glibc binary therefore never gets an apk: Alpine has musl and the binary would not run there.
+# pkgsmith names an apk name-version-rRELEASE.apk, with no architecture, so the amd64 and arm64 apks would share one file
+# name and one release could not hold both. `build` renames it to name-version-rRELEASE-<alpine arch>.apk, for example
+# omp-18.14.2-r4-x86_64.apk. apk reads the name and version from inside the file, so the new name does not matter to it.
+# `plan` still shows the name pkgsmith gives.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -47,4 +51,19 @@ if [ "$command" = build ]; then
     args+=(--output "$out")
 fi
 
-exec "$pkgsmith" "$command" "$root" "${args[@]}" "$@"
+status=0
+"$pkgsmith" "$command" "$root" "${args[@]}" "$@" || status=$?
+
+if [ "$command" = build ] && [ "$status" -eq 0 ]; then
+    case "$pkg_arch" in
+        amd64) alpine_arch=x86_64 ;;
+        arm64) alpine_arch=aarch64 ;;
+        *) die "no Alpine name for architecture '$pkg_arch'" ;;
+    esac
+    for apk in "$out"/omp-*-r"$revision".apk; do
+        [ -e "$apk" ] || continue
+        mv -- "$apk" "${apk%.apk}-$alpine_arch.apk"
+        log "apk renamed to $(basename "${apk%.apk}-$alpine_arch.apk")"
+    done
+fi
+exit "$status"
