@@ -147,7 +147,18 @@ install it here but do not publish it.
 The patches contain lines of [oh-my-pi](https://github.com/can1357/oh-my-pi), which is MIT. `NOTICE.md` carries its
 licence text. The files added in this repository have no licence of their own yet.
 
-## Not here yet
+## Checked, and not checked
 
-* A musl build and an apk.
-* arm64 has not run end to end.
+Checked in a dry run of the release workflow on real runners (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`):
+both binaries build, the rpm, deb and tar install in a container of their distro and pass `omp --version` and
+`omp --smoke-test`, and the Arch package is checked by its contents on arm64 (Arch Linux has no official arm64 image).
+The addons built by CI need only glibc (`libc`, `libm`, `libpthread`, `libdl`, `libutil`) and symbols up to glibc 2.17
+on both architectures. A local `just build` makes a different addon: it needs glibc 2.39 and `libgcc_s`, so a locally
+built package will not load its addon on an older distro.
+
+Not checked:
+
+* The publish step, because no tag has been pushed. It has never run.
+* A musl build and an apk. No apk is written for the glibc build, and omp on Alpine has not been tested. The apk path was
+  only exercised for its format, with a busybox stand-in.
+* Whether `--smoke-test` loads the native addon. The container checks show that the binary starts and reports its version.
