@@ -76,7 +76,7 @@ index 72a311851a..ac8124e0b1 100644
  ### Changed
  
 diff --git a/packages/coding-agent/src/internal-urls/proc-protocol.ts b/packages/coding-agent/src/internal-urls/proc-protocol.ts
-index e2ef1144b7..eaa11afc6a 100644
+index e2ef1144b7..a3e232fc00 100644
 --- a/packages/coding-agent/src/internal-urls/proc-protocol.ts
 +++ b/packages/coding-agent/src/internal-urls/proc-protocol.ts
 @@ -1,4 +1,5 @@
@@ -89,7 +89,7 @@ index e2ef1144b7..eaa11afc6a 100644
  } from "./types";
  
  import { cfgLaunchEnabled } from "../tools/settings";
-+import { switchSubagentModelAsCaller } from "../task/model-switch";
++import type { SubagentModelSwitchOutcome } from "../task/model-switch";
  
  type ProcTarget =
 -	| { id: string; action: "stdin" | "mode" | "kill" }
@@ -122,7 +122,7 @@ index e2ef1144b7..eaa11afc6a 100644
  }
  
  /** `proc://<id>/kill`: cancels a job, agent, or service; needs no content and touches no files. */
-@@ -70,12 +76,36 @@ function killCall(id: string): string {
+@@ -70,12 +76,57 @@ function killCall(id: string): string {
  }
  
  /** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
@@ -135,6 +135,24 @@ index e2ef1144b7..eaa11afc6a 100644
  	return `proc://${id}/mode is write-only; modes and stdin are services-only, not available for in-process jobs or agents. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
  }
  
++/** Switches a running subagent's model for the agent that spawned it; see `task/model-switch.ts`. */
++export type SubagentModelSwitcher = (
++	session: ToolSession,
++	agentId: string,
++	selector: string,
++) => Promise<SubagentModelSwitchOutcome>;
++
++let subagentModelSwitcher: SubagentModelSwitcher | undefined;
++
++/**
++ * The task module registers its switch here. This protocol is imported all over the harness, so it must not
++ * import the task graph itself: doing so merges the two into one bundle graph and the compiled binary fails
++ * to build.
++ */
++export function registerSubagentModelSwitcher(switcher: SubagentModelSwitcher): void {
++	subagentModelSwitcher = switcher;
++}
++
 +/**
 + * `proc://<id>/model`: switch the running subagent `id` (its agent id, or the id of the job running it)
 + * to the role or exact model `content` names. It takes effect at the subagent's next model request.
@@ -145,7 +163,10 @@ index e2ef1144b7..eaa11afc6a 100644
 +		throw new Error(`${id} is a ${job.type} job, not a subagent; only a running subagent has a model to change.`);
 +	}
 +	const agentId = job?.agentId ?? id;
-+	const outcome = await switchSubagentModelAsCaller(session, agentId, selector);
++	if (!subagentModelSwitcher) {
++		throw new Error("Changing a running agent's model needs the task tool, which is not loaded.");
++	}
++	const outcome = await subagentModelSwitcher(session, agentId, selector);
 +	const identity = formatModelStringWithRouting(outcome.model);
 +	const text =
 +		outcome.state === "queued"
@@ -160,7 +181,7 @@ index e2ef1144b7..eaa11afc6a 100644
  function ownerJobs(session: ToolSession): AsyncJob[] {
  	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
  }
-@@ -266,8 +296,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
+@@ -266,8 +317,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
  		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
  		if (!id)
  			throw new Error(
@@ -500,6 +521,29 @@ index 70d6d7b039..8ac2523af8 100644
  					settings: captureSubagentSettings(settings, subagentSettings),
  					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
  					keepTodo: prewalk !== undefined,
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 72e562836a..adf4e35378 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -60,7 +60,9 @@ import { InternalUrlRouter } from "../internal-urls/router";
+ import { AgentRegistry, isResumable } from "../registry/agent-registry";
+ import { type DiscoveryResult, discoverAgents } from "./discovery";
+ import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
++import { registerSubagentModelSwitcher } from "../internal-urls/proc-protocol";
+ import { getPerCallModelAdvertisement } from "./model-approval";
++import { switchSubagentModelAsCaller } from "./model-switch";
+ import { type TieredModelAdvertisement, tierAdvertisedRoles } from "./model-economy";
+ import { generateTaskName } from "./name-generator";
+ import { AgentOutputManager } from "./output-manager";
+@@ -1103,6 +1105,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 	 * Create a TaskTool instance with async agent discovery.
+ 	 */
+ 	static async create(session: ToolSession): Promise<TaskTool> {
++		// `write proc://<id>/model` reaches the task module through this registration, not an import.
++		registerSubagentModelSwitcher(switchSubagentModelAsCaller);
+ 		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
+ 		return new TaskTool(session, agents);
+ 	}
 diff --git a/packages/coding-agent/src/task/model-switch.ts b/packages/coding-agent/src/task/model-switch.ts
 new file mode 100644
 index 0000000000..28ecea8aee
@@ -955,10 +999,10 @@ index 1c083586bf..bc8bd6be81 100644
  				showError,
 diff --git a/packages/coding-agent/test/task/subagent-model-switch.test.ts b/packages/coding-agent/test/task/subagent-model-switch.test.ts
 new file mode 100644
-index 0000000000..06f428c0c0
+index 0000000000..d10fcb9c2e
 --- /dev/null
 +++ b/packages/coding-agent/test/task/subagent-model-switch.test.ts
-@@ -0,0 +1,461 @@
+@@ -0,0 +1,464 @@
 +/**
 + * A running subagent's model changes mid-run without restarting it: the request in flight finishes
 + * on its current model and the next one uses the new model, with the subagent's context intact.
@@ -983,7 +1027,7 @@ index 0000000000..06f428c0c0
 +import { getModelMatchPreferences } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 +import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 +import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
-+import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
++import { ProcProtocolHandler, registerSubagentModelSwitcher } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
 +import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 +import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 +import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -992,6 +1036,7 @@ index 0000000000..06f428c0c0
 +import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 +import type { PerCallModelGrants } from "@oh-my-pi/pi-coding-agent/task/model-approval";
 +import * as modelUsageModule from "@oh-my-pi/pi-coding-agent/task/model-usage";
++import { switchSubagentModelAsCaller } from "@oh-my-pi/pi-coding-agent/task/model-switch";
 +import { switchSubagentModelAsOperator } from "@oh-my-pi/pi-coding-agent/task/subagent-model-policy";
 +import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 +import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -1017,6 +1062,8 @@ index 0000000000..06f428c0c0
 +}
 +
 +beforeEach(async () => {
++	// The proc protocol reaches the task module through a registration that TaskTool.create normally makes.
++	registerSubagentModelSwitcher(switchSubagentModelAsCaller);
 +	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 +	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-subagent-model-switch-"));
 +	const home = path.join(root, "home");

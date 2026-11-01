@@ -23,6 +23,17 @@ git -C "$upstream" worktree add --detach "$build_tree" "$pinned" >/dev/null
 "$root/scripts/apply-patches.sh" "$build_tree"
 
 cd "$build_tree"
+
+# Upstream's compiled binary refuses to start when the Bun that built it is older than `packageManager` asks
+# for. Keep the system Bun as it is and build with a private copy of the required version when it is older.
+required_bun="$(sed -nE 's/.*"packageManager": *"bun@>=([0-9.]+)".*/\1/p' package.json)"
+if [ -n "$required_bun" ] && [ "$(printf '%s\n%s\n' "$required_bun" "$(bun --version)" | sort -V | head -n 1)" != "$required_bun" ]; then
+    log "Bun $(bun --version) is older than $required_bun; using a private copy"
+    npm install --prefix "$root/build/bun" "bun@$required_bun" >/dev/null
+    export PATH="$root/build/bun/node_modules/.bin:$PATH"
+fi
+log "building with Bun $(bun --version)"
+
 log "installing dependencies"
 # Upstream's prepare script checks generated viewer metadata and fails on some tags.
 bun install --frozen-lockfile --ignore-scripts
