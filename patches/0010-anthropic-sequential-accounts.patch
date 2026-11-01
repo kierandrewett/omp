@@ -1,0 +1,955 @@
+diff --git a/docs/settings.md b/docs/settings.md
+index 7183dd079a..a0c3b36dc2 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -603,6 +603,7 @@ providers:
+ | `retry.usageAwareFallback`               | boolean | `false`           | Before a turn, use reliable coding-plan quota reports to prefer healthy same-provider accounts and then configured fallback models. Unknown usage keeps the current model; ordinary API keys are excluded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `retry.usageReservePct`                  | number  | `10`              | Remaining quota percentage protected by usage-aware fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+ | `retry.usageReservePolicy`               | enum    | `confirm`         | `confirm`, `auto`, `fail-closed`. At reserve, `confirm` asks when an interactive confirmer is available and otherwise auto-falls back; exhausted quota can fall back without confirmation. `fail-closed` blocks known reserve/depleted quota rather than spending it.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
++| `retry.accountMode`                      | enum    | `sequential`      | `sequential` (default) or `balanced`. `sequential` serves every session from one stored account at a time and moves to the next only when that account is blocked or spent. It does not hand back when the first account resets, and it ignores the reserve margin unless an account policy sets one. `balanced` ranks accounts by usage and spreads sessions over them. Applies to providers that support one-at-a-time use, today Anthropic. |
+ | `providers.anthropic.serverSideFallback` | boolean | `false`           | Opt in to Anthropic's `server-side-fallback-2026-06-01` beta for eligible direct Claude Fable/Mythos requests. The catalog-owned server-side chain currently targets `claude-opus-5`, not `claude-opus-5-5`; unsupported models and hosts have no chain.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+ 
+ When the active chat model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default` — which also owns a live model that belongs to no role (`/model` switch, ephemeral hop). The effective chain is the owning role's primary followed by its configured entries, and a live selector that appears nowhere in it is offered the whole chain. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching chat roles when the session is not on those roles. It skips chat candidates whose selectors are still cooling down and switches for the rest of the turn. Model-kind runners resolve their named role chain separately and never consume `default`. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`. A subagent spawned on a single model inherits its role's chain (`@reviewer` → `fallbackChains.reviewer`), or `default`'s when the role has none; an explicit `[]` gives it no fallbacks even when `default` is assigned the same model. Exact-model and `provider/*` keys still take precedence over that inherited chain.
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 6a3a1ccb01..1ac476f4c5 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -2,6 +2,10 @@
+ 
+ ## [Unreleased]
+ 
++### Added
++
++- Added `AuthStorageOptions.accountMode` (`"balanced"` or `"sequential"`) and the `drainSequentially` ranking-strategy flag. In `sequential` mode the Claude strategy serves every session from one stored account at a time, stores the account that served last under `account:active:<provider>`, and moves to the next account only when the active one is blocked or spent. It does not hand back after a reset.
++
+ ## [18.14.2] - 2026-10-31
+ 
+ ### Breaking Changes
+diff --git a/packages/ai/src/auth-broker/discover.ts b/packages/ai/src/auth-broker/discover.ts
+index 20969f4754..2f289e10f1 100644
+--- a/packages/ai/src/auth-broker/discover.ts
++++ b/packages/ai/src/auth-broker/discover.ts
+@@ -18,10 +18,12 @@ import {
+ } from "@oh-my-pi/pi-utils";
+ import { YAML } from "bun";
+ import {
++	type AuthAccountMode,
+ 	type AuthAccountPolicies,
+ 	type AuthCredentialStore,
+ 	AuthStorage,
+ 	type AuthStorageOptions,
++	DEFAULT_AUTH_ACCOUNT_MODE,
+ 	DEFAULT_USAGE_RESERVE_PCT,
+ 	SqliteAuthCredentialStore,
+ } from "../auth-storage";
+@@ -85,6 +87,7 @@ interface ConfigSnapshot {
+ 	token?: string;
+ 	accountPolicies?: unknown;
+ 	usageReservePct?: unknown;
++	accountMode?: unknown;
+ }
+ 
+ /**
+@@ -198,6 +201,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
+ 	});
+ }
+ 
++function parseAccountMode(value: unknown): AuthAccountMode {
++	if (value === undefined) return DEFAULT_AUTH_ACCOUNT_MODE;
++	if (value === "sequential" || value === "balanced") return value;
++	throw new AIError.ConfigurationError('retry.accountMode must be "sequential" or "balanced"');
++}
++
+ function parseUsageReservePct(value: unknown): number {
+ 	const reservePct = value === undefined ? DEFAULT_USAGE_RESERVE_PCT : value;
+ 	if (typeof reservePct !== "number" || !Number.isFinite(reservePct)) {
+@@ -234,6 +243,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+ 			token: readDottedString(record, "auth.broker.token"),
+ 			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
+ 			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
++			accountMode: readDottedValue(record, "retry.accountMode"),
+ 		};
+ 	}
+ 	return {};
+@@ -242,12 +252,14 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+ export interface AuthAccountPolicyConfig {
+ 	accountPolicies: AuthAccountPolicies;
+ 	defaultReservePct: number;
++	accountMode: AuthAccountMode;
+ }
+ 
+ export interface LoadAuthAccountPolicyConfigOptions {
+ 	agentDir?: string;
+ 	accountPolicies?: unknown;
+ 	usageReservePct?: unknown;
++	accountMode?: unknown;
+ }
+ 
+ /** Load and strictly validate account-selection policy configuration, with main-config fallback. */
+@@ -255,7 +267,10 @@ export async function loadAuthAccountPolicyConfig(
+ 	options: LoadAuthAccountPolicyConfigOptions = {},
+ ): Promise<AuthAccountPolicyConfig> {
+ 	const agentDir = options.agentDir ?? getAgentDir();
+-	const needsMainConfigFallback = options.accountPolicies === undefined || options.usageReservePct === undefined;
++	const needsMainConfigFallback =
++		options.accountPolicies === undefined ||
++		options.usageReservePct === undefined ||
++		options.accountMode === undefined;
+ 	const snapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
+ 	return {
+ 		accountPolicies: parseAuthAccountPolicies(
+@@ -264,6 +279,7 @@ export async function loadAuthAccountPolicyConfig(
+ 		defaultReservePct: parseUsageReservePct(
+ 			options.usageReservePct === undefined ? snapshot?.usageReservePct : options.usageReservePct,
+ 		),
++		accountMode: parseAccountMode(options.accountMode === undefined ? snapshot?.accountMode : options.accountMode),
+ 	};
+ }
+ 
+@@ -518,10 +534,11 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+ 		agentDir,
+ 		configValueResolver: options.configValueResolver,
+ 	});
+-	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
++	const { accountPolicies, defaultReservePct, accountMode } = await loadAuthAccountPolicyConfig({
+ 		agentDir,
+ 		accountPolicies: options.accountPolicies,
+ 		usageReservePct: options.authStorageOptions?.defaultReservePct,
++		accountMode: options.authStorageOptions?.accountMode,
+ 	});
+ 	const { store, sourceLabel } = await openAuthCredentialStore({
+ 		brokerConfig,
+@@ -536,6 +553,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+ 		sourceLabel,
+ 		accountPolicies,
+ 		defaultReservePct,
++		accountMode,
+ 	});
+ 	await storage.credentials.reload();
+ 	return storage;
+diff --git a/packages/ai/src/auth-storage.ts b/packages/ai/src/auth-storage.ts
+index b718d5eb2d..0cba68ffb4 100644
+--- a/packages/ai/src/auth-storage.ts
++++ b/packages/ai/src/auth-storage.ts
+@@ -33,6 +33,7 @@ import { CredentialSelector } from "./auth/select";
+ import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+ import type { AuthCredentialStore } from "./auth/store";
+ import type {
++	AuthAccountMode,
+ 	AuthAccountPolicies,
+ 	AuthApiKeyOptions,
+ 	AuthCredential,
+@@ -95,7 +96,11 @@ export class AuthStorage {
+ 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
+ 		this.#options = options;
+ 		this.#overrides = new KeyOverrides(options.configValueResolver);
+-		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
++		this.#policies = new AccountPolicies(
++			options.accountPolicies ?? [],
++			options.defaultReservePct,
++			options.accountMode,
++		);
+ 		this.#modules = this.#compose(store, options.sourceLabel);
+ 		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
+ 	}
+@@ -144,11 +149,15 @@ export class AuthStorage {
+ 	 * several stored OAuth accounts, or two policies claim the same account; a
+ 	 * policy naming an absent account stays inactive and logs a warning.
+ 	 */
+-	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
++	setAccountPolicies(config: {
++		accountPolicies: AuthAccountPolicies;
++		defaultReservePct: number;
++		accountMode?: AuthAccountMode;
++	}): void {
+ 		const pool = this.#modules.pool;
+ 		const stored = new Map<string, AuthCredential[]>();
+ 		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
+-		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
++		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored, config.accountMode);
+ 	}
+ 
+ 	/**
+diff --git a/packages/ai/src/auth/policy.ts b/packages/ai/src/auth/policy.ts
+index bf01e6e5b2..70a45a0886 100644
+--- a/packages/ai/src/auth/policy.ts
++++ b/packages/ai/src/auth/policy.ts
+@@ -8,6 +8,7 @@ import type {
+ 	OAuthAccountIdentity,
+ 	OAuthCredential,
+ } from "./types";
++import type { AuthAccountMode } from "./types";
+ import { DEFAULT_USAGE_RESERVE_PCT } from "./types";
+ 
+ /** Whether every identity field set on `selector` matches `identity`. */
+@@ -24,10 +25,15 @@ export function matchesAuthAccountSelector(selector: AuthAccountSelector, identi
+ export class AccountPolicies {
+ 	#accountPolicies: AuthAccountPolicies;
+ 	#defaultReservePct: number;
++	#accountMode: AuthAccountMode;
+ 	/** Indexes of policies already warned as unmatched; validation runs on every selection. */
+ 	#warnedUnmatched = new Set<number>();
+ 
+-	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
++	constructor(
++		policies: AuthAccountPolicies,
++		defaultReservePct: number | undefined,
++		accountMode: AuthAccountMode = "balanced",
++	) {
+ 		const effectiveDefaultReservePct =
+ 			typeof defaultReservePct === "number" && Number.isFinite(defaultReservePct)
+ 				? Math.max(0, Math.min(100, defaultReservePct))
+@@ -35,6 +41,12 @@ export class AccountPolicies {
+ 		AccountPolicies.#validateAccountPolicyConfiguration(policies, effectiveDefaultReservePct);
+ 		this.#accountPolicies = policies;
+ 		this.#defaultReservePct = effectiveDefaultReservePct;
++		this.#accountMode = accountMode;
++	}
++
++	/** Whether several accounts of one provider share traffic by usage or one after the other. */
++	get accountMode(): AuthAccountMode {
++		return this.#accountMode;
+ 	}
+ 
+ 	/** Global usage reserve (0–100) for accounts without a per-account `reservePct`. */
+@@ -51,11 +63,13 @@ export class AccountPolicies {
+ 		policies: AuthAccountPolicies,
+ 		defaultReservePct: number | undefined,
+ 		storedCredentials: ReadonlyMap<string, readonly AuthCredential[]> = new Map(),
++		accountMode: AuthAccountMode = "balanced",
+ 	): void {
+-		const next = new AccountPolicies(policies, defaultReservePct);
++		const next = new AccountPolicies(policies, defaultReservePct, accountMode);
+ 		for (const [provider, credentials] of storedCredentials) next.validateFor(provider, credentials);
+ 		this.#accountPolicies = next.#accountPolicies;
+ 		this.#defaultReservePct = next.#defaultReservePct;
++		this.#accountMode = next.#accountMode;
+ 		this.#warnedUnmatched = next.#warnedUnmatched;
+ 	}
+ 
+diff --git a/packages/ai/src/auth/rank.ts b/packages/ai/src/auth/rank.ts
+index 89b80c11aa..c552f14692 100644
+--- a/packages/ai/src/auth/rank.ts
++++ b/packages/ai/src/auth/rank.ts
+@@ -56,6 +56,10 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
+ 	primaryUsed: number;
+ 	primaryRequiredDrain: number;
+ 	orderPos: number;
++	/** Sequential mode: this credential served last, so it stays first while it is usable. */
++	active?: boolean;
++	/** Sequential mode: rank by block, spent allowance and reserve, then active account and priority only. */
++	sequential?: boolean;
+ };
+ /** OAuth candidate with complete ranking metrics. */
+ export type RankedOAuthCandidate = UsageRankedCandidate<OAuthCredential>;
+@@ -104,6 +108,13 @@ function compareUsageRankedCandidatePriority(
+ 	// allowance yields to any sibling whose renewable allowance is left (#13889).
+ 	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
+ 	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
++	if (left.sequential === true || right.sequential === true) {
++		// One account at a time: no usage balancing, hot-window guard or drain urgency.
++		// The account that served last stays first while it is usable, so every session
++		// converges on it; configured priority then orders the successors.
++		if ((left.active === true) !== (right.active === true)) return left.active === true ? -1 : 1;
++		return right.accountPriority - left.accountPriority;
++	}
+ 	if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
+ 	// Short-window guard: candidates whose primary (e.g. 5h) window is
+ 	// nearly exhausted rank behind cool ones regardless of drain urgency —
+diff --git a/packages/ai/src/auth/select.ts b/packages/ai/src/auth/select.ts
+index 4bab440623..44802fb9d2 100644
+--- a/packages/ai/src/auth/select.ts
++++ b/packages/ai/src/auth/select.ts
+@@ -72,6 +72,11 @@ export type TryOAuthOptions = {
+ 	onTransientRefreshFailure?: (error: unknown) => void;
+ };
+ 
++/** Cache key prefix for the stored account that served a drain-sequential provider last. */
++const ACTIVE_ACCOUNT_CACHE_PREFIX = "account:active:";
++/** The active-account row outlives idle spells; a missing or stale row falls back to pool order. */
++const ACTIVE_ACCOUNT_TTL_SEC = 30 * 24 * 60 * 60;
++
+ /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
+ export interface CredentialSelectorDeps {
+ 	store: AuthCredentialStore;
+@@ -103,6 +108,27 @@ export class CredentialSelector {
+ 		}
+ 	}
+ 
++	/** Row id of the account that served `provider` last, shared by every session and process on this store. */
++	#readActiveCredentialId(provider: string): number | undefined {
++		try {
++			const raw = this.#deps.store.getCache(`${ACTIVE_ACCOUNT_CACHE_PREFIX}${provider}`);
++			const id = raw ? Number.parseInt(raw, 10) : Number.NaN;
++			return Number.isSafeInteger(id) ? id : undefined;
++		} catch (error) {
++			logger.debug("Failed to read the active account", { provider, error });
++			return undefined;
++		}
++	}
++
++	#recordActiveCredentialId(provider: string, credentialId: number): void {
++		try {
++			const expiresAtSec = Math.floor(Date.now() / 1000) + ACTIVE_ACCOUNT_TTL_SEC;
++			this.#deps.store.setCache(`${ACTIVE_ACCOUNT_CACHE_PREFIX}${provider}`, String(credentialId), expiresAtSec);
++		} catch (error) {
++			logger.debug("Failed to record the active account", { provider, error });
++		}
++	}
++
+ 	/**
+ 	 * Returns next index in round-robin sequence for load distribution.
+ 	 * Increments stored counter and wraps at total.
+@@ -439,6 +465,9 @@ export class CredentialSelector {
+ 		strategy?: CredentialRankingStrategy;
+ 		defaultReservePct?: number;
+ 		rankingContext: CredentialRankingContext;
++		/** Drain-sequential ranking: keep the active account first while it is usable. */
++		sequential?: boolean;
++		activeCredentialId?: number;
+ 		blockScope?: string;
+ 		/** Scopes a block may live under for this request; reads honour all of them. */
+ 		blockScopes?: readonly string[];
+@@ -551,6 +580,11 @@ export class CredentialSelector {
+ 				primaryRequiredDrain:
+ 					strategy === undefined ? 0 : windowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
+ 				orderPos,
++				sequential: args.sequential === true,
++				active:
++					args.sequential === true &&
++					args.activeCredentialId !== undefined &&
++					this.#deps.pool.entries(args.provider)[selection.index]?.id === args.activeCredentialId,
+ 			});
+ 		}
+ 		return orderUsageRankedCandidates(ranked, args.planGate !== undefined);
+@@ -601,6 +635,13 @@ export class CredentialSelector {
+ 		const providerKey = providerTypeKey(provider, "oauth");
+ 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+ 		const strategy = this.#deps.strategies(provider);
++		// One account at a time (strategy.drainSequentially): every session follows the account that
++		// served last until it is blocked or spent, so sessions never spread over both accounts.
++		const sequential =
++			strategy?.drainSequentially === true &&
++			this.#deps.policies.accountMode === "sequential" &&
++			credentials.length > 1;
++		const activeCredentialId = sequential ? this.#readActiveCredentialId(provider) : undefined;
+ 		const rankingContext: CredentialRankingContext = {
+ 			modelId: options?.modelId,
+ 		};
+@@ -642,15 +683,18 @@ export class CredentialSelector {
+ 		// rank. Legacy pins predating `lastUsedAtMs` count as warm until the next resolve rewrites the row.
+ 		const sessionPreferredLastUsedAtMs =
+ 			sessionCredential?.type === "oauth" ? sessionCredential.lastUsedAtMs : undefined;
++		const sessionPinIsExplicit = sessionCredential?.type === "oauth" && sessionCredential.explicit === true;
++		// An automatic pin never outranks the shared active account in sequential mode; only an
++		// explicit pin does. Elsewhere a pin stays warm until the provider's cache window passes.
+ 		const sessionPreferredIsWarm =
+-			strategy?.stickyWarmMs === undefined ||
+-			sessionPreferredLastUsedAtMs === undefined ||
+-			Date.now() - sessionPreferredLastUsedAtMs < strategy.stickyWarmMs;
++			(!sequential || sessionPinIsExplicit) &&
++			(strategy?.stickyWarmMs === undefined ||
++				sessionPreferredLastUsedAtMs === undefined ||
++				Date.now() - sessionPreferredLastUsedAtMs < strategy.stickyWarmMs);
+ 		const sessionPreferredIsAvailable =
+ 			sessionPreferredIndex !== undefined &&
+ 			sessionPreferredCanRefreshOrUse &&
+ 			!this.#deps.blocks.isBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
+-		const sessionPinIsExplicit = sessionCredential?.type === "oauth" && sessionCredential.explicit === true;
+ 		const rankDespitePin =
+ 			!sessionPreferredIsAvailable ||
+ 			!sessionPreferredIsWarm ||
+@@ -686,9 +730,9 @@ export class CredentialSelector {
+ 					return rightPriority - leftPriority || leftIndex - rightIndex;
+ 				})
+ 			: order;
+-		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : policyOrder;
++		let rankingOrder = shouldRank && (sessionId || sequential) ? baseRankingOrder : policyOrder;
+ 		const sessionPreferredRankingPos =
+-			shouldRank && sessionId && sessionPreferredIndex !== undefined && !hasPlanRequirement
++			shouldRank && sessionId && !sequential && sessionPreferredIndex !== undefined && !hasPlanRequirement
+ 				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
+ 				: -1;
+ 		if (sessionPreferredRankingPos > 0) {
+@@ -706,7 +750,10 @@ export class CredentialSelector {
+ 					credentials,
+ 					options,
+ 					strategy,
+-					defaultReservePct: policyReserveEnabled ? this.#deps.policies.defaultReservePct : undefined,
++					defaultReservePct:
++						policyReserveEnabled && !sequential ? this.#deps.policies.defaultReservePct : undefined,
++					sequential,
++					activeCredentialId,
+ 					rankingContext,
+ 					blockScope,
+ 					blockScopes,
+@@ -998,7 +1045,20 @@ export class CredentialSelector {
+ 					blockScopes,
+ 					onTransientRefreshFailure: recordTransientRefreshFailure,
+ 				});
+-				if (resolved) return resolved;
++				if (resolved) {
++					// Only an unrestricted session decides the shared account: a pool-restricted
++					// subagent chooses among fewer accounts than the store holds.
++					if (
++						sequential &&
++						!sessionPinIsExplicit &&
++						credentials.length === stored.length &&
++						resolved.credentialId !== undefined &&
++						resolved.credentialId !== activeCredentialId
++					) {
++						this.#recordActiveCredentialId(provider, resolved.credentialId);
++					}
++					return resolved;
++				}
+ 			}
+ 		}
+ 
+diff --git a/packages/ai/src/auth/types.ts b/packages/ai/src/auth/types.ts
+index b2ac2f54b8..4c17508e64 100644
+--- a/packages/ai/src/auth/types.ts
++++ b/packages/ai/src/auth/types.ts
+@@ -24,6 +24,17 @@ import type {
+ /** Default remaining quota protected for accounts without an explicit policy override. */
+ export const DEFAULT_USAGE_RESERVE_PCT = 10;
+ 
++/**
++ * How several stored accounts of one provider share traffic. `balanced` ranks accounts by usage and
++ * spreads sessions over them. `sequential` serves every session from one account until it is blocked
++ * or spent, then moves to the next. A provider whose ranking strategy lacks `drainSequentially`
++ * stays balanced in either mode.
++ */
++export type AuthAccountMode = "balanced" | "sequential";
++
++/** Account mode the settings and config loader use when none is set. */
++export const DEFAULT_AUTH_ACCOUNT_MODE: AuthAccountMode = "sequential";
++
+ /** Stored API key used by credential selection. */
+ export type ApiKeyCredential = {
+ 	type: "api_key";
+@@ -339,6 +350,8 @@ export type AuthStorageOptions = {
+ 	accountPolicies?: AuthAccountPolicies;
+ 	/** Global reserve fallback for accounts without a matching reservePct policy. */
+ 	defaultReservePct?: number;
++	/** How several accounts of one provider share traffic; storage built directly defaults to `balanced`. */
++	accountMode?: AuthAccountMode;
+ 	usageFetch?: typeof fetch;
+ 	usageRequestTimeoutMs?: number;
+ 	usageLogger?: UsageLogger;
+diff --git a/packages/ai/src/usage.ts b/packages/ai/src/usage.ts
+index 4fc15f12f0..32cc783e63 100644
+--- a/packages/ai/src/usage.ts
++++ b/packages/ai/src/usage.ts
+@@ -456,6 +456,15 @@ export interface CredentialRankingStrategy {
+ 	planGate?(context: CredentialRankingContext): PlanGate | undefined;
+ 	/** Idle window after which a session pin stops suppressing usage re-ranking because the provider's prompt cache cannot still be warm; omit for indefinite stickiness. */
+ 	stickyWarmMs?: number;
++	/**
++	 * Serve every session from ONE stored account at a time. The account that served last stays
++	 * active for all sessions until it is blocked or its allowance is spent. Then the next account
++	 * takes over and becomes the active one; it does not hand back when the first account resets.
++	 * Usage balancing, the hot-window guard and drain urgency are off in this mode, and the reserve
++	 * margin does not apply unless an account policy sets one. Providers that omit this flag keep
++	 * usage-balanced ranking.
++	 */
++	drainSequentially?: boolean;
+ 	/** Extract the primary (short) and secondary (long) window limits from a usage report. */
+ 	findWindowLimits(
+ 		report: UsageReport,
+diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
+index c983e2e2c9..6f949b106e 100644
+--- a/packages/ai/src/usage/claude.ts
++++ b/packages/ai/src/usage/claude.ts
+@@ -916,6 +916,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+ 	 * own cache lifetimes are verified.
+ 	 */
+ 	stickyWarmMs: 60 * 60_000,
++	drainSequentially: true,
+ 	findWindowLimits(report, context) {
+ 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
+ 		const secondary = findClaudeSecondaryLimit(report, context);
+diff --git a/packages/ai/test/auth-broker-config-discovery.test.ts b/packages/ai/test/auth-broker-config-discovery.test.ts
+index 4d0c017a4c..98d990752f 100644
+--- a/packages/ai/test/auth-broker-config-discovery.test.ts
++++ b/packages/ai/test/auth-broker-config-discovery.test.ts
+@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
+ import { discoverAuthStorage, loadAuthAccountPolicyConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
+-import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
++import {
++	type AuthAccountPolicies,
++	DEFAULT_AUTH_ACCOUNT_MODE,
++	DEFAULT_USAGE_RESERVE_PCT,
++} from "@oh-my-pi/pi-ai/auth-storage";
+ import { writeAuthBrokerSnapshotCache } from "@oh-my-pi/pi-ai/auth-broker/snapshot-cache";
+ import type { SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker/types";
+ import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+@@ -82,12 +86,14 @@ describe("resolveAuthBrokerConfig config discovery", () => {
+ 		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
+ 			accountPolicies,
+ 			defaultReservePct: 17,
++			accountMode: DEFAULT_AUTH_ACCOUNT_MODE,
+ 		});
+ 
+ 		await Bun.write(path.join(agentDir, "config.yml"), "auth: {}\n");
+ 		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
+ 			accountPolicies: [],
+ 			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
++			accountMode: DEFAULT_AUTH_ACCOUNT_MODE,
+ 		});
+ 	});
+ 
+@@ -99,6 +105,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
+ 				await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
+ 					accountPolicies: [],
+ 					defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
++					accountMode: DEFAULT_AUTH_ACCOUNT_MODE,
+ 				});
+ 			});
+ 		}
+diff --git a/packages/ai/test/auth-storage-anthropic-sequential.test.ts b/packages/ai/test/auth-storage-anthropic-sequential.test.ts
+new file mode 100644
+index 0000000000..4a7bd8a2f9
+--- /dev/null
++++ b/packages/ai/test/auth-storage-anthropic-sequential.test.ts
+@@ -0,0 +1,267 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
++import {
++	type AuthCredential,
++	type AuthCredentialStore,
++	AuthStorage,
++	type StoredAuthCredential,
++} from "@oh-my-pi/pi-ai/auth-storage";
++import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
++import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
++
++// Sequential account mode for Anthropic: every session follows ONE stored account until it is
++// blocked or spent. The failure modes behind these scenarios are listed in the commit body.
++
++const HOUR_MS = 3_600_000;
++const ACTIVE_KEY = "account:active:anthropic";
++
++interface ObservableStore extends AuthCredentialStore {
++	cache: Map<string, { value: string; expiresAtSec: number }>;
++}
++
++function makeStore(rows: StoredAuthCredential[]): ObservableStore {
++	const cache = new Map<string, { value: string; expiresAtSec: number }>();
++	return {
++		cache,
++		close() {},
++		listAuthCredentials() {
++			return rows;
++		},
++		updateAuthCredential() {},
++		async deleteAuthCredential() {
++			return false;
++		},
++		tryDisableAuthCredentialIfMatches() {
++			return false;
++		},
++		async replaceAuthCredentials() {
++			return rows;
++		},
++		async upsertAuthCredential() {
++			return rows;
++		},
++		async deleteAuthCredentials() {},
++		getCache(key) {
++			const entry = cache.get(key);
++			if (!entry) return null;
++			if (entry.expiresAtSec * 1000 <= Date.now()) return null;
++			return entry.value;
++		},
++		setCache(key, value, expiresAtSec) {
++			cache.set(key, { value, expiresAtSec });
++		},
++		cleanExpiredCache() {},
++	};
++}
++
++function oauthRow(id: number, email: string): StoredAuthCredential {
++	const credential: AuthCredential = {
++		type: "oauth",
++		access: `oat-${id}`,
++		refresh: `refresh-${id}`,
++		expires: Date.now() + HOUR_MS,
++		accountId: `account-${id}`,
++		email,
++	};
++	return { id, provider: "anthropic", credential, disabledCause: null };
++}
++
++interface Window {
++	used: number;
++	resetsInMs?: number;
++}
++
++function report(email: string, fiveHour: Window, sevenDay: Window): UsageReport {
++	const limit = (id: "5h" | "7d", window: Window): UsageReport["limits"][number] => ({
++		id: `anthropic:${id}`,
++		label: id === "5h" ? "Claude 5 Hour" : "Claude 7 Day",
++		scope: { provider: "anthropic", windowId: id, shared: true },
++		window: {
++			id,
++			label: id === "5h" ? "5 Hour" : "7 Day",
++			...(window.resetsInMs === undefined ? {} : { resetsAt: Date.now() + window.resetsInMs }),
++		},
++		amount: { used: window.used * 100, limit: 100, usedFraction: window.used, unit: "percent" },
++		status: window.used >= 1 ? "exhausted" : "ok",
++	});
++	return {
++		provider: "anthropic",
++		fetchedAt: Date.now(),
++		limits: [limit("5h", fiveHour), limit("7d", sevenDay)],
++		metadata: { email, accountId: email },
++	};
++}
++
++const FRESH: Window = { used: 0, resetsInMs: 5 * HOUR_MS };
++const SPENT_WEEK: Window = { used: 1, resetsInMs: 70 * HOUR_MS };
++
++describe("AuthStorage Anthropic sequential accounts", () => {
++	let store: ObservableStore;
++	let storage: AuthStorage;
++	let reports: Record<string, UsageReport | null>;
++
++	const openStorage = async (accountMode: "sequential" | "balanced" = "sequential"): Promise<AuthStorage> => {
++		const opened = new AuthStorage(store, {
++			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
++			accountMode,
++		});
++		await opened.credentials.reload();
++		return opened;
++	};
++
++	/** Forget cached usage so the next resolve reads the current `reports`, keeping the active account row. */
++	const refreshUsage = async (): Promise<void> => {
++		storage.close();
++		for (const key of [...store.cache.keys()]) {
++			if (key !== ACTIVE_KEY) store.cache.delete(key);
++		}
++		storage = await openStorage();
++	};
++
++	beforeEach(async () => {
++		store = makeStore([oauthRow(1, "a@example.com"), oauthRow(2, "b@example.com")]);
++		reports = {
++			"oat-1": report("a@example.com", FRESH, { used: 0.2, resetsInMs: 70 * HOUR_MS }),
++			"oat-2": report("b@example.com", FRESH, { used: 0.2, resetsInMs: 70 * HOUR_MS }),
++		};
++		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
++			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
++			return access ? (reports[access] ?? null) : null;
++		});
++		storage = await openStorage();
++	});
++
++	afterEach(() => {
++		storage.close();
++		vi.restoreAllMocks();
++	});
++
++	it("sends every session to the same account when none is active yet", async () => {
++		const keys = await Promise.all(["s1", "s2", "s3", "s4", "s5", "s6"].map(id => storage.keys.get("anthropic", id)));
++		expect(new Set(keys).size).toBe(1);
++		expect(keys[0]).toBe("oat-1");
++		expect(store.cache.get(ACTIVE_KEY)?.value).toBe("1");
++	});
++
++	it("keeps the active account while its 5 hour window is hot and a sibling is idle", async () => {
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++		reports["oat-1"] = report(
++			"a@example.com",
++			{ used: 0.93, resetsInMs: HOUR_MS },
++			{ used: 0.4, resetsInMs: 70 * HOUR_MS },
++		);
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++		expect(await storage.keys.get("anthropic", "s2")).toBe("oat-1");
++	});
++
++	it("serves the account up to 99% used without a reserve switch", async () => {
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++		reports["oat-1"] = report(
++			"a@example.com",
++			{ used: 0.99, resetsInMs: HOUR_MS },
++			{ used: 0.5, resetsInMs: 70 * HOUR_MS },
++		);
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++	});
++
++	it("moves every session to the sibling once the active account is spent, and stays there after a reset", async () => {
++		expect(await storage.keys.get("anthropic", "pinned")).toBe("oat-1");
++
++		reports["oat-1"] = report("a@example.com", FRESH, SPENT_WEEK);
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "other")).toBe("oat-2");
++		expect(store.cache.get(ACTIVE_KEY)?.value).toBe("2");
++		// A session that was pinned to the first account follows the shared active account.
++		expect(await storage.keys.get("anthropic", "pinned")).toBe("oat-2");
++
++		// The first account resets. Nothing hands back while the second still has allowance.
++		reports["oat-1"] = report("a@example.com", FRESH, { used: 0, resetsInMs: 160 * HOUR_MS });
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "pinned")).toBe("oat-2");
++		expect(await storage.keys.get("anthropic", "new-session")).toBe("oat-2");
++	});
++
++	it("returns to the first account only when the second is spent", async () => {
++		reports["oat-1"] = report("a@example.com", FRESH, SPENT_WEEK);
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-2");
++
++		reports["oat-1"] = report("a@example.com", FRESH, { used: 0, resetsInMs: 160 * HOUR_MS });
++		reports["oat-2"] = report(
++			"b@example.com",
++			{ used: 1, resetsInMs: 2 * HOUR_MS },
++			{ used: 0.6, resetsInMs: 40 * HOUR_MS },
++		);
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++		expect(store.cache.get(ACTIVE_KEY)?.value).toBe("1");
++	});
++
++	it("rotates to the sibling after a 429 even when no usage report is available", async () => {
++		reports["oat-1"] = null;
++		reports["oat-2"] = null;
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++
++		const marked = await storage.limits.markReached("anthropic", "s1", {
++			retryAfterMs: 70 * HOUR_MS,
++			providerTimed: true,
++		});
++		expect(marked.switched).toBe(true);
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-2");
++		expect(await storage.keys.get("anthropic", "s2")).toBe("oat-2");
++		expect(store.cache.get(ACTIVE_KEY)?.value).toBe("2");
++	});
++
++	it("still resolves a key when both accounts are spent, choosing the one that frees first", async () => {
++		reports["oat-1"] = report("a@example.com", FRESH, { used: 1, resetsInMs: 70 * HOUR_MS });
++		reports["oat-2"] = report("b@example.com", FRESH, { used: 1, resetsInMs: 20 * HOUR_MS });
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-2");
++	});
++
++	it("shares the active account with a second AuthStorage on the same store", async () => {
++		reports["oat-1"] = report("a@example.com", FRESH, SPENT_WEEK);
++		await refreshUsage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-2");
++
++		// Another omp process opens the same database while the first account looks healthy again.
++		reports["oat-1"] = report("a@example.com", FRESH, { used: 0, resetsInMs: 160 * HOUR_MS });
++		const peer = await openStorage();
++		try {
++			for (const key of [...store.cache.keys()]) {
++				if (key !== ACTIVE_KEY) store.cache.delete(key);
++			}
++			expect(await peer.keys.get("anthropic", "peer-session")).toBe("oat-2");
++		} finally {
++			peer.close();
++		}
++	});
++
++	it("falls back to stored order when the recorded active account no longer exists", async () => {
++		store.cache.set(ACTIVE_KEY, { value: "999", expiresAtSec: Math.floor(Date.now() / 1000) + 3600 });
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++		expect(store.cache.get(ACTIVE_KEY)?.value).toBe("1");
++	});
++
++	it("keeps usage-balanced ranking when the account mode is balanced", async () => {
++		storage.close();
++		storage = await openStorage("balanced");
++		reports["oat-1"] = report(
++			"a@example.com",
++			{ used: 0.93, resetsInMs: HOUR_MS },
++			{ used: 0.4, resetsInMs: 70 * HOUR_MS },
++		);
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-2");
++		expect(store.cache.has(ACTIVE_KEY)).toBe(false);
++	});
++
++	it("leaves a single stored account alone", async () => {
++		storage.close();
++		store = makeStore([oauthRow(1, "a@example.com")]);
++		storage = await openStorage();
++		expect(await storage.keys.get("anthropic", "s1")).toBe("oat-1");
++		expect(store.cache.has(ACTIVE_KEY)).toBe(false);
++	});
++});
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index d113000863..cac89f9828 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -4,6 +4,7 @@
+ 
+ ### Added
+ 
++- Added the `retry.accountMode` setting (`sequential` by default, or `balanced`). With `sequential`, Anthropic accounts are used one at a time: every session and subagent follows the account that served last until it is blocked or spent, then moves to the next.
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
+diff --git a/packages/coding-agent/src/cli/auth-gateway-cli.ts b/packages/coding-agent/src/cli/auth-gateway-cli.ts
+index 124d4d65d1..1ecef7974e 100644
+--- a/packages/coding-agent/src/cli/auth-gateway-cli.ts
++++ b/packages/coding-agent/src/cli/auth-gateway-cli.ts
+@@ -399,7 +399,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+ 	// in sdk.ts. The gateway never touches local SQLite.
+ 	const accountPool = await loadAuthBrokerAccountPool();
+ 	const settings = await resolveEffectiveSettings();
+-	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
++	const { accountPolicies, defaultReservePct, accountMode } = await loadEffectiveAuthAccountPolicyConfig({ settings });
+ 	const client = createBrokerClient(brokerConfig);
+ 	const initialSnapshot = await fetchBrokerSnapshot(client);
+ 	const store = new RemoteAuthCredentialStore({
+@@ -415,6 +415,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+ 		sourceLabel: `broker ${brokerConfig.url}`,
+ 		accountPolicies,
+ 		defaultReservePct,
++		accountMode,
+ 	});
+ 	await storage.credentials.reload();
+ 
+@@ -875,7 +876,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+ 
+ 	const accountPool = await loadAuthBrokerAccountPool();
+ 	const settings = await resolveEffectiveSettings();
+-	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
++	const { accountPolicies, defaultReservePct, accountMode } = await loadEffectiveAuthAccountPolicyConfig({ settings });
+ 	const client = createBrokerClient(brokerConfig);
+ 	const initialSnapshot = await fetchBrokerSnapshot(client);
+ 	const store = new RemoteAuthCredentialStore({
+@@ -887,6 +888,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+ 		sourceLabel: `broker ${brokerConfig.url}`,
+ 		accountPolicies,
+ 		defaultReservePct,
++		accountMode,
+ 	});
+ 	try {
+ 		await storage.credentials.reload();
+diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
+index b379d77e16..c4ed1785dd 100644
+--- a/packages/coding-agent/src/sdk.ts
++++ b/packages/coding-agent/src/sdk.ts
+@@ -1064,7 +1064,7 @@ export {
+  * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
+  * override to re-mint access tokens when needed.
+  *
+- * Account routing (`auth.accountPolicies`, `retry.usageReservePct`) comes from
++ * Account routing (`auth.accountPolicies`, `retry.usageReservePct`, `retry.accountMode`) comes from
+  * effective settings: `options.settings` when given, else the matching global
+  * instance, else a read-only load for `options.cwd`; explicit option values win.
+  *
+@@ -1084,6 +1084,7 @@ export async function discoverAuthStorage(
+ 		authStorageOptions: {
+ 			...discoveryOptions.authStorageOptions,
+ 			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
++			accountMode: discoveryOptions.authStorageOptions?.accountMode ?? policy.accountMode,
+ 		},
+ 	});
+ }
+diff --git a/packages/coding-agent/src/session/auth-broker-config.ts b/packages/coding-agent/src/session/auth-broker-config.ts
+index e212c2a076..9ec1824319 100644
+--- a/packages/coding-agent/src/session/auth-broker-config.ts
++++ b/packages/coding-agent/src/session/auth-broker-config.ts
+@@ -41,7 +41,7 @@ import { Settings } from "../config/settings";
+ import type { AuthStorage } from "./auth-storage";
+ 
+ import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
+-import { cfgRetryUsageReservePct } from "./settings";
++import { cfgRetryAccountMode, cfgRetryUsageReservePct } from "./settings";
+ 
+ export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
+ 
+@@ -75,7 +75,7 @@ export async function resolveEffectiveSettings({
+ 	return Settings.loadReadOnly({ cwd, agentDir });
+ }
+ 
+-/** Resolve `auth.accountPolicies` + `retry.usageReservePct` from effective settings (SDK discovery, auth-gateway). */
++/** Resolve `auth.accountPolicies`, `retry.usageReservePct` and `retry.accountMode` from effective settings (SDK discovery, auth-gateway). */
+ export async function loadEffectiveAuthAccountPolicyConfig(
+ 	scope: EffectiveSettingsScope = {},
+ ): Promise<AuthAccountPolicyConfig> {
+@@ -83,6 +83,7 @@ export async function loadEffectiveAuthAccountPolicyConfig(
+ 	return loadAuthAccountPolicyConfig({
+ 		accountPolicies: cfgAuthAccountPolicies.get(settings),
+ 		usageReservePct: cfgRetryUsageReservePct.get(settings),
++		accountMode: cfgRetryAccountMode.get(settings),
+ 	});
+ }
+ 
+@@ -130,6 +131,7 @@ const cfgAuthStorageSettings = combine({
+ 	brokerToken: cfgAuthBrokerToken,
+ 	accountPolicies: cfgAuthAccountPolicies,
+ 	usageReservePct: cfgRetryUsageReservePct,
++	accountMode: cfgRetryAccountMode,
+ });
+ 
+ /** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
+@@ -142,7 +144,7 @@ export interface AuthStorageSettingsSync {
+ 
+ /**
+  * Keeps a long-lived `authStorage` in step with the auth settings of `scope`:
+- * - `auth.accountPolicies` / `retry.usageReservePct` re-apply account routing policy.
++ * - `auth.accountPolicies` / `retry.usageReservePct` / `retry.accountMode` re-apply account routing policy.
+  * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
+  *   broker with startup precedence (env → config.yml → token file; project layers
+  *   never redirect credentials), and swap the credential store in place when the
+@@ -194,6 +196,7 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
+ 		const brokerChanged = next.brokerUrl !== previous.brokerUrl || next.brokerToken !== previous.brokerToken;
+ 		const policiesChanged =
+ 			next.usageReservePct !== previous.usageReservePct ||
++			next.accountMode !== previous.accountMode ||
+ 			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
+ 		pending = pending.then(async () => {
+ 			if (brokerChanged) await applyBroker();
+diff --git a/packages/coding-agent/src/session/settings.ts b/packages/coding-agent/src/session/settings.ts
+index aa60885161..34c2876419 100644
+--- a/packages/coding-agent/src/session/settings.ts
++++ b/packages/coding-agent/src/session/settings.ts
+@@ -20,7 +20,7 @@ import {
+ 	TINY_MODEL_DTYPE_SETTING_VALUES,
+ } from "../tiny/dtype";
+ import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
+-import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
++import { DEFAULT_AUTH_ACCOUNT_MODE, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+ import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+ import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
+ import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
+@@ -857,6 +857,32 @@ export const cfgRetryUsageReservePct = register({
+ 	},
+ });
+ 
++export const cfgRetryAccountMode = register({
++	id: "retry.accountMode",
++	type: "enum",
++	values: ["sequential", "balanced"] as const,
++	default: DEFAULT_AUTH_ACCOUNT_MODE,
++	ui: {
++		tab: "model",
++		group: "Retry & Fallback",
++		label: "Account Mode",
++		description:
++			"How sessions share several accounts of one provider. Applies to providers that support one-at-a-time use, today Anthropic.",
++		options: [
++			{
++				value: "sequential",
++				label: "One at a time",
++				description: "Use one account until it is blocked or spent, then the next; no hand-back after a reset",
++			},
++			{
++				value: "balanced",
++				label: "Balanced",
++				description: "Rank accounts by usage and spread sessions over them",
++			},
++		],
++	},
++});
++
+ export const cfgRetryUsageReservePolicy = register({
+ 	id: "retry.usageReservePolicy",
+ 	type: "enum",

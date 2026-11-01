@@ -1,0 +1,1526 @@
+diff --git a/docs/agent-hub.md b/docs/agent-hub.md
+index cc30b240d7..5b96e52fa3 100644
+--- a/docs/agent-hub.md
++++ b/docs/agent-hub.md
+@@ -91,7 +91,9 @@ Directly above it, a pinned `Background tasks` block lists the other work runnin
+ 
+ `display.pinnedJobs` sets its density the same way: `collapsed` (the default) shows a few rows plus an expander, `full` lists everything and `off` hides the block. Clicking its expander toggles between the two while `tui.mouse` is on, and changing the setting resets that click.
+ 
+-Each row ends with that agent's total tokens and API cost, for example `1.4M tok · $0.42`, right-aligned and dim. Tokens count everything the model processed, cache reads included, so the figure matches what the provider counts; the Hub's own `tok` figure leaves cache reads out. Cost appears once it is above zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. A row too narrow to keep a readable title drops the usage and keeps the title.
++Each row ends with that agent's counter: elapsed time, total tokens and API cost, for example `2m5s · 1.4M tok · $0.42`, right-aligned. The elapsed time shows from the first second and keeps counting while the agent makes no progress, as when it waits out a rate limit. Each figure has its own colour and the dots between them stay muted: the time turns from green to warning to error as it passes 3 and 20 minutes, the tokens use the spend colour, and the cost turns from green to warning to error at `$1` and `$10`. Tokens count everything the model processed, cache reads included, so the figure matches what the provider counts; the Hub's own `tok` figure leaves cache reads out. Cost appears once it is above zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. A row too narrow for the whole counter shortens the description first, then drops to the elapsed time alone, then drops the counter only when even the id would not fit.
++
++When a task job finishes, its `Background job completed` line carries the same counter beside the id, for example `(8m3s · 11M tok · $2.25)`; a job that reports no usage keeps its plain duration.
+ 
+ Set `display.subagentLivePreview: true` to add a second line under each row showing what that agent is doing: its current tool call (or, between calls, the most recent one) with a one-line detail, plus the elapsed time once a call runs longer than five seconds. Off by default.
+ 
+diff --git a/docs/non-compaction-retry-policy.md b/docs/non-compaction-retry-policy.md
+index f8142e5bda..2ca41f7b9e 100644
+--- a/docs/non-compaction-retry-policy.md
++++ b/docs/non-compaction-retry-policy.md
+@@ -132,7 +132,7 @@ The actual local sleep is 75–100% of the nominal value, matching Anthropic-sty
+ 
+ Delay override inputs can come from parsed retry headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, `x-ratelimit-reset`) or usage-limit backoff. Without provider timing, recognized concurrency/rate-limit reasons can impose their own wait windows. Credential/model fallback switches set delay to `0`; otherwise parsed hints can extend the capped local delay.
+ 
+-If the delay exceeds `retry.maxDelayMs` and no switch succeeds, retry normally fails immediately. `retry.waitForUsageReset: true` permits a longer usage-limit wait only when timing is authoritative (parsed provider reset timing or a complete usage-report future reset), not a guessed exhaustion backoff. Long waits remain abortable and are chunked to avoid timer overflow; they also hold unattended/subagent runs.
++If the delay exceeds `retry.maxDelayMs` and no switch succeeds, retry normally fails immediately. `retry.waitForUsageReset: true` permits a longer usage-limit wait only when timing is authoritative (parsed provider reset timing or a complete usage-report future reset), not a guessed exhaustion backoff. Long waits remain abortable and are chunked to avoid timer overflow; they also hold unattended/subagent runs. A wait past 24 hours is never honored, with or without the opt-in: the saga ends with `auto_retry_end` (`success: false`) so the session is idle and accepts input. A 429 whose hint exceeds `retry.maxDelayMs` but which is not a usage limit blocks the failing credential until that hint and rotates to a free sibling at once; with none free it ends the same way.
+ 
+ ## Abort mechanics
+ 
+diff --git a/docs/settings.md b/docs/settings.md
+index 00f739cdc8..7f11f85a8d 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -599,7 +599,7 @@ providers:
+ | `retry.rateLimitWalksChain`              | boolean | `false`           | Opt in to walking `retry.fallbackChains` at once on a rate limit instead of holding it for a turn whose thinking is signed by the failing model. By default such a turn retries the rate-limited model until `retry.maxRetries` is spent before the chain is reached.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+ | `retry.fallbackChains`                   | record  | `{}`              | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` _entry_ keeps the failing model's id and swaps the provider. Model-kind roles use their built-in chain when unset and no fallbacks when set to `[]`; the `default` chain never applies to them. Unknown models/providers or malformed chains are reported as config warnings at startup.                                                                                                                                                            |
+ | `retry.fallbackRevertPolicy`             | enum    | `cooldown-expiry` | `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+-| `retry.waitForUsageReset`                | boolean | `false`           | Allow provider-stated usage-limit waits past `retry.maxDelayMs` when a reset hint or complete usage report supplies authoritative timing. Waits are abortable but can also hold subagents.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
++| `retry.waitForUsageReset`                | boolean | `false`           | Allow provider-stated usage-limit waits past `retry.maxDelayMs` when a reset hint or complete usage report supplies authoritative timing. Waits are abortable but can also hold subagents, and a wait past 24 hours always fails fast.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `retry.usageAwareFallback`               | boolean | `false`           | Before a turn, use reliable coding-plan quota reports to prefer healthy same-provider accounts and then configured fallback models. Unknown usage keeps the current model; ordinary API keys are excluded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `retry.usageReservePct`                  | number  | `10`              | Remaining quota percentage protected by usage-aware fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+ | `retry.usageReservePolicy`               | enum    | `confirm`         | `confirm`, `auto`, `fail-closed`. At reserve, `confirm` asks when an interactive confirmer is available and otherwise auto-falls back; exhausted quota can fall back without confirmation. `fail-closed` blocks known reserve/depleted quota rather than spending it.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 03fc58229f..1934a6ab60 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -13,7 +13,8 @@
+ - Answer MCP form elicitation requests (`elicitation/create`) with a dialog. Dismissing the dialog, or having no screen, cancels the request and never accepts it. URL mode is refused.
+ - The task tool description now lists your model roles as `@role` and tells agents to pass the role when you name a model or tier such as "haiku", instead of guessing a model version. When the agent cannot tell which model you mean, it asks with the `ask` tool.
+ - A task item's `model` can be a price tier, `$` to `$$$$`, instead of a role. Tiers are quarters of the price across all loaded chat models. A tier picks the configured role in that tier, or the nearest one, and the role you use most wins a tie. The usage weighting reads `stats.db` and counts the exact model most, then its family, then its provider. The task description shows each role's tier, and the judge that routes calls without `model` weighs price and usage too. `$$$$` is treated as very rare.
+-- Each row in the pinned subagent shelf now ends with that subagent's total tokens, cache reads included, and its API cost, for example `1.4M tok · $0.42`. Cost is left out while it is zero, and a row too narrow for both drops the usage instead of the title. Subagent progress now reports `cacheReadTokens`.
++- Each row in the pinned subagent shelf now ends with that subagent's counter: elapsed time, total tokens (cache reads included) and API cost, for example `2m5s · 1.4M tok · $0.42`, each figure in its own theme colour (time and cost run hotter as they grow) with muted dots between them. The elapsed time shows from the first second and keeps counting while the subagent makes no progress, such as during a long rate-limit wait. Cost is left out while it is zero, and a row too narrow for the whole counter shortens the description first instead of dropping the counter. Subagent progress now reports `cacheReadTokens`.
++- The `Background job completed` line of a finished task job now shows the subagent's total tokens and cost beside the elapsed time, for example `(8m3s · 11M tok · $2.25)`, coloured like the shelf counter. A job that reports no usage keeps its plain duration.
+ - Change a running subagent's model without restarting it: `write proc://<agentId>/model` with a configured role such as `@haiku` or one exact `provider/model-id[:level]` switches a subagent you spawned from its next model request, keeping its context. It takes the same approval as a task `model` (`task.perCallModel`, your grants, `task.perCallModelAllow`, `task.maxEffort`) and refuses a finished, unknown or foreign agent. The task description tells the agent to use it when you name a model or tier for a running agent.
+ - `/switch <model>` and the model picker, used inside a subagent's view, now switch that subagent at its next model request instead of in the middle of the one in flight, and they work on a worker started with a per-call `model`, which used to fail its next request because the model was outside its grants. `/switch` resolves its selector in the viewed session. A notice in the subagent's view reports the switch when it lands, and a per-call worker revives on the model it last ran on.
+ 
+@@ -21,6 +22,11 @@
+ 
+ - `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
+ 
++### Fixed
++
++- Fixed a lone `.` or `c` typed into a focused subagent that was still running, or waiting out a retry back-off, printing `Agent is already processing` as an error. The shortcut now queues as a steering message like any other text; the continue shortcut itself only restarts an idle agent.
++- Fixed a session wedged for days by a 429 carrying a huge retry hint, such as a 39-hour `retry-after-ms`: with `retry.waitForUsageReset` on it slept the whole wait while reporting busy, so `.` was refused and steers never landed. A wait past 24 hours now ends the retry (`auto_retry_end` with the error) and leaves the session idle. A 429 whose hint is past `retry.maxDelayMs` but is not a usage limit now blocks the failing credential until that hint and retries on a free sibling credential at once.
++
+ ## [18.14.2] - 2026-10-31
+ 
+ ### Added
+diff --git a/packages/coding-agent/dictation-stopped.json b/packages/coding-agent/dictation-stopped.json
+new file mode 100644
+index 0000000000..974f77d1a0
+--- /dev/null
++++ b/packages/coding-agent/dictation-stopped.json
+@@ -0,0 +1 @@
++{"state":"idle"}
+\ No newline at end of file
+diff --git a/packages/coding-agent/src/modes/controllers/input-controller.ts b/packages/coding-agent/src/modes/controllers/input-controller.ts
+index 24c0b632cc..c03f27f6a0 100644
+--- a/packages/coding-agent/src/modes/controllers/input-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/input-controller.ts
+@@ -1,5 +1,5 @@
+ import * as path from "node:path";
+-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
++import { AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+ import type { ImageContent } from "@oh-my-pi/pi-ai";
+ import {
+ 	type AutocompleteProvider,
+@@ -1661,15 +1661,32 @@ export class InputController {
+ 			);
+ 			return; // editor text not cleared: Editor does not auto-clear on submit
+ 		}
+-		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
++		// `resume()` only restarts an idle agent: on a busy one it falls through to a prompt with no queueing
++		// behavior and throws AgentBusyError. A busy target (a turn running, or a retry back-off sleeping) takes
++		// the shortcut as plain text, which queues like any other message.
++		const isContinueShortcut =
++			streamingBehavior === "steer" &&
++			!images &&
++			(text === "." || text === "c") &&
++			!target.isStreaming &&
++			!target.isRetrying;
+ 		this.ctx.editor.clearDraft(text);
++		const submitQueued = async (): Promise<void> => {
++			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
++				imageCount: images?.length ?? 0,
++			});
++		};
+ 		try {
+ 			if (isContinueShortcut) {
+-				await target.resume();
++				try {
++					await target.resume();
++				} catch (error) {
++					// The agent became busy between the check above and the resume: queue, never surface the error.
++					if (!(error instanceof AgentBusyError)) throw error;
++					await submitQueued();
++				}
+ 			} else {
+-				await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
+-					imageCount: images?.length ?? 0,
+-				});
++				await submitQueued();
+ 			}
+ 		} catch (error) {
+ 			// Hand the message back, mirroring the main submit error path: restore
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index 77db4d204c..1517fdfeda 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -52,6 +52,7 @@ import { listLiveServices, type LiveService, onLiveServicesChanged } from "../la
+ import type { JobWidgetRegistry } from "../job-widgets/types";
+ import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
+ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
++import { usageCounterForms } from "@oh-my-pi/pi-tui/chrome/usage-counter";
+ import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
+ import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
+ import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
+@@ -135,8 +136,6 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
+ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
+ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
+ import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+-import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+ import { registerPersistedSubagents } from "../registry/persisted-agents";
+ import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+@@ -1214,23 +1213,49 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
+ 	return truncateToWidth(`${line}${elapsedLabel}`, width, "");
+ }
+ 
+-/** Columns between a shelf row's title and its usage, and the least title width worth sharing a row with it. */
++function minDefined(a: number | undefined, b: number | undefined): number | undefined {
++	return a === undefined ? b : b === undefined ? a : Math.min(a, b);
++}
++
++/** Columns between a shelf row's title and its counter. */
+ const SUBAGENT_USAGE_GAP = 2;
+-const SUBAGENT_USAGE_MIN_TITLE_WIDTH = 24;
++
++/** Most of a row's id (dot included) that a counter may crowd out before it falls back to a shorter form. */
++const SUBAGENT_COUNTER_MIN_TITLE_WIDTH = 16;
++
++/** Whether `session` has a running clock: a frame of its current turn has arrived, so its elapsed time can be told. */
++function subagentHasClock(session: ObservableSession): boolean {
++	const progress = session.progress;
++	return progress?.status === "running" && (progress.durationMs > 0 || session.progressAt !== undefined);
++}
+ 
+ /**
+- * Total tokens and API cost of one subagent, e.g. `1.4M tok · $0.42`. Tokens are everything the model
+- * processed, cache reads included, so the figure matches what the provider counts. Cost shows only once it is
+- * above zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. Empty until
+- * the subagent has used either.
++ * Delay until the shelf next needs a repaint for its elapsed times: a second while any listed subagent has a
++ * running clock, none otherwise, so an idle UI arms no timer. A subagent that makes no progress, such as one
++ * waiting out a rate limit, emits no frames, so its clock needs this tick to advance.
+  */
+-export function formatSubagentUsage(progress: AgentProgress | undefined): string {
+-	if (!progress) return "";
+-	const parts: string[] = [];
+-	const tokens = progress.tokens + (progress.cacheReadTokens ?? 0);
+-	if (tokens > 0) parts.push(`${formatNumber(tokens)} tok`);
+-	if (progress.cost > 0) parts.push(formatCost(progress.cost));
+-	return parts.join(theme.sep.dot);
++export function nextSubagentCounterTickMs(sessions: readonly ObservableSession[]): number | undefined {
++	return sessions.some(subagentHasClock) ? SUBAGENT_PREVIEW_TICK_MS : undefined;
++}
++
++/**
++ * The counter at the right of a subagent's shelf row, longest form first: elapsed time, tokens and cost
++ * (`2m5s · 1.4M tok · $0.42`, each figure in its own colour), then the elapsed time alone for a row too narrow for
++ * the lot. Tokens count what the model processed, cache reads included. The clock runs from
++ * the last frame's `durationMs` plus the time since that frame arrived, so a subagent that has gone quiet keeps
++ * counting. It shows from the first second and before any tokens are used. Empty when there is nothing to show.
++ */
++function subagentCounterForms(session: ObservableSession, now: number): string[] {
++	const progress = session.progress;
++	if (!progress) return [];
++	return usageCounterForms({
++		elapsedMs: subagentHasClock(session)
++			? progress.durationMs + Math.max(0, now - (session.progressAt ?? now))
++			: undefined,
++		// Everything the model processed, cache reads included, so the figure matches what the provider counts.
++		tokens: progress.tokens + (progress.cacheReadTokens ?? 0),
++		cost: progress.cost,
++	});
+ }
+ 
+ /**
+@@ -1253,6 +1278,7 @@ export function renderSubagentHudLines(
+ 	expanded = false,
+ 	livePreview = false,
+ 	hubKey?: string,
++	now = Date.now(),
+ ): string[] {
+ 	const running = sessions.filter(isHudSubagent);
+ 	if (running.length === 0) return [];
+@@ -1271,11 +1297,17 @@ export function renderSubagentHudLines(
+ 			expanded: true,
+ 			renderItem: (session, context) => {
+ 				const fullWidth = Math.max(0, contentColumns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
+-				const usage = formatSubagentUsage(session.progress);
+-				const usageWidth = usage ? visibleWidth(usage) + SUBAGENT_USAGE_GAP : 0;
+-				// A row too narrow to keep a readable title beside the usage drops the usage, not the title.
+-				const showUsage = usage !== "" && fullWidth - usageWidth >= SUBAGENT_USAGE_MIN_TITLE_WIDTH;
+-				const rowWidth = showUsage ? fullWidth - usageWidth : fullWidth;
++				// The counter keeps its place and the description gives way: only a row too narrow to also keep
++				// the id falls back to a shorter counter, and then to none.
++				const minTitleWidth = Math.min(
++					visibleWidth(`${dot} ${formatTaskId(session.id)}`),
++					SUBAGENT_COUNTER_MIN_TITLE_WIDTH,
++				);
++				const counter =
++					subagentCounterForms(session, now).find(
++						form => fullWidth - visibleWidth(form) - SUBAGENT_USAGE_GAP >= minTitleWidth,
++					) ?? "";
++				const rowWidth = counter ? fullWidth - visibleWidth(counter) - SUBAGENT_USAGE_GAP : fullWidth;
+ 				const role = session.agent ?? session.progress?.agent;
+ 				const displayId = truncateToWidth(
+ 					formatTaskId(session.id),
+@@ -1324,8 +1356,8 @@ export function renderSubagentHudLines(
+ 					}
+ 				}
+ 				const titled = truncateToWidth(line, rowWidth, "");
+-				const head = showUsage
+-					? `${titled}${" ".repeat(Math.max(0, rowWidth - visibleWidth(titled)) + SUBAGENT_USAGE_GAP)}${theme.fg("dim", usage)}`
++				const head = counter
++					? `${titled}${" ".repeat(Math.max(0, rowWidth - visibleWidth(titled)) + SUBAGENT_USAGE_GAP)}${counter}`
+ 					: titled;
+ 				const preview = livePreview ? renderSubagentToolPreview(session, fullWidth) : undefined;
+ 				itemLineCounts.set(session, preview ? 2 : 1);
+@@ -5564,10 +5596,13 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview, hubKey);
+ 		if (lines.length === 0) return undefined;
+ 		const layout = layoutPinnedHud(running.length, expanded);
+-		const tickMs =
+-			livePreview && !agentPauseGate.paused
+-				? nextSubagentPreviewTickMs(running.slice(0, layout.itemRows), Date.now())
+-				: undefined;
++		const listed = running.slice(0, layout.itemRows);
++		const tickMs = agentPauseGate.paused
++			? undefined
++			: minDefined(
++					livePreview ? nextSubagentPreviewTickMs(listed, Date.now()) : undefined,
++					nextSubagentCounterTickMs(listed),
++				);
+ 		return { lines, order: running.map(session => session.id), toggleRow: layout.toggleRow, tickMs };
+ 	}
+ 
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index fef1f5b406..71f78a3474 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -8125,6 +8125,14 @@ export class AgentSession implements SettingsScope {
+ 		return this.#admitSubmission(() => this.#prompt(text, options));
+ 	}
+ 
++	/**
++	 * Ends a waiting retry back-off sleep early so the retry runs now, and returns whether a sleep was
++	 * waiting. A typed steer calls this on its own; call it directly when input reaches the session another way.
++	 */
++	wakeRetryWait(): boolean {
++		return this.#recovery.wakeRetryWait();
++	}
++
+ 	/**
+ 	 * Resume the agent for the operator's `.`/`c` continue shortcut. A prompt the
+ 	 * model has not answered yet (an Esc before any output) runs again as is: a
+@@ -9613,6 +9621,10 @@ export class AgentSession implements SettingsScope {
+ 			userMessage,
+ 		]);
+ 		options?.onPromptAdmitted?.();
++		// The steer is on the queue. A user steer must reach the agent even while a long retry back-off
++		// sleeps (a usage-limit wait can last days), so end that sleep now. System notices keep the
++		// back-off so they cannot hammer a failing provider.
++		if (mode === "steer" && attribution === "user") this.#recovery.wakeRetryWait();
+ 		// joinActiveTurn admission must never start an autonomous turn: the
+ 		// live run owns delivery, and an idle queue stays put until the host
+ 		// decides what to do with its content.
+diff --git a/packages/coding-agent/src/session/async-job-delivery.ts b/packages/coding-agent/src/session/async-job-delivery.ts
+index 73bb877509..6d02a20d0d 100644
+--- a/packages/coding-agent/src/session/async-job-delivery.ts
++++ b/packages/coding-agent/src/session/async-job-delivery.ts
+@@ -48,6 +48,16 @@ export interface AsyncResultEntry {
+ 	epoch: number;
+ }
+ 
++/** What a finished task job's subagent consumed, as its last progress snapshot reported it. */
++export type AsyncResultJobUsage = {
++	/** Input, output and cache-write tokens. */
++	tokens: number;
++	/** Cache-read tokens, kept apart so the total the model processed can be told. */
++	cacheReadTokens?: number;
++	/** API cost in USD; zero for a subscription or unpriced model. */
++	cost: number;
++};
++
+ type AsyncResultJobDetails = {
+ 	jobId: string;
+ 	type?: AsyncJobType;
+@@ -55,6 +65,8 @@ type AsyncResultJobDetails = {
+ 	agentId?: string;
+ 	label?: string;
+ 	durationMs?: number;
++	/** Usage totals of a task job's subagent; absent when the job reports none. */
++	usage?: AsyncResultJobUsage;
+ 	/** Source capture metadata belongs to this job, not to the enclosing delivery report. */
+ 	meta?: OutputMeta;
+ 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
+@@ -110,6 +122,34 @@ export function taskAgentHandles(
+ 	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
+ }
+ 
++/**
++ * Usage totals a finished task job's last progress snapshot carries. A batch job's progress lists every spawn of the
++ * call, so the entry matching the job's agent id is the one read. Undefined for any other job type, or when the
++ * snapshot is missing or malformed.
++ */
++export function taskJobUsage(job: AsyncJob | undefined): AsyncResultJobUsage | undefined {
++	if (job?.type !== "task") return undefined;
++	const progress = job.latestDetails?.progress;
++	if (!Array.isArray(progress)) return undefined;
++	const agentId = job.agentId ?? job.id;
++	let record: Record<string, unknown> | undefined;
++	for (const item of progress) {
++		if (!item || typeof item !== "object") continue;
++		const candidate = item as Record<string, unknown>;
++		record ??= candidate;
++		if (candidate.id === agentId) {
++			record = candidate;
++			break;
++		}
++	}
++	if (!record || typeof record.tokens !== "number" || typeof record.cost !== "number") return undefined;
++	return {
++		tokens: record.tokens,
++		...(typeof record.cacheReadTokens === "number" ? { cacheReadTokens: record.cacheReadTokens } : {}),
++		cost: record.cost,
++	};
++}
++
+ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
+ 	if (entries.length === 0) return null;
+ 	const jobs = entries.map(entry => {
+@@ -139,6 +179,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
+ 			agentId: entry.job?.agentId,
+ 			label: entry.job?.label,
+ 			durationMs: entry.durationMs,
++			usage: taskJobUsage(entry.job),
+ 			meta: entry.job?.latestDetails?.meta,
+ 			structured,
+ 			structuredJson: structuredJson === undefined ? undefined : escapeHarnessTags(structuredJson),
+@@ -158,6 +199,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
+ 			agentId: job.agentId,
+ 			label: job.label,
+ 			durationMs: job.durationMs,
++			...(job.usage ? { usage: job.usage } : {}),
+ 			...(job.meta ? { meta: job.meta } : {}),
+ 			...(job.structured ? { schema: job.structured } : {}),
+ 		})),
+diff --git a/packages/coding-agent/src/session/turn-recovery.ts b/packages/coding-agent/src/session/turn-recovery.ts
+index 418a62e63d..b91f0dd96a 100644
+--- a/packages/coding-agent/src/session/turn-recovery.ts
++++ b/packages/coding-agent/src/session/turn-recovery.ts
+@@ -108,6 +108,12 @@ const EMPTY_STOP_MAX_RETRIES = 3;
+ const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
+ const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+ const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
++/**
++ * Longest wait `retry.waitForUsageReset` will honor. A provider-stated reset past this (a 39-hour
++ * `retry-after-ms` on a rate-limit 429, a weekly window) would hold a subagent and its parent for days with the
++ * session reporting busy the whole time, so such a wait ends the saga like any other wait past the cap.
++ */
++const MAX_USAGE_RESET_WAIT_MS = 24 * 60 * 60 * 1000;
+ const NON_WHITESPACE_RE = /\S/;
+ const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
+ const STREAM_STALL_ERROR_RE = /stream stall/i;
+@@ -389,6 +395,8 @@ export class TurnRecovery {
+ 	readonly #host: TurnRecoveryHost;
+ 	readonly #unexpectedStopJudgeTimeoutMs: number;
+ 	#retryAbortController: AbortController | undefined;
++	/** Ends the running back-off sleep early; set only while that sleep waits. */
++	#retryWake: (() => void) | undefined;
+ 	#retryAttempt = 0;
+ 	/**
+ 	 * Selectors a classifier refusal has already moved off in the current retry saga; see the walk
+@@ -2871,6 +2879,51 @@ export class TurnRecovery {
+ 			}
+ 			if (switchedCredential) delayMs = 0;
+ 		}
++		// A 429 whose hint is longer than the delay cap, but which is not a usage limit
++		// (so nothing marked its credential), still parks the failing account until that
++		// hint: mark it with the stated window and rotate to a free sibling at once instead
++		// of ending the turn with a healthy account unused. No free sibling falls through
++		// to the fail-fast cap below. Bounded like the usage-limit rotation: past the retry
++		// budget only a confirmed reset may continue.
++		if (
++			!staleOpenAIResponsesReplayError &&
++			!recordedUsageLimitOutcome &&
++			!switchedCredential &&
++			!retryBudgetExhausted &&
++			currentModel &&
++			parsedRetryAfterMs !== undefined &&
++			retrySettings.maxDelayMs > 0 &&
++			parsedRetryAfterMs > retrySettings.maxDelayMs &&
++			AIError.is(id, AIError.Flag.Transient) &&
++			(message.errorStatus === 429 || /^\s*429\b/.test(errorMessage))
++		) {
++			const markAbortController = new AbortController();
++			this.#retryAbortController?.abort();
++			this.#retryAbortController = markAbortController;
++			try {
++				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
++					currentModel.provider,
++					this.#host.sessionId(),
++					{
++						retryAfterMs: parsedRetryAfterMs,
++						providerTimed: true,
++						baseUrl: currentModel.baseUrl,
++						modelId: currentModel.id,
++						signal: markAbortController.signal,
++					},
++				);
++				if (outcome.switched) {
++					switchedCredential = true;
++					delayMs = 0;
++				}
++			} catch (error) {
++				if (!markAbortController.signal.aborted) throw error;
++				if (this.#retryAbortController !== markAbortController) return false;
++				return this.#endCancelledRetry();
++			} finally {
++				if (this.#retryAbortController === markAbortController) this.#retryAbortController = undefined;
++			}
++		}
+ 		// A thinking-loop abort is not a provider failure — it is the loop guard
+ 		// asking for a same-model resample, paired with a hidden
+ 		// `thinking-loop-redirect` notice that only makes sense on the model that
+@@ -2932,6 +2985,7 @@ export class TurnRecovery {
+ 				(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
+ 				effectiveUsageLimitWaitMs !== undefined &&
+ 				waitMs <= effectiveUsageLimitWaitMs;
++			if (waitForUsageReset && waitMs > MAX_USAGE_RESET_WAIT_MS) return true;
+ 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
+ 		};
+ 
+@@ -3076,7 +3130,10 @@ export class TurnRecovery {
+ 				{
+ 					success: false,
+ 					attempt,
+-					finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
++					finalError:
++						delayMs > MAX_USAGE_RESET_WAIT_MS && retrySettings.waitForUsageReset
++							? `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds the ${MAX_USAGE_RESET_WAIT_MS}ms ceiling on retry.waitForUsageReset. Original error: ${errorMessage}`
++							: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+ 				},
+ 				{ terminalTurn: message },
+ 			);
+@@ -3117,14 +3174,26 @@ export class TurnRecovery {
+ 		const retryAbortController = new AbortController();
+ 		this.#retryAbortController?.abort();
+ 		this.#retryAbortController = retryAbortController;
++		// wakeRetryWait() ends the sleep as if the delay had run out: the operator spoke to the session,
++		// and a back-off that can last hours must not hold that message. An abort() stays a cancel.
++		let wokenEarly = false;
++		const wake = (): void => {
++			wokenEarly = true;
++			retryAbortController.abort();
++		};
++		this.#retryWake = wake;
+ 		try {
+ 			await sleepLong(delayMs, retryAbortController.signal);
+ 		} catch {
+-			if (this.#retryAbortController !== retryAbortController) {
+-				return false;
++			if (!wokenEarly) {
++				if (this.#retryAbortController !== retryAbortController) {
++					return false;
++				}
++				// Aborted during sleep - emit end event so UI can clean up
++				return this.#endCancelledRetry();
+ 			}
+-			// Aborted during sleep - emit end event so UI can clean up
+-			return this.#endCancelledRetry();
++		} finally {
++			if (this.#retryWake === wake) this.#retryWake = undefined;
+ 		}
+ 		if (this.#retryAbortController === retryAbortController) {
+ 			this.#retryAbortController = undefined;
+@@ -3271,6 +3340,17 @@ export class TurnRecovery {
+ 	/**
+ 	 * Cancel in-progress retry.
+ 	 */
++	/**
++	 * Ends a waiting retry back-off sleep early so the retry runs now.
++	 * Returns whether a sleep was waiting. Rate-limit reads and credential rotation waits are not woken.
++	 */
++	wakeRetryWait(): boolean {
++		const wake = this.#retryWake;
++		if (!wake) return false;
++		wake();
++		return true;
++	}
++
+ 	abortRetry(): void {
+ 		this.#retryAbortController?.abort();
+ 		// Note: _retryAttempt is reset in the catch block of _autoRetry
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index ecaf88f708..8f6cc6f009 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -1619,6 +1619,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 						progress.watch = nextProgress.watch ?? progress.watch;
+ 						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
+ 						progress.tokens = nextProgress.tokens;
++						progress.cacheReadTokens = nextProgress.cacheReadTokens;
+ 						progress.requests = nextProgress.requests;
+ 						progress.contextTokens = nextProgress.contextTokens;
+ 						progress.contextWindow = nextProgress.contextWindow;
+@@ -1701,6 +1702,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
+ 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
+ 					progress.tokens = singleResult?.tokens ?? 0;
++					progress.cacheReadTokens = singleResult?.usage?.cacheRead;
+ 					progress.requests = singleResult?.requests ?? 0;
+ 					progress.contextTokens = singleResult?.contextTokens;
+ 					progress.contextWindow = singleResult?.contextWindow;
+diff --git a/packages/coding-agent/test/agent-session-retry-long-429.test.ts b/packages/coding-agent/test/agent-session-retry-long-429.test.ts
+new file mode 100644
+index 0000000000..7cda612203
+--- /dev/null
++++ b/packages/coding-agent/test/agent-session-retry-long-429.test.ts
+@@ -0,0 +1,201 @@
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
++import * as path from "node:path";
++import { scheduler } from "node:timers/promises";
++import { Agent } from "@oh-my-pi/pi-agent-core";
++import type { AssistantMessage } from "@oh-my-pi/pi-ai";
++import type { MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
++import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
++import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
++import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
++import * as aiStream from "@oh-my-pi/pi-ai/stream";
++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { TempDir } from "@oh-my-pi/pi-utils";
++
++type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
++type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
++
++const HINT_MS = 141_023_000;
++const MOCK_API_SOURCE = "agent-session-retry-long-429-test";
++const PROVIDER_SESSION_ID = "long-429-session";
++/** Anthropic's account rate-limit body: classified as a usage limit, and the shape Kieran's subagent hit. */
++const ACCOUNT_RATE_LIMIT_429 =
++	'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."},"request_id":"req_011CZ"} ' +
++	`retry-after-ms=${HINT_MS}`;
++/** The same hint on a plain 429 the classifier calls transient only, never a usage limit. */
++const TRANSIENT_429 = `429 Too Many Requests retry-after-ms=${HINT_MS}`;
++
++/**
++ * Contract: a 429 that carries a retry hint of ~39 hours (classified as a transient rate limit, not a usage
++ * limit) never leaves the session wedged. Past `retry.maxDelayMs` the saga ends cleanly: `auto_retry_end`
++ * reports the failure, `prompt()` settles, the session is neither retrying nor streaming, and a later message
++ * is accepted. With a sibling stored credential that is not blocked, the failing credential is blocked until
++ * its hint and the turn retries on the sibling at once.
++ */
++describe("AgentSession long transient 429 recovery", () => {
++	let tempDir: TempDir;
++	let authStorage: AuthStorage;
++	let modelRegistry: ModelRegistry;
++	let session: AgentSession | undefined;
++
++	beforeAll(async () => {
++		tempDir = TempDir.createSync("@pi-retry-long-429-");
++		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
++		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
++	});
++
++	beforeEach(async () => {
++		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
++		await authStorage.credentials.remove("anthropic");
++		authStorage.keys.removeRuntime("anthropic");
++		modelRegistry.clearSuppressedSelectors();
++	});
++
++	afterEach(async () => {
++		if (session) {
++			session.abortRetry();
++			await session.dispose();
++			session = undefined;
++		}
++		unregisterCustomApis(MOCK_API_SOURCE);
++		vi.restoreAllMocks();
++	});
++
++	afterAll(() => {
++		authStorage.close();
++		tempDir.removeSync();
++	});
++
++	/** Parks any timer of an hour or more; the saga must never reach one. */
++	function parkLongSleeps(): { longSleeps: number[] } {
++		const longSleeps: number[] = [];
++		const realWait = scheduler.wait.bind(scheduler);
++		vi.spyOn(scheduler, "wait").mockImplementation((delayMs, options) => {
++			if (delayMs < 60 * 60 * 1000) return realWait(delayMs, options);
++			longSleeps.push(delayMs);
++			const parked = Promise.withResolvers<void>();
++			const signal = options?.signal;
++			const abort = () => parked.reject(signal?.reason ?? new Error("Aborted"));
++			if (signal?.aborted) abort();
++			else signal?.addEventListener("abort", abort, { once: true });
++			return parked.promise;
++		});
++		return { longSleeps };
++	}
++
++	/** Session on a mock model whose handler sees the API key each request resolved; `handler` picks the response. */
++	function createSession(handler: (apiKey: string, call: number) => MockResponse) {
++		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
++		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
++		registerMockApi(MOCK_API_SOURCE);
++		const apiKeys: string[] = [];
++		const mock = createMockModel({
++			id: model.id,
++			provider: model.provider,
++			handler: (_context, options) => {
++				const apiKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
++				if (!apiKey) throw new Error("Expected streamSimple to pass a resolved string API key");
++				apiKeys.push(apiKey);
++				return handler(apiKey, apiKeys.length);
++			},
++		});
++		const agent = new Agent({
++			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, PROVIDER_SESSION_ID),
++			sessionId: PROVIDER_SESSION_ID,
++			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
++			streamFn: (_requestedModel, context, options) => aiStream.streamSimple(mock.model, context, options),
++		});
++		const settings = Settings.isolated({
++			"compaction.enabled": false,
++			"retry.enabled": true,
++			"retry.baseDelayMs": 5,
++			"retry.maxRetries": 5,
++			"retry.maxDelayMs": 60_000,
++			"retry.waitForUsageReset": true,
++			"retry.modelFallback": true,
++		});
++		settings.setModelRole("default", `${model.provider}/${model.id}`);
++		const created = new AgentSession({
++			agent,
++			sessionManager: SessionManager.inMemory(),
++			settings,
++			modelRegistry,
++			providerSessionId: PROVIDER_SESSION_ID,
++		});
++		session = created;
++		const retryStarts: AutoRetryStartEvent[] = [];
++		const retryEnds: AutoRetryEndEvent[] = [];
++		created.subscribe(event => {
++			if (event.type === "auto_retry_start") retryStarts.push(event);
++			if (event.type === "auto_retry_end") retryEnds.push(event);
++		});
++		return { created, mock, retryStarts, retryEnds, apiKeys };
++	}
++
++	for (const [label, error] of [
++		["an account rate-limit 429 (usage limit)", ACCOUNT_RATE_LIMIT_429],
++		["a transient-only 429", TRANSIENT_429],
++	] as const) {
++		describe(label, () => {
++			it("ends the saga cleanly when no other credential exists, and accepts input afterwards", async () => {
++				await authStorage.credentials.set("anthropic", [{ type: "api_key", key: "only-key" }]);
++				const { longSleeps } = parkLongSleeps();
++				const { created, mock, retryStarts, retryEnds } = createSession((_key, call) =>
++					call === 1 ? { throw: error } : { content: ["answered after the failure"], stopReason: "stop" },
++				);
++
++				await created.prompt("first");
++				await created.waitForIdle();
++
++				expect(longSleeps).toEqual([]);
++				expect(retryStarts).toHaveLength(0);
++				expect(retryEnds).toHaveLength(1);
++				expect(retryEnds[0]).toMatchObject({ success: false });
++				expect(retryEnds[0].finalError).toContain("retry-after-ms");
++				expect(created.isRetrying).toBe(false);
++				expect(created.isStreaming).toBe(false);
++				expect(mock.calls).toHaveLength(1);
++				expect((created.agent.state.messages.at(-1) as AssistantMessage).stopReason).toBe("error");
++				// A later message runs instead of being refused as busy.
++				await created.prompt("second");
++				await created.waitForIdle();
++				expect(mock.calls).toHaveLength(2);
++				expect((created.agent.state.messages.at(-1) as AssistantMessage).stopReason).toBe("stop");
++			});
++
++			it("retries on a free sibling credential at once and leaves the failing one blocked", async () => {
++				await authStorage.credentials.set("anthropic", [
++					{ type: "api_key", key: "key-a" },
++					{ type: "api_key", key: "key-b" },
++				]);
++				const { longSleeps } = parkLongSleeps();
++				let failedKey: string | undefined;
++				const { created, mock, retryStarts, retryEnds, apiKeys } = createSession(key => {
++					failedKey ??= key;
++					return key === failedKey
++						? { throw: error }
++						: { content: ["answered on the sibling"], stopReason: "stop" };
++				});
++
++				await created.prompt("first");
++				await created.waitForIdle();
++
++				expect(longSleeps).toEqual([]);
++				expect(mock.calls).toHaveLength(2);
++				expect(new Set(apiKeys).size).toBe(2);
++				expect(retryEnds.every(event => event.success)).toBe(true);
++				expect(retryStarts.every(event => event.delayMs === 0)).toBe(true);
++				expect((created.agent.state.messages.at(-1) as AssistantMessage).stopReason).toBe("stop");
++				expect(created.isRetrying).toBe(false);
++				expect(created.isStreaming).toBe(false);
++				// The failing key stays out of rotation until its hint: a fresh session never picks it first.
++				const next = await modelRegistry.getApiKey(created.model!, "another-session");
++				expect(next).not.toBe(failedKey);
++			});
++		});
++	}
++});
+diff --git a/packages/coding-agent/test/agent-session-retry-wake.test.ts b/packages/coding-agent/test/agent-session-retry-wake.test.ts
+new file mode 100644
+index 0000000000..f795566f9f
+--- /dev/null
++++ b/packages/coding-agent/test/agent-session-retry-wake.test.ts
+@@ -0,0 +1,234 @@
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
++import * as path from "node:path";
++import { scheduler } from "node:timers/promises";
++import { Agent } from "@oh-my-pi/pi-agent-core";
++import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { TempDir } from "@oh-my-pi/pi-utils";
++
++type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
++type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
++
++const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
++
++/**
++ * Contract: a retry back-off that sleeps for hours (a provider usage-limit reset) must not hold a message the
++ * operator types meanwhile. A user-attributed steer ends the sleep as if the delay had run out, so the retry
++ * runs now and the steer reaches the model on that request. Anything else (a non-user steer, a follow-up) keeps
++ * the back-off, `abortRetry()` still cancels the retry and closes the saga, and `wakeRetryWait()` reports
++ * whether a sleep was waiting.
++ *
++ * The back-off's timer is replaced by one that never fires on its own and only rejects when its signal aborts,
++ * so the five-hour wait costs no real time and a retry that runs proves the sleep was cut short.
++ */
++describe("AgentSession retry back-off wake-up", () => {
++	let tempDir: TempDir;
++	let authStorage: AuthStorage;
++	let modelRegistry: ModelRegistry;
++	let session: AgentSession | undefined;
++
++	beforeAll(async () => {
++		tempDir = TempDir.createSync("@pi-retry-wake-");
++		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
++		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
++		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
++	});
++
++	afterAll(() => {
++		authStorage.close();
++		tempDir.removeSync();
++	});
++
++	beforeEach(() => {
++		modelRegistry.clearSuppressedSelectors();
++	});
++
++	afterEach(async () => {
++		if (session) {
++			// Drop any sleep a failing assertion left behind before disposing.
++			session.abortRetry();
++			await session.dispose();
++			session = undefined;
++		}
++		vi.restoreAllMocks();
++	});
++
++	interface Sleeping {
++		session: AgentSession;
++		mock: MockModel;
++		/** The `prompt()` call that entered the back-off; settles when the saga does. */
++		run: Promise<unknown>;
++		/** The signal of the hours-long back-off timer: aborted once the sleep is woken or cancelled. */
++		sleepSignal: AbortSignal;
++		retryStarts: AutoRetryStartEvent[];
++		retryEnds: AutoRetryEndEvent[];
++	}
++
++	/** A session whose first request fails with a five-hour usage-limit reset and is now sleeping in the back-off. */
++	async function enterBackoff(): Promise<Sleeping> {
++		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
++		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
++
++		// Park timers of an hour or more until their signal aborts; every other wait runs as usual.
++		const entered = Promise.withResolvers<AbortSignal>();
++		const realWait = scheduler.wait.bind(scheduler);
++		vi.spyOn(scheduler, "wait").mockImplementation((delayMs, options) => {
++			const signal = options?.signal;
++			if (delayMs < 60 * 60 * 1000 || !signal) return realWait(delayMs, options);
++			entered.resolve(signal);
++			const parked = Promise.withResolvers<void>();
++			const abort = () => parked.reject(signal.reason ?? new Error("Aborted"));
++			if (signal.aborted) abort();
++			else signal.addEventListener("abort", abort, { once: true });
++			return parked.promise;
++		});
++
++		const mock = createMockModel({
++			responses: [
++				{ throw: "429 quota exceeded. Your limit will reset in 5 hours." },
++				{ content: ["recovered after the wake"], stopReason: "stop" },
++			],
++		});
++		const agent = new Agent({
++			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
++			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
++			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
++		});
++		const settings = Settings.isolated({
++			"compaction.enabled": false,
++			"retry.baseDelayMs": 5,
++			"retry.maxDelayMs": 100,
++			"retry.maxRetries": 2,
++			"retry.modelFallback": false,
++			"retry.waitForUsageReset": true,
++		});
++		settings.setModelRole("default", `${model.provider}/${model.id}`);
++		const created = new AgentSession({
++			agent,
++			sessionManager: SessionManager.inMemory(),
++			settings,
++			modelRegistry,
++		});
++		session = created;
++		const retryStarts: AutoRetryStartEvent[] = [];
++		const retryEnds: AutoRetryEndEvent[] = [];
++		created.subscribe(event => {
++			if (event.type === "auto_retry_start") retryStarts.push(event);
++			if (event.type === "auto_retry_end") retryEnds.push(event);
++		});
++		const run = created.prompt("Trigger a long usage-limit back-off");
++		run.catch(() => {});
++		const sleepSignal = await entered.promise;
++		expect(retryStarts[0]?.delayMs).toBe(FIVE_HOURS_MS);
++		expect(mock.calls).toHaveLength(1);
++		expect(created.isRetrying).toBe(true);
++		expect(sleepSignal.aborted).toBe(false);
++		return { session: created, mock, run, sleepSignal, retryStarts, retryEnds };
++	}
++
++	function requestText(mock: MockModel, call: number): string {
++		const messages = mock.calls[call]?.context.messages ?? [];
++		return messages
++			.map(message =>
++				typeof message.content === "string"
++					? message.content
++					: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
++			)
++			.join("\n");
++	}
++
++	it("resumes the retry as soon as a user steer is queued, and the steer reaches the model", async () => {
++		const sleeping = await enterBackoff();
++
++		await sleeping.session.steer("use the other approach");
++		expect(sleeping.sleepSignal.aborted).toBe(true);
++		await sleeping.run;
++		await sleeping.session.waitForIdle();
++
++		expect(sleeping.mock.calls).toHaveLength(2);
++		expect(requestText(sleeping.mock, 1)).toContain("use the other approach");
++		expect(sleeping.retryEnds).toHaveLength(1);
++		expect(sleeping.retryEnds[0]).toMatchObject({ success: true });
++		expect(sleeping.session.isRetrying).toBe(false);
++		// The sleep ended, so there is nothing left to wake.
++		expect(sleeping.session.wakeRetryWait()).toBe(false);
++	});
++
++	it("keeps sleeping for a steer attributed to the agent", async () => {
++		const sleeping = await enterBackoff();
++
++		await sleeping.session.steer("automatic reminder", undefined, { attribution: "agent" });
++
++		expect(sleeping.sleepSignal.aborted).toBe(false);
++		expect(sleeping.mock.calls).toHaveLength(1);
++		expect(sleeping.session.isRetrying).toBe(true);
++		expect(sleeping.retryEnds).toHaveLength(0);
++		// Positive control: the sleep is still there to wake.
++		expect(sleeping.session.wakeRetryWait()).toBe(true);
++		expect(sleeping.sleepSignal.aborted).toBe(true);
++		await sleeping.run;
++		await sleeping.session.waitForIdle();
++		expect(sleeping.mock.calls).toHaveLength(2);
++	});
++
++	it("keeps sleeping for a follow-up, user-attributed or synthetic", async () => {
++		const sleeping = await enterBackoff();
++
++		await sleeping.session.followUp("after you finish");
++		await sleeping.session.followUp("hidden directive", undefined, { synthetic: true });
++
++		expect(sleeping.sleepSignal.aborted).toBe(false);
++		expect(sleeping.mock.calls).toHaveLength(1);
++		expect(sleeping.session.isRetrying).toBe(true);
++		expect(sleeping.retryEnds).toHaveLength(0);
++		expect(sleeping.session.wakeRetryWait()).toBe(true);
++		expect(sleeping.sleepSignal.aborted).toBe(true);
++		await sleeping.run;
++		await sleeping.session.waitForIdle();
++		expect(sleeping.mock.calls.length).toBeGreaterThanOrEqual(2);
++	});
++
++	it("still cancels the retry and closes the saga on abortRetry() during the sleep", async () => {
++		const sleeping = await enterBackoff();
++
++		sleeping.session.abortRetry();
++		expect(sleeping.sleepSignal.aborted).toBe(true);
++		await sleeping.run;
++		await sleeping.session.waitForIdle();
++
++		expect(sleeping.mock.calls).toHaveLength(1);
++		expect(sleeping.retryEnds).toHaveLength(1);
++		expect(sleeping.retryEnds[0]).toMatchObject({ success: false, finalError: "Retry cancelled" });
++		expect(sleeping.session.isRetrying).toBe(false);
++		expect(sleeping.session.wakeRetryWait()).toBe(false);
++	});
++
++	it("reports false from wakeRetryWait() when no sleep is waiting", async () => {
++		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
++		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
++		const mock = createMockModel({ responses: [{ content: ["fine"], stopReason: "stop" }] });
++		const agent = new Agent({
++			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
++			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
++			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
++		});
++		session = new AgentSession({
++			agent,
++			sessionManager: SessionManager.inMemory(),
++			settings: Settings.isolated({ "compaction.enabled": false }),
++			modelRegistry,
++		});
++
++		// Idle, before any turn.
++		expect(session.wakeRetryWait()).toBe(false);
++		await session.prompt("hello");
++		await session.waitForIdle();
++		// After a turn that never retried.
++		expect(session.wakeRetryWait()).toBe(false);
++	});
++});
+diff --git a/packages/coding-agent/test/background-completion-line.test.ts b/packages/coding-agent/test/background-completion-line.test.ts
+new file mode 100644
+index 0000000000..80978cf61e
+--- /dev/null
++++ b/packages/coding-agent/test/background-completion-line.test.ts
+@@ -0,0 +1,106 @@
++/**
++ * Contract: the "Background job completed" line of a finished task job carries what its subagent used beside the
++ * elapsed time, `(8m3s · 11M tok · $2.25)`, coloured like the pinned shelf's counter. A job with no usage keeps its
++ * plain duration, and the line never shows an empty separator.
++ */
++import { beforeAll, describe, expect, it } from "bun:test";
++import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
++import {
++	type AsyncResultEntry,
++	buildAsyncResultBatchMessage,
++} from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
++import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
++import { initTheme } from "@oh-my-pi/pi-tui/theme";
++
++const ESCAPE = String.fromCharCode(27);
++const SGR = new RegExp(`${ESCAPE}\\[[0-9;]*m`, "g");
++
++function taskEntry(progress: Record<string, unknown> | undefined, durationMs: number | undefined): AsyncResultEntry {
++	const job: AsyncJob = {
++		id: "StatusLineModels",
++		type: "task",
++		status: "completed",
++		startTime: Date.now(),
++		label: "StatusLineModels",
++		agentId: "StatusLineModels",
++		abortController: new AbortController(),
++		promise: Promise.resolve(),
++		resultText: "done",
++		latestDetails: progress ? { progress: [{ id: "Other", tokens: 1, cost: 9 }, progress] } : undefined,
++	};
++	return { jobId: "StatusLineModels", result: "done", job, durationMs, epoch: 0 };
++}
++
++function renderLine(entry: AsyncResultEntry, persisted = false, raw = false): string {
++	const built = buildAsyncResultBatchMessage([entry]);
++	if (!built) throw new Error("Expected an async-result message");
++	const message = persisted ? (JSON.parse(JSON.stringify(built)) as typeof built) : built;
++	const lines = buildAsyncResultBlock(message).render(200);
++	return lines.map(line => (raw ? line : Bun.stripANSI(line))).join("\n");
++}
++
++/** The SGR escapes in force right before `text` in `raw`. */
++function styleBefore(raw: string, text: string): string {
++	const at = raw.indexOf(text);
++	if (at < 0) throw new Error(`${text} not found in ${JSON.stringify(raw)}`);
++	return raw.slice(0, at).match(SGR)?.at(-1) ?? "";
++}
++
++describe("background job completion line", () => {
++	beforeAll(async () => {
++		await initTheme(false, undefined, undefined, "dark", "light");
++	});
++
++	it("shows elapsed time, total tokens with cache reads, and cost after the job id", () => {
++		const entry = taskEntry(
++			{ id: "StatusLineModels", tokens: 1_000_000, cacheReadTokens: 10_000_000, cost: 2.25 },
++			483_000,
++		);
++		for (const persisted of [false, true]) {
++			const line = renderLine(entry, persisted);
++			expect(line).toContain("Background job completed");
++			expect(line).toContain("[task]");
++			expect(line).toContain("StatusLineModels (8m3s · 11M tok · $2.25)");
++		}
++	});
++
++	it("leaves out the cost while it is zero and the tokens while none were used, with no empty separator", () => {
++		expect(renderLine(taskEntry({ id: "StatusLineModels", tokens: 2_000, cost: 0 }, 61_000))).toContain(
++			"(1m1s · 2K tok)",
++		);
++		expect(renderLine(taskEntry({ id: "StatusLineModels", tokens: 0, cost: 0.5 }, 61_000))).toContain(
++			"(1m1s · $0.500)",
++		);
++		for (const line of [
++			renderLine(taskEntry({ id: "StatusLineModels", tokens: 2_000, cost: 0 }, undefined)),
++			renderLine(taskEntry({ id: "StatusLineModels", tokens: 0, cost: 0 }, 61_000)),
++			renderLine(taskEntry(undefined, 61_000)),
++		]) {
++			expect(line).not.toMatch(/·\s*\)|\(\s*·|·\s*·/);
++		}
++	});
++
++	it("keeps the plain duration for a job that reports no usage", () => {
++		expect(renderLine(taskEntry({ id: "StatusLineModels", tokens: 0, cost: 0 }, 61_000))).toContain(
++			"StatusLineModels (1m1s)",
++		);
++		expect(renderLine(taskEntry(undefined, 61_000))).toContain("StatusLineModels (1m1s)");
++	});
++
++	it("reads usage for the job's own agent from a batch's progress list", () => {
++		const line = renderLine(taskEntry({ id: "StatusLineModels", tokens: 5_000, cost: 0.2 }, 61_000));
++		expect(line).toContain("5K tok");
++		expect(line).not.toContain("$9");
++	});
++
++	it("colours the elapsed time, tokens and cost differently and keeps the separators muted", () => {
++		const raw = renderLine(taskEntry({ id: "StatusLineModels", tokens: 5_000, cost: 0.2 }, 600_000), false, true);
++		const elapsed = styleBefore(raw, "10m");
++		const tokens = styleBefore(raw, "5K tok");
++		const cost = styleBefore(raw, "$0.200");
++		expect(new Set([elapsed, tokens, cost]).size).toBe(3);
++		// The dots between the figures stay muted, like the brackets around them.
++		expect(styleBefore(raw, "·")).toBe(styleBefore(raw, "("));
++		expect(styleBefore(raw, "·")).not.toBe(elapsed);
++	});
++});
+diff --git a/packages/coding-agent/test/input-controller-focused-commands.test.ts b/packages/coding-agent/test/input-controller-focused-commands.test.ts
+index 9270bb8fa7..3973462e5d 100644
+--- a/packages/coding-agent/test/input-controller-focused-commands.test.ts
++++ b/packages/coding-agent/test/input-controller-focused-commands.test.ts
+@@ -57,7 +57,14 @@ function createFocusedContext() {
+ 			customCommands: [],
+ 			promptTemplates: [],
+ 		},
+-		viewSession: { isStreaming: false, queuedMessageCount: 0, prompt, resume, abort: vi.fn(async () => {}) },
++		viewSession: {
++			isStreaming: false,
++			isRetrying: false,
++			queuedMessageCount: 0,
++			prompt,
++			resume,
++			abort: vi.fn(async () => {}),
++		},
+ 		focusedAgentId: "Worker",
+ 		skillCommands: new Map(),
+ 		fileSlashCommands: new Set<string>(),
+@@ -101,15 +108,50 @@ describe("focused subagent view slash commands", () => {
+ 		}
+ 	});
+ 
+-	it("restores a focused continue shortcut when the target is busy", async () => {
+-		const { ctx, raw, editor, resume } = createFocusedContext();
+-		resume.mockRejectedValueOnce(new AgentBusyError());
+-		const controller = new InputController(ctx);
+-		controller.setupEditorSubmitHandler();
+-		await ctx.editor.onSubmit?.(".");
++	describe("continue shortcut on a busy target", () => {
++		for (const shortcut of [".", "c"]) {
++			it(`queues a lone ${JSON.stringify(shortcut)} as a steer instead of resuming a streaming agent`, async () => {
++				const { ctx, raw, editor, prompt, resume } = createFocusedContext();
++				raw.viewSession.isStreaming = true;
++				const controller = new InputController(ctx);
++				controller.setupEditorSubmitHandler();
++				editor.setText(shortcut);
++				await ctx.editor.onSubmit?.(shortcut);
++
++				expect(resume).not.toHaveBeenCalled();
++				expect(raw.withLocalSubmission).toHaveBeenCalledTimes(1);
++				expect(prompt).toHaveBeenCalledWith(shortcut, { streamingBehavior: "steer", images: undefined });
++				expect(raw.showError).not.toHaveBeenCalled();
++				expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
++			});
++		}
++
++		it("queues it as a steer for an agent waiting out a retry back-off", async () => {
++			const { ctx, raw, editor, prompt, resume } = createFocusedContext();
++			raw.viewSession.isStreaming = false;
++			raw.viewSession.isRetrying = true;
++			const controller = new InputController(ctx);
++			controller.setupEditorSubmitHandler();
++			editor.setText(".");
++			await ctx.editor.onSubmit?.(".");
++
++			expect(resume).not.toHaveBeenCalled();
++			expect(prompt).toHaveBeenCalledWith(".", { streamingBehavior: "steer", images: undefined });
++			expect(raw.showError).not.toHaveBeenCalled();
++		});
++
++		it("queues the shortcut instead of showing AgentBusyError when the agent became busy after the check", async () => {
++			const { ctx, raw, editor, prompt, resume } = createFocusedContext();
++			resume.mockRejectedValueOnce(new AgentBusyError());
++			const controller = new InputController(ctx);
++			controller.setupEditorSubmitHandler();
++			editor.setText(".");
++			await ctx.editor.onSubmit?.(".");
+ 
+-		expect(editor.getText()).toBe(".");
+-		expect(raw.showError).toHaveBeenCalledTimes(1);
++			expect(prompt).toHaveBeenCalledWith(".", { streamingBehavior: "steer", images: undefined });
++			expect(raw.showError).not.toHaveBeenCalled();
++			expect(editor.clearDraft).toHaveBeenCalledWith(".");
++		});
+ 	});
+ 
+ 	it("runs /usage from the focused view", async () => {
+diff --git a/packages/coding-agent/test/subagent-hud-render.test.ts b/packages/coding-agent/test/subagent-hud-render.test.ts
+index 18258b9340..201c1117bb 100644
+--- a/packages/coding-agent/test/subagent-hud-render.test.ts
++++ b/packages/coding-agent/test/subagent-hud-render.test.ts
+@@ -16,6 +16,7 @@ import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-mana
+ import {
+ 	InteractiveMode,
+ 	layoutPinnedHud,
++	nextSubagentCounterTickMs,
+ 	nextSubagentPreviewTickMs,
+ 	renderSubagentHudLines,
+ 	SubagentHudComponent,
+@@ -308,7 +309,7 @@ describe("subagent HUD lines", () => {
+ 			expect(usageRow({ tokens: 0, cost: 0 })).not.toMatch(/tok|\$/);
+ 		});
+ 
+-		it("shortens the title to make room, and drops the usage on a row too narrow to keep a readable title", () => {
++		it("shortens the title to make room for the usage and never drops the usage for a long title", () => {
+ 			const wide = render(
+ 				[
+ 					makeSession({
+@@ -319,9 +320,134 @@ describe("subagent HUD lines", () => {
+ 				],
+ 				80,
+ 			);
+-			expect(wide.split("\n").find(line => line.includes("Refactor"))?.trimEnd()).toEndWith("5K tok · $0.200");
++			expect(
++				wide
++					.split("\n")
++					.find(line => line.includes("Refactor"))
++					?.trimEnd(),
++			).toEndWith("5K tok · $0.200");
+ 			for (const line of wide.split("\n")) expect(line.length).toBeLessThanOrEqual(80);
+-			expect(usageRow({ tokens: 5_000, cost: 0.2 }, 36)).not.toContain("tok");
++			const narrow = usageRow({ tokens: 5_000, cost: 0.2 }, 36);
++			expect(narrow.trimEnd()).toEndWith("5K tok · $0.200");
++			expect(narrow).toContain("Refactor");
++		});
++	});
++
++	describe("per-subagent counter: elapsed time, tokens and cost", () => {
++		const NOW = 1_800_000_000_000;
++		const LONG_DESCRIPTION = "Execute the S1c slice of the surface rewrite end to end and report back ".repeat(4);
++
++		function counterRows(progress: Partial<AgentProgress>, columns: number, progressAgeMs = 5_000): string[] {
++			const lines = renderSubagentHudLines(
++				[
++					makeSession({
++						id: "SurfaceSlice2",
++						description: LONG_DESCRIPTION,
++						progress: makeProgress({ id: "SurfaceSlice2", ...progress }),
++						progressAt: NOW - progressAgeMs,
++					}),
++				],
++				columns,
++				false,
++				false,
++				undefined,
++				NOW,
++			);
++			return Bun.stripANSI(lines.join("\n")).split("\n");
++		}
++
++		for (const columns of [120, 60]) {
++			it(`keeps elapsed time, tokens and cost on a ${columns}-column row and shortens the description instead`, () => {
++				const rows = counterRows(
++					{ tokens: 12_300, cacheReadTokens: 1_500_000, cost: 0.4237, durationMs: 120_000 },
++					columns,
++				);
++				const row = rows.find(line => line.includes("SurfaceSlice2")) ?? "";
++				// 120s at the last frame plus the 5s it has aged since.
++				expect(row.trimEnd()).toEndWith("2m5s · 1.5M tok · $0.424");
++				expect(row).toContain("Execute");
++				for (const line of rows) expect(line.length).toBeLessThanOrEqual(columns);
++			});
++		}
++
++		it("shows the elapsed time alone while the subagent has used no tokens, as when it waits out a rate limit", () => {
++			const row =
++				counterRows({ tokens: 0, cost: 0, durationMs: 60_000 }, 120).find(line => line.includes("SurfaceSlice2")) ??
++				"";
++			expect(row.trimEnd()).toEndWith("1m5s");
++			expect(row).not.toMatch(/tok|\$/);
++		});
++
++		it("keeps the counter on a very narrow row and cuts the description first", () => {
++			const row =
++				counterRows({ tokens: 5_000, cost: 0.2, durationMs: 30_000 }, 50).find(line =>
++					line.includes("SurfaceSlice2"),
++				) ?? "";
++			expect(row.trimEnd()).toEndWith("35.0s · 5K tok · $0.200");
++			expect(row).toContain("SurfaceSlice2");
++		});
++
++		it("falls back to the elapsed time alone when the full counter would crowd out the id", () => {
++			const row =
++				counterRows({ tokens: 5_000, cost: 0.2, durationMs: 30_000 }, 30).find(line =>
++					line.includes("SurfaceSlice2"),
++				) ?? "";
++			expect(row.trimEnd()).toEndWith("35.0s");
++			expect(row).toContain("SurfaceSlice2");
++		});
++
++		it("starts no clock for a snapshot that has not arrived or is not running", () => {
++			const noFrame = renderSubagentHudLines(
++				[makeSession({ id: "SurfaceSlice2", description: "work" })],
++				120,
++				false,
++				false,
++				undefined,
++				NOW,
++			);
++			expect(Bun.stripANSI(noFrame.join("\n"))).not.toMatch(/\d+m\d+s|\d+(\.\d)?s/);
++			const done = counterRows({ status: "completed", durationMs: 60_000 }, 120).join("\n");
++			expect(done).not.toMatch(/\d+m\d+s/);
++		});
++
++		it("paints the elapsed time, tokens and cost in different colours and keeps the dots muted", () => {
++			const raw = renderSubagentHudLines(
++				[
++					makeSession({
++						id: "SurfaceSlice2",
++						description: "work",
++						progress: makeProgress({ id: "SurfaceSlice2", tokens: 5_000, cost: 0.2, durationMs: 600_000 }),
++						progressAt: NOW,
++					}),
++				],
++				120,
++				false,
++				false,
++				undefined,
++				NOW,
++			).join("\n");
++			const escape = String.fromCharCode(27);
++			const sgr = new RegExp(`${escape}\\[[0-9;]*m`, "g");
++			const styleBefore = (text: string): string => {
++				const at = raw.indexOf(text);
++				expect(at).toBeGreaterThan(-1);
++				return raw.slice(0, at).match(sgr)?.at(-1) ?? "";
++			};
++			const elapsed = styleBefore("10m");
++			const tokens = styleBefore("5K tok");
++			const cost = styleBefore("$0.200");
++			expect(new Set([elapsed, tokens, cost]).size).toBe(3);
++			const dotAt = raw.indexOf("·", raw.indexOf("10m"));
++			expect(raw.slice(0, dotAt).match(sgr)?.at(-1)).toBe(theme.getFgAnsi("muted"));
++			// Same text on a theme that paints nothing.
++			expect(Bun.stripANSI(raw)).toContain("10m · 5K tok · $0.200");
++		});
++
++		it("asks for a repaint every second while a listed subagent has a running clock", () => {
++			const clocked = makeSession({ id: "Clocked", progress: makeProgress({ id: "Clocked" }), progressAt: NOW });
++			const noFrame = makeSession({ id: "NoFrame" });
++			expect(nextSubagentCounterTickMs([noFrame])).toBeUndefined();
++			expect(nextSubagentCounterTickMs([noFrame, clocked])).toBe(1_000);
+ 		});
+ 	});
+ 
+@@ -1039,7 +1165,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
+ 		}
+ 
+ 		await Promise.resolve();
+-		vi.runAllTimers();
++		vi.runOnlyPendingTimers();
+ 		await Promise.resolve();
+ 
+ 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+@@ -1059,7 +1185,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
+ 		const payload = makeProgressPayload("Background", 0, "Compile", true);
+ 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
+ 		await Promise.resolve();
+-		vi.runAllTimers();
++		vi.runOnlyPendingTimers();
+ 		await Promise.resolve();
+ 		requestRender.mockClear();
+ 		updateHud.mockClear();
+@@ -1069,14 +1195,14 @@ describe("InteractiveMode subagent observer UI sync", () => {
+ 				progress: { ...payload.progress, durationMs: index + 1 },
+ 			});
+ 			await Promise.resolve();
+-			vi.runAllTimers();
++			vi.runOnlyPendingTimers();
+ 			await Promise.resolve();
+ 		}
+ 		expect(requestRender).not.toHaveBeenCalled();
+ 		expect(updateHud).not.toHaveBeenCalled();
+ 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Background", 0, "Link", true));
+ 		await Promise.resolve();
+-		vi.runAllTimers();
++		vi.runOnlyPendingTimers();
+ 		await Promise.resolve();
+ 		expect(requestRender).toHaveBeenCalled();
+ 		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("Link");
+diff --git a/packages/tui/src/chat/transcript-render-helpers.ts b/packages/tui/src/chat/transcript-render-helpers.ts
+index 644fa7e879..22cac71b8d 100644
+--- a/packages/tui/src/chat/transcript-render-helpers.ts
++++ b/packages/tui/src/chat/transcript-render-helpers.ts
+@@ -7,7 +7,7 @@
+ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+ import type { TspSpan } from "@oh-my-pi/pi-wire";
+ import { type Component } from "../tui";
+-import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
++import { formatBytes, formatCount, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+ import { span } from "../native/describe";
+ import type { JobSnapshot } from "../tools/wait";
+ import type { DaemonSnapshot } from "../tools/daemon";
+@@ -19,8 +19,14 @@ import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render
+ import { canonicalizeMessage } from "./thinking-display";
+ import { ToolActivityContainer } from "../chrome/tool-activity";
+ import { type TranscriptBlock } from "../chrome/transcript-container";
+-import { TranscriptStatusBlock, type TranscriptStatusRow } from "../chrome/transcript-status";
++import {
++	TranscriptStatusBlock,
++	type TranscriptStatusPart,
++	type TranscriptStatusRow,
++} from "../chrome/transcript-status";
+ import { theme } from "../theme";
++import { usageCounterForms } from "../chrome/usage-counter";
++import { formatCost } from "../overlays/agent-hub-renderer";
+ 
+ type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
+ type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+@@ -42,6 +48,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
+ 				type?: JobSnapshot["type"];
+ 				label?: string;
+ 				durationMs?: number;
++				usage?: { tokens: number; cacheReadTokens?: number; cost: number };
+ 				meta?: OutputMeta;
+ 			}>;
+ 			meta?: OutputMeta;
+@@ -63,16 +70,34 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
+ 		const jobId = job.jobId ?? "unknown";
+ 		const type = job.type ?? "job";
+ 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
++		// A finished task job also reports what its subagent used, shown like the pinned shelf's counter:
++		// `(8m3s · 11M tok · $2.25)`. Without usage the line keeps its plain duration.
++		const tokens = job.usage ? job.usage.tokens + (job.usage.cacheReadTokens ?? 0) : 0;
++		const cost = job.usage?.cost ?? 0;
++		const tokenText = tokens > 0 ? `${formatNumber(tokens)} tok` : undefined;
++		const costText = cost > 0 ? formatCost(cost) : undefined;
++		const counter =
++			tokenText || costText ? usageCounterForms({ elapsedMs: job.durationMs, tokens, cost })[0] : undefined;
++		const counterPart: TranscriptStatusPart | undefined = counter
++			? { text: `${theme.fg("muted", "(")}${counter}${theme.fg("muted", ")")}`, color: "muted" }
++			: duration
++				? { text: `(${duration})`, color: "dim" }
++				: undefined;
+ 		rows.push({
+ 			parts: [
+ 				{ text: `${theme.status.done} Background job completed`, color: "success" },
+ 				{ text: `[${type}]`, color: "dim" },
+ 				{ text: jobId, color: "accent" },
+-				duration ? { text: `(${duration})`, color: "dim" } : undefined,
++				counterPart,
+ 			],
+ 			native: {
+ 				tone: "success",
+-				message: [span("Background job completed"), ...facts([type, jobId, duration])],
++				message: [
++					span("Background job completed"),
++					...facts([type, jobId, duration]),
++					...(tokenText ? [span(" · ", "dim"), span(tokenText, "dim")] : []),
++					...(costText ? [span(" · ", "dim"), span(costText, "dim")] : []),
++				],
+ 			},
+ 		});
+ 		if (job.meta?.artifactError) rows.push(artifactErrorRow(job.meta.artifactError));
+diff --git a/packages/tui/src/chrome/index.ts b/packages/tui/src/chrome/index.ts
+index b5b273e7ee..3ef09b1646 100644
+--- a/packages/tui/src/chrome/index.ts
++++ b/packages/tui/src/chrome/index.ts
+@@ -19,4 +19,5 @@ export * from "./tool-activity";
+ export * from "./transcript-container";
+ export * from "./transcript-notice";
+ export * from "./transcript-status";
++export * from "./usage-counter";
+ export * from "./visual-truncate";
+diff --git a/packages/tui/src/chrome/usage-counter.ts b/packages/tui/src/chrome/usage-counter.ts
+new file mode 100644
+index 0000000000..6900378503
+--- /dev/null
++++ b/packages/tui/src/chrome/usage-counter.ts
+@@ -0,0 +1,59 @@
++import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
++import { formatCost } from "../overlays/agent-hub-renderer";
++import { type ThemeColor, theme } from "../theme/theme";
++
++/** What a subagent or background task consumed: the elapsed time, its total tokens and its API cost. */
++export interface UsageCounterInput {
++	/** Elapsed run time in ms. Left out below a second, where a clock only adds noise. */
++	elapsedMs?: number;
++	/** Total tokens the model processed, cache reads included. Left out at zero. */
++	tokens?: number;
++	/** API cost in USD. Left out while zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. */
++	cost?: number;
++}
++
++/** Elapsed times from which the clock turns from green to warning, then to error. */
++const ELAPSED_WARNING_MS = 3 * 60_000;
++const ELAPSED_ERROR_MS = 20 * 60_000;
++
++/** Costs, in USD, from which the figure turns from green to warning, then to error. */
++const COST_WARNING = 1;
++const COST_ERROR = 10;
++
++/** Elapsed time runs hotter the longer it gets. */
++export function elapsedColor(elapsedMs: number): ThemeColor {
++	if (elapsedMs >= ELAPSED_ERROR_MS) return "error";
++	if (elapsedMs >= ELAPSED_WARNING_MS) return "warning";
++	return "success";
++}
++
++/** Cost runs hotter the more it grows. */
++export function costColor(cost: number): ThemeColor {
++	if (cost >= COST_ERROR) return "error";
++	if (cost >= COST_WARNING) return "warning";
++	return "success";
++}
++
++/**
++ * The counter shown beside a subagent or finished background task, longest form first, for example
++ * `2m5s · 1.4M tok · $0.42`, then the elapsed time alone for a row too narrow for the lot. The three figures each
++ * take their own theme colour and the dots between them stay muted, so the text is the same on a theme that
++ * paints nothing. Empty when there is nothing to show.
++ */
++export function usageCounterForms(input: UsageCounterInput): string[] {
++	const dot = theme.fg("muted", theme.sep.dot);
++	const elapsed =
++		input.elapsedMs !== undefined && input.elapsedMs >= 1000
++			? theme.fg(elapsedColor(input.elapsedMs), formatDuration(input.elapsedMs))
++			: undefined;
++	const usage: string[] = [];
++	if (input.tokens !== undefined && input.tokens > 0) {
++		usage.push(theme.fg("statusLineSpend", `${formatNumber(input.tokens)} tok`));
++	}
++	if (input.cost !== undefined && input.cost > 0) {
++		usage.push(theme.fg(costColor(input.cost), formatCost(input.cost)));
++	}
++	const full = [...(elapsed ? [elapsed] : []), ...usage].join(dot);
++	if (!full) return [];
++	return elapsed && usage.length > 0 ? [full, elapsed] : [full];
++}

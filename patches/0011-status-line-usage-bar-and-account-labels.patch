@@ -1,0 +1,792 @@
+diff --git a/docs/settings.md b/docs/settings.md
+index a0c3b36dc2..00f739cdc8 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -914,6 +914,10 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
+ 
+ The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
+ 
++The `usage_bar` segment draws a five-cell progress bar and a percent for the active account of the active provider (`━━─── 42%`, or `==--- 42%` with the ASCII symbol set), warning-coloured from 50% and error-coloured from 80%. It shows the most constraining quota window: the 5 Hour window by default, and the 7 Day window, tagged `7d`, when that is more used (daily and monthly windows count too for providers that report them; a tie keeps the 5 Hour window). It reads the same cached usage reports as the `usage` segment, refreshed no more often than every five minutes, and renders nothing when the provider reports no such window. It sits right after `context_pct` in the `default` preset; add `usage_bar` to `statusLine.leftSegments` or `statusLine.rightSegments` with `statusLine.preset: custom` to use it in a custom line.
++
++When a provider holds two or more stored OAuth accounts, the `model` segment names the session's account by its stored position, the order `omp usage accounts` prints (A is the first): `Anthropic (B) > Sonnet 5.5`, and the footer shows the raw id as `anthropic-b/claude-sonnet-5-5`. A provider with one account is unchanged, and model ids themselves are never rewritten.
++
+ The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
+ 
+ ### Interaction
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index cac89f9828..03fc58229f 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -5,6 +5,8 @@
+ ### Added
+ 
+ - Added the `retry.accountMode` setting (`sequential` by default, or `balanced`). With `sequential`, Anthropic accounts are used one at a time: every session and subagent follows the account that served last until it is blocked or spent, then moves to the next.
++- New `usage_bar` status-line segment, in the `default` preset right after the context percent (add it to `statusLine.leftSegments` or `rightSegments` in a custom line): a five-cell progress bar and percent for the active account's most constraining usage window, the 5 Hour window by default and the 7 Day window, tagged `7d`, when that is higher. It renders nothing when the provider reports no usage windows.
++- When a provider holds two or more stored OAuth accounts, the status line names the session's account in the model: `Anthropic (B) > Sonnet 5.5`, and the footer's raw model id reads `anthropic-b/claude-sonnet-5-5`. The letter is the account's position in `omp usage accounts` order (A first) and follows an account change mid-session. Single-account providers look as before.
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
+diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+index 6a54f8d16c..a0332a2037 100644
+--- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
++++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+@@ -107,6 +107,10 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+ 				{ label: "advisor error", session: { advisorStatus: "error" } },
+ 				{ label: "advisor paused", session: { advisorStatus: "paused" } },
+ 				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },
++				{
++					label: "second of two accounts",
++					context: { modelAccount: { label: "Anthropic (B)", rawProvider: "anthropic-b" } },
++				},
+ 			];
+ 		case "mode":
+ 			return [
+@@ -242,6 +246,19 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+ 					context: { usage: { tier: "Pro", fiveHour: { percent: 92, resetMinutes: 75 } } },
+ 				},
+ 			];
++		case "usage_bar":
++			return [
++				{ label: "5 hour window", context: { usage: { fiveHour: { percent: 24, resetMinutes: 75 } } } },
++				{
++					label: "7 day window is higher",
++					context: {
++						usage: { fiveHour: { percent: 32, resetMinutes: 71 }, sevenDay: { percent: 68, resetHours: 52 } },
++					},
++				},
++				{ label: "warning", context: { usage: { fiveHour: { percent: 65, resetMinutes: 75 } } } },
++				{ label: "error", context: { usage: { fiveHour: { percent: 92, resetMinutes: 75 } } } },
++				{ label: "no usage data", context: { usage: null } },
++			];
+ 		case "collab":
+ 			return [
+ 				{ label: "host active", context: { collab: { role: "host", participantCount: 3 } } },
+diff --git a/packages/coding-agent/src/modes/model-account-label.ts b/packages/coding-agent/src/modes/model-account-label.ts
+new file mode 100644
+index 0000000000..b435a85194
+--- /dev/null
++++ b/packages/coding-agent/src/modes/model-account-label.ts
+@@ -0,0 +1,33 @@
++import type { OAuthAccountSummary } from "@oh-my-pi/pi-ai";
++import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
++import type { StatusModelAccount } from "@oh-my-pi/pi-tui/status-line/host";
++
++/** Letter of the account at 0-based `index` in the credential pool: A, B, ... Z, AA, AB, ... */
++export function accountLetter(index: number): string {
++	let letter = "";
++	for (let rest = index + 1; rest > 0; rest = Math.floor((rest - 1) / 26)) {
++		letter = String.fromCharCode(65 + ((rest - 1) % 26)) + letter;
++	}
++	return letter;
++}
++
++/**
++ * Qualifier that tells a provider's stored OAuth accounts apart in model displays:
++ * `Anthropic (B)` before the model name, `anthropic-b` before the raw model id.
++ *
++ * `accounts` is `authStorage.oauth.accounts(provider, sessionId)`: stored credential-pool
++ * order, the order `omp usage accounts` prints, with the session's sticky account marked
++ * `active`. The letter is the active account's index in that order (A is the first). A
++ * provider with fewer than two stored accounts, or a session that has not resolved one yet,
++ * gets no qualifier, so single-account displays stay as they were.
++ */
++export function resolveModelAccount(
++	provider: string,
++	accounts: readonly Pick<OAuthAccountSummary, "active">[],
++): StatusModelAccount | undefined {
++	if (accounts.length < 2) return undefined;
++	const index = accounts.findIndex(account => account.active);
++	if (index === -1) return undefined;
++	const letter = accountLetter(index);
++	return { label: `${formatProviderName(provider)} (${letter})`, rawProvider: `${provider}-${letter.toLowerCase()}` };
++}
+diff --git a/packages/coding-agent/src/modes/status-line-host.ts b/packages/coding-agent/src/modes/status-line-host.ts
+index 2ab041f34d..ffa8a9c934 100644
+--- a/packages/coding-agent/src/modes/status-line-host.ts
++++ b/packages/coding-agent/src/modes/status-line-host.ts
+@@ -7,6 +7,7 @@ import { limitMatchesActiveAccount } from "../slash-commands/helpers/active-oaut
+ import { resolveActiveRepoContextSync } from "../utils/active-repo-context";
+ import { GH_COMMAND_TIMEOUT_MS, github } from "../utils/github";
+ import { calculateTokensPerSecond } from "../utils/token-rate";
++import { resolveModelAccount } from "./model-account-label";
+ 
+ import {
+ 	cfgGitEnabled,
+@@ -55,6 +56,12 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
+ 	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
+ 	activeAccount: (session, provider) =>
+ 		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
++	modelAccount: (session, provider) =>
++		resolveModelAccount(
++			provider,
++			// Display-only read of the stored order and the session's sticky account; nothing is refreshed or selected.
++			session.modelRegistry?.authStorage?.oauth.accounts?.(provider, session.sessionId) ?? [],
++		),
+ 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
+ 	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
+ 	resolveActiveRepo: resolveActiveRepoContextSync,
+diff --git a/packages/coding-agent/test/model-account-label.test.ts b/packages/coding-agent/test/model-account-label.test.ts
+new file mode 100644
+index 0000000000..c1ae0fed21
+--- /dev/null
++++ b/packages/coding-agent/test/model-account-label.test.ts
+@@ -0,0 +1,208 @@
++/**
++ * A provider with two or more stored OAuth accounts qualifies its model in the status line
++ * (`Anthropic (B) > Sonnet 5.5`, raw `anthropic-b/claude-sonnet-5-5`) so the account a
++ * session is burning is visible; a single-account provider reads exactly as before.
++ */
++import { afterAll, beforeAll, describe, expect, it } from "bun:test";
++import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { accountLetter, resolveModelAccount } from "@oh-my-pi/pi-coding-agent/modes/model-account-label";
++import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
++import { FooterComponent } from "@oh-my-pi/pi-tui/status-line/footer";
++import { initTheme } from "@oh-my-pi/pi-tui/theme";
++import { StatusLineTestComponents } from "./helpers/status-line";
++
++const SESSION_ID = "model-account-session";
++const statusLines = new StatusLineTestComponents();
++
++beforeAll(async () => {
++	resetSettingsForTest();
++	await Settings.init({ inMemory: true });
++	await initTheme();
++});
++
++afterAll(() => {
++	statusLines.dispose();
++	resetSettingsForTest();
++});
++
++function oauthCredential(suffix: string) {
++	return {
++		type: "oauth" as const,
++		access: `access-${suffix}`,
++		refresh: `refresh-${suffix}`,
++		expires: Date.now() + 60 * 60_000,
++		accountId: `acc-${suffix}`,
++		email: `${suffix}@example.com`,
++	};
++}
++
++/** Auth storage holding `suffixes` as stored Anthropic OAuth accounts, in that order. */
++async function authStorageWith(...suffixes: string[]): Promise<AuthStorage> {
++	const authStorage = await AuthStorage.create(":memory:");
++	await authStorage.credentials.set("anthropic", suffixes.map(oauthCredential));
++	return authStorage;
++}
++
++/** Make the session's sticky account the stored account with `email`. */
++function pinAccount(authStorage: AuthStorage, email: string): void {
++	const account = authStorage.oauth.accounts("anthropic", SESSION_ID).find(candidate => candidate.email === email);
++	if (!account || !authStorage.sessions.pin("anthropic", SESSION_ID, account.credentialId)) {
++		throw new Error(`could not pin ${email}`);
++	}
++}
++
++const SONNET = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", contextWindow: 1000 };
++
++function makeSession(authStorage: AuthStorage) {
++	return {
++		state: { messages: [], model: SONNET },
++		model: SONNET,
++		sessionId: SESSION_ID,
++		messages: [],
++		systemPrompt: [],
++		agent: { state: { tools: [] } },
++		skills: [],
++		isStreaming: false,
++		isAutoThinking: false,
++		autoResolvedThinkingLevel: () => undefined,
++		isFastModeActive: () => false,
++		getContextUsage: () => undefined,
++		getAsyncJobSnapshot: () => ({ running: [] }),
++		modelRegistry: { authStorage, isUsingOAuth: () => true },
++		sessionManager: {
++			getSessionName: () => undefined,
++			getSessionId: () => SESSION_ID,
++			getEntries: () => [],
++			getUsageStatistics: () => ({
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++				totalTokens: 0,
++				orchestrationInput: 0,
++				orchestrationOutput: 0,
++				orchestrationCacheRead: 0,
++				premiumRequests: 0,
++				cost: 0,
++			}),
++		},
++	};
++}
++
++function modelBorder(component: StatusLineComponent): string {
++	return Bun.stripANSI(component.getTopBorder(200).content);
++}
++
++function makeStatusLine(authStorage: AuthStorage): StatusLineComponent {
++	const component = statusLines.track(
++		new StatusLineComponent(
++			makeSession(authStorage) as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
++			statusLineHost,
++		),
++	);
++	component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: ["model"], sessionAccent: false });
++	return component;
++}
++
++describe("account letters", () => {
++	it("number accounts in stored order, continuing past Z", () => {
++		expect([0, 1, 2, 25, 26, 27, 51, 52].map(accountLetter)).toEqual(["A", "B", "C", "Z", "AA", "AB", "AZ", "BA"]);
++	});
++});
++
++describe("resolveModelAccount", () => {
++	it("names the session's account by its stored position among two or more", async () => {
++		const authStorage = await authStorageWith("a", "b", "c");
++		try {
++			pinAccount(authStorage, "b@example.com");
++			expect(resolveModelAccount("anthropic", authStorage.oauth.accounts("anthropic", SESSION_ID))).toEqual({
++				label: "Anthropic (B)",
++				rawProvider: "anthropic-b",
++			});
++			pinAccount(authStorage, "c@example.com");
++			expect(
++				resolveModelAccount("anthropic", authStorage.oauth.accounts("anthropic", SESSION_ID))?.rawProvider,
++			).toBe("anthropic-c");
++		} finally {
++			authStorage.close();
++		}
++	});
++
++	it("adds no qualifier for one account or before the session resolved an account", async () => {
++		const single = await authStorageWith("a");
++		const pair = await authStorageWith("a", "b");
++		try {
++			pinAccount(single, "a@example.com");
++			expect(resolveModelAccount("anthropic", single.oauth.accounts("anthropic", SESSION_ID))).toBeUndefined();
++			expect(resolveModelAccount("anthropic", pair.oauth.accounts("anthropic", SESSION_ID))).toBeUndefined();
++		} finally {
++			single.close();
++			pair.close();
++		}
++	});
++});
++
++describe("account-qualified model display", () => {
++	it("labels the model segment with the session's account and follows a mid-session account change", async () => {
++		const authStorage = await authStorageWith("a", "b");
++		try {
++			const component = makeStatusLine(authStorage);
++			pinAccount(authStorage, "b@example.com");
++			expect(modelBorder(component)).toContain("Anthropic (B) > Sonnet 5.5");
++
++			// The same component re-renders for the new account instead of serving the cached label.
++			pinAccount(authStorage, "a@example.com");
++			const border = modelBorder(component);
++			expect(border).toContain("Anthropic (A) > Sonnet 5.5");
++			expect(border).not.toContain("(B)");
++		} finally {
++			authStorage.close();
++		}
++	});
++
++	it("shows the raw provider-qualified model id in the footer", async () => {
++		const authStorage = await authStorageWith("a", "b");
++		try {
++			const footer = new FooterComponent(
++				makeSession(authStorage) as unknown as ConstructorParameters<typeof FooterComponent>[0],
++				statusLineHost,
++			);
++			try {
++				pinAccount(authStorage, "b@example.com");
++				expect(Bun.stripANSI(footer.render(200).join("\n"))).toContain("anthropic-b/claude-sonnet-5-5");
++				pinAccount(authStorage, "a@example.com");
++				expect(Bun.stripANSI(footer.render(200).join("\n"))).toContain("anthropic-a/claude-sonnet-5-5");
++			} finally {
++				footer.dispose();
++			}
++		} finally {
++			authStorage.close();
++		}
++	});
++
++	it("leaves a single-account provider's model display unchanged", async () => {
++		const authStorage = await authStorageWith("a");
++		try {
++			pinAccount(authStorage, "a@example.com");
++			const border = modelBorder(makeStatusLine(authStorage));
++			expect(border).toContain("Sonnet 5.5");
++			expect(border).not.toContain("Anthropic");
++
++			const footer = new FooterComponent(
++				makeSession(authStorage) as unknown as ConstructorParameters<typeof FooterComponent>[0],
++				statusLineHost,
++			);
++			try {
++				const line = Bun.stripANSI(footer.render(200).join("\n"));
++				expect(line).toContain("claude-sonnet-5-5");
++				expect(line).not.toContain("anthropic");
++			} finally {
++				footer.dispose();
++			}
++		} finally {
++			authStorage.close();
++		}
++	});
++});
+diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
+index a0a14c0e0c..81a72430b9 100644
+--- a/packages/tui/CHANGELOG.md
++++ b/packages/tui/CHANGELOG.md
+@@ -2,6 +2,10 @@
+ 
+ ## [Unreleased]
+ 
++### Added
++
++- Added the `usage_bar` status-line segment id and `StatusLineHost.modelAccount` / `FooterHost.modelAccount`, which let a host qualify the model with the session's account (`Anthropic (B) > Sonnet 5.5`, raw `anthropic-b/claude-sonnet-5-5`).
++
+ ## [18.14.2] - 2026-10-31
+ 
+ ### Added
+diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
+index e56d2dba15..e1208f4e13 100644
+--- a/packages/tui/src/status-line/component.ts
++++ b/packages/tui/src/status-line/component.ts
+@@ -24,6 +24,7 @@ import type {
+ 	StatusAccountIdentity as OAuthAccountIdentity,
+ 	StatusLineHost,
+ 	StatusLineSession,
++	StatusModelAccount,
+ } from "./host";
+ import type { Editor } from "../components/editor";
+ import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
+@@ -429,6 +430,8 @@ class StatusLineExternalInputs {
+ 	modelId: string | undefined = undefined;
+ 	modelName: string | undefined = undefined;
+ 	modelProvider: string | undefined = undefined;
++	/** Raw-provider key of the account qualifier, so a mid-session account change repaints the model segment. */
++	modelAccountKey: string | undefined = undefined;
+ 	modelContextWindow: Model["contextWindow"] | undefined = undefined;
+ 	modelThinking: Model["thinking"] = undefined;
+ 	thinkingLevel: unknown = undefined;
+@@ -2022,6 +2025,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 		].join("\0");
+ 	}
+ 
++	/** Account qualifier of the active model's provider; undefined for a single-account provider. */
++	#modelAccount(provider: string | undefined): StatusModelAccount | undefined {
++		return provider ? this.host.modelAccount?.(this.session, provider) : undefined;
++	}
++
+ 	#getUsageContextKey(session: TSession): string {
+ 		const activeProvider = session.state.model?.provider ?? session.model?.provider;
+ 		const identity = activeProvider ? this.host.activeAccount(session, activeProvider) : undefined;
+@@ -2600,6 +2608,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 			width,
+ 			options: segmentOptions ?? {},
+ 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
++			modelAccount: this.#modelAccount(state.model?.provider),
+ 			hookStatuses: this.#sortedHookStatuses,
+ 			planMode: this.#planModeStatus,
+ 			loopMode: this.#loopModeStatus,
+@@ -2773,6 +2782,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 		target.modelId = model?.id;
+ 		target.modelName = model?.name;
+ 		target.modelProvider = model?.provider;
++		target.modelAccountKey = this.#modelAccount(model?.provider)?.rawProvider;
+ 		target.modelContextWindow = model?.contextWindow;
+ 		target.modelThinking = model?.thinking;
+ 		target.thinkingLevel = state.thinkingLevel;
+@@ -2838,6 +2848,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 			left.modelId === right.modelId &&
+ 			left.modelName === right.modelName &&
+ 			left.modelProvider === right.modelProvider &&
++			left.modelAccountKey === right.modelAccountKey &&
+ 			left.modelContextWindow === right.modelContextWindow &&
+ 			left.modelThinking === right.modelThinking &&
+ 			left.thinkingLevel === right.thinkingLevel &&
+diff --git a/packages/tui/src/status-line/footer.ts b/packages/tui/src/status-line/footer.ts
+index 80854dd48a..646bac88d7 100644
+--- a/packages/tui/src/status-line/footer.ts
++++ b/packages/tui/src/status-line/footer.ts
+@@ -5,6 +5,7 @@ import { type Component, padding, truncateToWidth, visibleWidth } from "../index
+ import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+ import { theme } from "../theme";
+ import type { FooterHost, FooterSession } from "./host";
++import { qualifiedModelId } from "./model-label";
+ import { shortenPath } from "../render/render-utils";
+ import { sanitizeStatusText } from "../chrome/shared";
+ import { formatMetric } from "../components/metric";
+@@ -38,6 +39,14 @@ export class FooterComponent implements Component {
+ 		private readonly host: FooterHost,
+ 	) {}
+ 
++	/** Raw model id, provider-qualified by the session account when the provider has several. */
++	#modelId(): string {
++		const model = this.session.state.model;
++		if (!model?.id) return "no-model";
++		const account = model.provider ? this.host.modelAccount?.(this.session, model.provider) : undefined;
++		return qualifiedModelId(model.id, account);
++	}
++
+ 	setAutoCompactEnabled(enabled: boolean): void {
+ 		this.#autoCompactEnabled = enabled;
+ 	}
+@@ -217,7 +226,7 @@ export class FooterComponent implements Component {
+ 		const tone = getContextUsageTone(level);
+ 		if (tone) contextProps.tone = tone;
+ 		seg("context", contextProps);
+-		let model = state.model?.id || "no-model";
++		let model = this.#modelId();
+ 		if (state.model?.thinking) {
+ 			const level = this.session.isAutoThinking
+ 				? (this.session.autoResolvedThinkingLevel() ?? `${theme.thinking.autoPending} auto`)
+@@ -325,7 +334,7 @@ export class FooterComponent implements Component {
+ 		let statsLeft = statsParts.join(" ");
+ 
+ 		// Add model name on the right side, plus thinking level if model supports it
+-		const modelName = state.model?.id || "no-model";
++		const modelName = this.#modelId();
+ 
+ 		// Add thinking level hint when the current model advertises supported efforts
+ 		let rightSide = modelName;
+diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
+index fbdb0b5bf2..fea060b373 100644
+--- a/packages/tui/src/status-line/host.ts
++++ b/packages/tui/src/status-line/host.ts
+@@ -12,6 +12,19 @@ export interface StatusAccountIdentity {
+ 	orgId?: string;
+ }
+ 
++/**
++ * How the active model's provider is qualified when the provider holds two or
++ * more stored OAuth accounts, so `Sonnet 5.5` reads `Anthropic (B) > Sonnet 5.5`
++ * and its raw form `anthropic-b/claude-sonnet-5-5`. Display only: the model
++ * catalog ids never change.
++ */
++export interface StatusModelAccount {
++	/** Qualified provider name shown before the model name (`Anthropic (B)`). */
++	label: string;
++	/** Qualified provider id shown before the model id in raw form (`anthropic-b`). */
++	rawProvider: string;
++}
++
+ /** Nested repository selected as the active workspace context. */
+ export interface ActiveRepoContext {
+ 	cwd: string;
+@@ -108,9 +121,16 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
+ 	 * reset is warned about once, not once per refresh or conversation.
+ 	 */
+ 	resetExpiryNotice?(session: TSession, reports: readonly UsageReport[], nowMs: number): string | undefined;
++	/**
++	 * Account qualifier for `provider` as this session uses it, or undefined when the provider
++	 * has fewer than two stored OAuth accounts or the session has not resolved one.
++	 */
++	modelAccount?(session: TSession, provider: string): StatusModelAccount | undefined;
+ 	computeCompactionBoundaries(session: TSession, contextWindow: number, model?: Model): CompactionBoundaries | null;
+ }
+ 
+ export interface FooterHost {
+ 	gitEnabled(): boolean;
++	/** Account qualifier for the active model's provider; see {@link StatusLineHost.modelAccount}. */
++	modelAccount?(session: FooterSession, provider: string): StatusModelAccount | undefined;
+ }
+diff --git a/packages/tui/src/status-line/model-label.ts b/packages/tui/src/status-line/model-label.ts
+new file mode 100644
+index 0000000000..559b1191a2
+--- /dev/null
++++ b/packages/tui/src/status-line/model-label.ts
+@@ -0,0 +1,17 @@
++import type { StatusModelAccount } from "./host";
++
++/** Separator between the account-qualified provider and the model name. */
++const MODEL_LABEL_SEPARATOR = " > ";
++
++/** `Sonnet 5.5`, or `Anthropic (B) > Sonnet 5.5` when the provider is account-qualified. */
++export function qualifiedModelName(name: string, account: StatusModelAccount | undefined): string {
++	return account ? `${account.label}${MODEL_LABEL_SEPARATOR}${name}` : name;
++}
++
++/**
++ * Raw model indicator: `claude-sonnet-5-5`, or `anthropic-b/claude-sonnet-5-5` when the
++ * provider is account-qualified. Display only; the catalog id is never rewritten.
++ */
++export function qualifiedModelId(id: string, account: StatusModelAccount | undefined): string {
++	return account ? `${account.rawProvider}/${id}` : id;
++}
+diff --git a/packages/tui/src/status-line/presets.ts b/packages/tui/src/status-line/presets.ts
+index 81ee4e36de..17800b1ae7 100644
+--- a/packages/tui/src/status-line/presets.ts
++++ b/packages/tui/src/status-line/presets.ts
+@@ -3,7 +3,20 @@ import type { PresetDef, StatusLinePreset } from "./types";
+ 
+ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
+ 	default: {
+-		leftSegments: ["pi", "vim", "model", "mode", "collab", "stream", "path", "git", "pr", "context_pct", "cost"],
++		leftSegments: [
++			"pi",
++			"vim",
++			"model",
++			"mode",
++			"collab",
++			"stream",
++			"path",
++			"git",
++			"pr",
++			"context_pct",
++			"usage_bar",
++			"cost",
++		],
+ 		rightSegments: ["session_name"],
+ 		separator: "powerline-thin",
+ 		segmentOptions: {
+diff --git a/packages/tui/src/status-line/schema.ts b/packages/tui/src/status-line/schema.ts
+index 4e810cf551..3f437eac5b 100644
+--- a/packages/tui/src/status-line/schema.ts
++++ b/packages/tui/src/status-line/schema.ts
+@@ -24,6 +24,7 @@ export const STATUS_LINE_SEGMENT_IDS = [
+ 	"cache_hit",
+ 	"session_name",
+ 	"usage",
++	"usage_bar",
+ 	"collab",
+ 	"stream",
+ 	"vim",
+diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
+index 06b42e18fc..1c4834be30 100644
+--- a/packages/tui/src/status-line/segments.ts
++++ b/packages/tui/src/status-line/segments.ts
+@@ -29,6 +29,8 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+ import { node, span } from "../native/describe";
+ import { thinkingLevelToken } from "../theme/theme-class";
+ import type { StatusLineSession } from "./host";
++import { qualifiedModelName } from "./model-label";
++import { progressFraction, renderProgressBar } from "../components/progress-bar";
+ import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
+ 
+ export type { SegmentContext } from "./types";
+@@ -283,11 +285,11 @@ const statusSegment: StatusLineSegment = {
+ 	},
+ };
+ 
+-/** Display name of the active model (`Claude ` prefix dropped). */
++/** Display name of the active model (`Claude ` prefix dropped), qualified by the session account when the provider has several. */
+ function modelDisplayName(ctx: SegmentContext): string {
+ 	const state = ctx.session.state;
+ 	const modelName = state.model?.name || state.model?.id || "no-model";
+-	return modelName.startsWith("Claude ") ? modelName.slice(7) : modelName;
++	return qualifiedModelName(modelName.startsWith("Claude ") ? modelName.slice(7) : modelName, ctx.modelAccount);
+ }
+ 
+ /**
+@@ -1294,6 +1296,80 @@ const usageSegment: StatusLineSegment = {
+ 	},
+ };
+ 
++/** Cells in the `usage_bar` progress bar. */
++const USAGE_BAR_CELLS = 5;
++
++interface UsageBarWindow {
++	/** Window tag; the 5-hour default is shown without one. */
++	tag: "5h" | "1d" | "7d" | "mo";
++	/** Tooltip name of the window. */
++	name: string;
++	/** Used share, clamped to 0-100. */
++	percent: number;
++}
++
++/**
++ * The window the `usage_bar` segment draws: the most constraining quota window
++ * of the active account of the active provider, i.e. the highest used percent
++ * among its 5 Hour, daily, 7 Day and monthly windows (`ctx.usage` is already
++ * scoped to that account and model). The 5 Hour window wins a tie, so it is the
++ * default; when the 7 Day window (or a daily/monthly one on providers without
++ * a 5 Hour window) is higher, that window is drawn instead and tagged (`7d`).
++ * Null when the provider reports none of these windows.
++ */
++function usageBarWindow(ctx: SegmentContext): UsageBarWindow | null {
++	const u = ctx.usage;
++	if (!u) return null;
++	const candidates: readonly (UsageBarWindow | null)[] = [
++		u.fiveHour ? { tag: "5h", name: "5 Hour", percent: u.fiveHour.percent } : null,
++		u.daily ? { tag: "1d", name: "Daily", percent: u.daily.percent } : null,
++		u.sevenDay ? { tag: "7d", name: "7 Day", percent: u.sevenDay.percent } : null,
++		u.monthly ? { tag: "mo", name: "Monthly", percent: u.monthly.percent } : null,
++	];
++	let binding: UsageBarWindow | null = null;
++	for (const candidate of candidates) {
++		if (!candidate || !Number.isFinite(candidate.percent)) continue;
++		const percent = Math.min(100, Math.max(0, candidate.percent));
++		if (!binding || percent > binding.percent) binding = { ...candidate, percent };
++	}
++	return binding;
++}
++
++const usageBarSegment: StatusLineSegment = {
++	id: "usage_bar",
++	render(ctx) {
++		const window = usageBarWindow(ctx);
++		if (!window) return { content: "", visible: false };
++		const color = pickUsageColor(window.percent);
++		const bar = renderProgressBar(window.percent, USAGE_BAR_CELLS, {
++			max: 100,
++			style: {
++				filled: theme.progress.filled,
++				empty: theme.progress.empty,
++				styleFilled: text => theme.fg(color, text),
++				styleEmpty: text => theme.fg("dim", text),
++			},
++		});
++		const tag = window.tag === "5h" ? "" : theme.fg("muted", ` ${window.tag}`);
++		const text = `${bar} ${theme.fg(color, `${Math.round(window.percent)}%`)}${tag}`;
++		return { content: withIcon(theme.icon.time, text), visible: true };
++	},
++	describe(ctx) {
++		const window = usageBarWindow(ctx);
++		if (!window) return null;
++		const color = pickUsageColor(window.percent);
++		const whole = Math.round(window.percent);
++		const filled = Math.round((progressFraction(window.percent, 0, 100) ?? 0) * USAGE_BAR_CELLS);
++		const spans: TspSpan[] = [
++			span(theme.progress.filled.repeat(filled), color),
++			span(theme.progress.empty.repeat(USAGE_BAR_CELLS - filled), "dim"),
++			span(` ${whole}%`, color),
++		];
++		if (window.tag !== "5h") spans.push(span(` ${window.tag}`, "muted"));
++		return { ...segView(spans, "time", toneOf(color)), title: `${window.name} window: ${whole}% used` };
++	},
++};
++
+ // ═══════════════════════════════════════════════════════════════════════════
+ // Segment Registry
+ // ═══════════════════════════════════════════════════════════════════════════
+@@ -1323,6 +1399,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
+ 	cache_hit: cacheHitSegment,
+ 	session_name: sessionNameSegment,
+ 	usage: usageSegment,
++	usage_bar: usageBarSegment,
+ 	collab: collabSegment,
+ 	stream: streamSegment,
+ 	vim: vimSegment,
+diff --git a/packages/tui/src/status-line/types.ts b/packages/tui/src/status-line/types.ts
+index 47917bfb72..2455e42702 100644
+--- a/packages/tui/src/status-line/types.ts
++++ b/packages/tui/src/status-line/types.ts
+@@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
+ import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+ import type { NativeNode, NativeUiEvent } from "../native/node";
+ import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
+-import type { ActiveRepoContext, StatusLineSession } from "./host";
++import type { ActiveRepoContext, StatusLineSession, StatusModelAccount } from "./host";
+ import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
+ 
+ export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
+@@ -91,6 +91,11 @@ export interface SegmentContext {
+ 	options: StatusLineSegmentOptions;
+ 	/** Render the model segment's thinking level as a compact leading glyph. */
+ 	compactThinkingLevel: boolean;
++	/**
++	 * Account qualifier of the active model's provider; set only when the provider holds two or
++	 * more stored OAuth accounts. The model segment then reads `<label> > <name>`.
++	 */
++	modelAccount?: StatusModelAccount | undefined;
+ 	/** Key-sorted extension/hook status values. Segment renderers sanitize before display. */
+ 	hookStatuses?: readonly string[];
+ 	planMode: {
+diff --git a/packages/tui/test/status-line-usage-bar.test.ts b/packages/tui/test/status-line-usage-bar.test.ts
+new file mode 100644
+index 0000000000..1bef8e929a
+--- /dev/null
++++ b/packages/tui/test/status-line-usage-bar.test.ts
+@@ -0,0 +1,85 @@
++import { beforeAll, describe, expect, it } from "bun:test";
++import { stripVTControlCharacters } from "node:util";
++import { describeSegment, renderSegment } from "../src/status-line/segments";
++import type { SegmentContext } from "../src/status-line/types";
++import { initTheme, theme } from "../src/theme";
++
++beforeAll(async () => {
++	await initTheme();
++});
++
++function ctxWith(usage: SegmentContext["usage"]): SegmentContext {
++	return { usage } as unknown as SegmentContext;
++}
++
++function plain(ctx: SegmentContext): string {
++	return stripVTControlCharacters(renderSegment("usage_bar", ctx).content);
++}
++
++/** The bar cells for `filled` of five, in the theme's progress glyphs. */
++function bar(filled: number): string {
++	return theme.progress.filled.repeat(filled) + theme.progress.empty.repeat(5 - filled);
++}
++
++describe("usage_bar status-line segment", () => {
++	it("draws the 5 Hour window as a bar and a percent, untagged", () => {
++		const text = plain(ctxWith({ fiveHour: { percent: 42, resetMinutes: 30 }, sevenDay: { percent: 8 } }));
++
++		expect(text).toContain(`${bar(2)} 42%`);
++		expect(text).not.toContain("7d");
++	});
++
++	it("draws the 7 Day window, tagged, when it is the more constraining one", () => {
++		const text = plain(ctxWith({ fiveHour: { percent: 24 }, sevenDay: { percent: 91 } }));
++
++		expect(text).toContain(`${bar(5)} 91%`);
++		expect(text).toContain("7d");
++		expect(text).not.toContain("24%");
++	});
++
++	it("keeps the 5 Hour window when both windows are equally used", () => {
++		const text = plain(ctxWith({ fiveHour: { percent: 60 }, sevenDay: { percent: 60 } }));
++
++		expect(text).toContain("60%");
++		expect(text).not.toContain("7d");
++	});
++
++	it("draws the only window a provider reports, tagged", () => {
++		expect(plain(ctxWith({ sevenDay: { percent: 8 } }))).toContain(`${bar(0)} 8% 7d`);
++		expect(plain(ctxWith({ monthly: { percent: 77 } }))).toContain("77% mo");
++	});
++
++	it("clamps an over-quota window to a full bar", () => {
++		expect(plain(ctxWith({ fiveHour: { percent: 140 } }))).toContain(`${bar(5)} 100%`);
++	});
++
++	it("warns from 50% and errors from 80% like the usage segment", () => {
++		expect(renderSegment("usage_bar", ctxWith({ fiveHour: { percent: 30 } })).content).toContain(
++			theme.fg("muted", "30%"),
++		);
++		expect(renderSegment("usage_bar", ctxWith({ fiveHour: { percent: 65 } })).content).toContain(
++			theme.fg("warning", "65%"),
++		);
++		expect(renderSegment("usage_bar", ctxWith({ fiveHour: { percent: 92 } })).content).toContain(
++			theme.fg("error", "92%"),
++		);
++	});
++
++	it("collapses when the provider has no usage windows", () => {
++		const hidden = { content: "", visible: false };
++
++		expect(renderSegment("usage_bar", ctxWith(null))).toEqual(hidden);
++		expect(renderSegment("usage_bar", ctxWith({ tier: "Pro" }))).toEqual(hidden);
++		expect(renderSegment("usage_bar", ctxWith({ resetCredits: { bankedCount: 2, redeemableCount: 2 } }))).toEqual(
++			hidden,
++		);
++		expect(describeSegment("usage_bar", ctxWith(null))).toBeNull();
++	});
++
++	it("describes the same window natively", () => {
++		const view = describeSegment("usage_bar", ctxWith({ fiveHour: { percent: 42 }, sevenDay: { percent: 91 } }));
++
++		expect(view?.spans.map(part => part.t).join("")).toBe(`${bar(5)} 91% 7d`);
++		expect(view?.title).toBe("7 Day window: 91% used");
++	});
++});

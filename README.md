@@ -20,6 +20,9 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0007-task-model-switch`|Change a running subagent's model mid-run: `write proc://<id>/model` for the main agent (role, tier or exact ID), and `/switch` inside the subagent view for you.|
 |`0008-background-tasks-shelf`|A `Background tasks` shelf above `Subagents` lists running backgrounded bash commands, eval cells and services, with id, command and elapsed time. `display.pinnedJobs` sets it to `collapsed`, `full` or `off`.|
 |`0009-musl-x64-modern-addon`|Adds a `linux-musl-x64-modern` Bazel target, which upstream lacks, so musl x64 has the same two addon variants as glibc.|
+|`0010-anthropic-sequential-accounts`|Anthropic accounts are used one at a time until one is blocked or spent. `retry.accountMode` is `sequential` (default) or `balanced`.|
+|`0011-status-line-usage-bar-and-account-labels`|Adds a `usage_bar` status-line segment to the default preset. The model shows its account, such as `Anthropic (B) > Sonnet 5.5`.|
+|`0012-subagent-shelf-and-viewer-fixes`|Colours the subagent counter, shows tokens on the completion line, fixes `.` in a busy subagent, and ends very long 429 waits cleanly.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
