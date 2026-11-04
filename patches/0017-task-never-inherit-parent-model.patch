@@ -18,7 +18,7 @@ index b7cf866fa1..54da8cdaf9 100644
 -Task subagents have separate prewalk controls: agent frontmatter, `task.prewalk`, and per-agent `task.agentPrewalk` overrides. See [Task agent discovery](./task-agent-discovery.md) for their precedence and target selection.
 +Task subagents never prewalk. A subagent runs on exactly one model for its whole life, so agent frontmatter `prewalk`, `task.prewalk` and per-agent `task.agentPrewalk` entries are ignored, and a subagent session never starts armed. See [Task agent discovery](./task-agent-discovery.md).
 diff --git a/docs/task-agent-discovery.md b/docs/task-agent-discovery.md
-index c489d00aaa..d0fbb24924 100644
+index c489d00aaa..be4b8ea371 100644
 --- a/docs/task-agent-discovery.md
 +++ b/docs/task-agent-discovery.md
 @@ -45,7 +45,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
@@ -35,7 +35,7 @@ index c489d00aaa..d0fbb24924 100644
  
  1. the call's approved per-call `model` (an exact selector, or for task calls a configured `@role`)
 -2. automatic role selection when `model` is omitted and a usable role is selected
-+2. automatic role selection when `model` is omitted: the native judge picks one of two or more configured role aliases, a single configured alias is chosen without the judge, and `@sonnet` is the conservative fallback
++2. automatic role selection when `model` is omitted: the native judge picks one of two or more configured role aliases, a single configured alias is chosen without the judge. There is no fallback role: if the judge cannot choose, classification fails with its reason (no native judge, the judge failed, timed out or was not confident)
  3. `task.agentModelOverrides[agentName]`
  4. the agent frontmatter's prioritized `model` list
 -5. the parent's active model, then its configured/default model fallback
@@ -54,7 +54,7 @@ index c489d00aaa..d0fbb24924 100644
  Set it with `omp config set task.routingPreferences "<text>"` or in the settings UI under Tasks.
  
 -Automatic selection applies only to ordinary task calls that carry no model of any kind (no per-call `model`, no host `model`, not the bundled seance); eval calls keep their existing routing. It takes precedence over `task.agentModelOverrides` and agent frontmatter. The judgment has a four-second timeout. If native judgment is unavailable, fails, times out, is insufficiently confident, or cannot choose among at least two usable roles, routing falls back to `@sonnet` when that role is configured and usable. If no conservative role can be used, or the session has no model registry, the existing override/frontmatter/parent resolution is preserved. Caller cancellation propagates instead of triggering a fallback. The result and progress routing note identifies the chosen role, conservative fallback, or use of existing resolution; actual model selection may still change under authentication or retry fallback.
-+Automatic selection applies to every spawn that carries no model of any kind (no per-call `model`, no host `model`, not the bundled seance), whether it comes from the task tool or from an eval `agent()`/`workpool()` call. It takes precedence over `task.agentModelOverrides` and agent frontmatter. With exactly one usable role alias there is nothing to decide, so that alias is chosen without calling the judge and the routing note says `only one configured alias`. With two or more, the judgment has a four-second timeout; if native judgment is unavailable, fails, times out or is insufficiently confident, routing falls back to `@sonnet` when that role is configured and usable, with a visible warning that names the reason. With no usable alias, or no conservative role, a `task.agentModelOverrides` entry or the agent frontmatter `model` is used with the same warning, and without either the spawn fails before the child starts. The parent's model is never used. Caller cancellation propagates instead of triggering a fallback. The result and progress routing note identifies the choice and its reason.
++Automatic selection applies to every spawn that carries no model of any kind (no per-call `model`, no host `model`, not the bundled seance), whether it comes from the task tool or from an eval `agent()`/`workpool()` call. It takes precedence over `task.agentModelOverrides` and agent frontmatter. With exactly one usable role alias there is nothing to decide, so that alias is chosen without calling the judge and the routing note says `only one configured alias`. With two or more, the judgment has a four-second timeout; classification always runs, and there is no fallback role. If native judgment is unavailable, fails, times out or is insufficiently confident, no model is chosen and the reason is reported. With no usable alias either, a `task.agentModelOverrides` entry or the agent frontmatter `model` is used (it is your own configuration) with a visible warning that names the reason, and without either the spawn fails before the child starts with that reason. The parent's model is never used. Caller cancellation propagates instead of being reported as a failed classification. The result and progress routing note identifies the choice and its reason.
 +
 +The native judge needs the `judge` role to resolve first (after its own configured fallback chain and the credentialed models) to a model whose API is a native judgment API: TypeSafe (`typesafe/jev-latest` with `TYPESAFE_API_KEY`), OpenRouter Decisions, Workers AI or OpenAI Decisions. A judge role that resolves to an ordinary chat model is not a native judge.
  
@@ -73,7 +73,7 @@ index c489d00aaa..d0fbb24924 100644
  supports the value, so same-family retry fallbacks retain the tier and cross-family fallbacks never
  inherit it. The resolved map is persisted with the child's session, even when it is empty, so a
 diff --git a/docs/tools/task.md b/docs/tools/task.md
-index 512ae0785e..579cbe8e01 100644
+index 512ae0785e..7c0e6aea3a 100644
 --- a/docs/tools/task.md
 +++ b/docs/tools/task.md
 @@ -135,14 +135,14 @@ Artifacts and side channels:
@@ -81,7 +81,7 @@ index 512ae0785e..579cbe8e01 100644
  5. Each `SpawnRun` calls `#runSpawn` → `runStructuredSubagent(...)`. Shared policy resolution reloads settings and rediscovers agents from disk, so runtime resolution can differ from the create-time description.
  6. It resolves the requested agent, enforces depth/spawn policy and `PI_BLOCKED_AGENT` self-recursion prevention, validates the effective output schema, and applies `before_subagent_spawn` routing/blocking hooks.
 -7. Model priority: an approved per-call `model` (exact selector or configured role; a conflict error for an agent with a `task.agentModelOverrides` entry) → for a call without `model`, the automatic role when the judge or its conservative fallback selects a usable one → `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. The bundled seance source-model path is unchanged. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
-+7. Model priority: an approved per-call `model` (exact selector or configured role; a conflict error for an agent with a `task.agentModelOverrides` entry) → for a call without `model`, the automatic role (the judge, the only configured alias, or the conservative fallback) → `task.agentModelOverrides` → agent frontmatter. Never the parent's model: with no usable choice the spawn fails before the child starts, or uses an override or frontmatter model with a visible warning. The bundled seance source-model path is unchanged. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
++7. Model priority: an approved per-call `model` (exact selector or configured role; a conflict error for an agent with a `task.agentModelOverrides` entry) → for a call without `model`, the automatic role (the judge, or the only configured alias; when the judge cannot choose, no model is chosen and there is no fallback role) → `task.agentModelOverrides` → agent frontmatter. Never the parent's model: with no usable choice the spawn fails before the child starts, or uses an override or frontmatter model with a visible warning. The bundled seance source-model path is unchanged. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
  8. Plan mode supplies `read`, `grep`, `glob`, `web_search`, and any configured `ast_grep`, replaces the agent's spawn/prewalk controls, and disables LSP/IRC. Eval-defined tools and isolation/apply/merge controls are rejected.
  9. If `isolated`, it requires a git repo (`getRepoRoot(...)` / `captureBaseline(...)`), maps `isolation.backend` to a backend-kind hint (`parseIsolationBackend`), and materializes the workspace via the natives PAL (`ensureIsolation` → `isoResolve`/`isoStart`), walking the candidate list when a backend is unavailable.
  10.   Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.
@@ -94,14 +94,23 @@ index 512ae0785e..579cbe8e01 100644
  15.   End-of-run lifecycle (keep-alive, in the run finalizer):
        - caller signal, user interrupt, wall-clock timeout, or soft-request-budget abort on a kept-alive agent with a reviver → only the run stops: the agent becomes `idle` and may receive a follow-up/revival;
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 04178ff714..a29af431bf 100644
+index 04178ff714..1854ed904e 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
+@@ -9,7 +9,7 @@
+ - When a provider holds two or more stored OAuth accounts, the status line names the session's account in the model: `Anthropic (B) > Sonnet 5.5`, and the footer's raw model id reads `anthropic-b/claude-sonnet-5-5`. The letter is the account's position in `omp usage accounts` order (A first) and follows an account change mid-session. Single-account providers look as before.
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+-- Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
++- Task subagents called without `model` now get a configured model role chosen by the native judge. When the judge fails, times out, is unsure or is unavailable, no model is chosen and the reason is reported; there is no fallback role. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
+ - Added the `task.routingPreferences` setting (empty by default): free-text guidance, in your own words, for which kinds of work the automatic subagent model choice should give to the cheaper model. The judge follows it ahead of its general leanings but never picks a role too weak for hard or risky work. The default routing is unchanged; empty or blank sends the judge exactly what it got before.
+ - Answer MCP form elicitation requests (`elicitation/create`) with the same dialog the `ask` tool uses. An approval with no fields, such as Executor's "may I run this action?", is one Accept/Decline question; a form is one question per field plus a final `Submit this form?`. Dismissing the dialog, choosing to chat instead, a timed-out answer, an unsupported host (no ask dialog) or any error cancels the request and never accepts it. URL mode is refused.
+ - The task tool description now lists your model roles as `@role` and tells agents to pass the role when you name a model or tier such as "haiku", instead of guessing a model version. When the agent cannot tell which model you mean, it asks with the `ask` tool.
 @@ -21,6 +21,9 @@
  
  ### Changed
  
-+- A subagent never takes the parent's model, the session model or the `default` role, and it runs on exactly one model for its whole life. Every spawn without a per-call, host or seance model, from the task tool or from eval `agent()`/`workpool()`, goes through automatic model selection. One usable role alias is chosen without the judge (`only one configured alias`); two or more go to the judge, with `@sonnet` as the conservative fallback. When selection cannot choose, a `task.agentModelOverrides` entry or the agent's own `model` is used with a visible warning (a notice, a warning line on the subagent row and a `<model-warning>` in the result); with neither, the spawn fails before the child starts and the error tells the parent agent to stop and report to you instead of changing settings.
++- A subagent never takes the parent's model, the session model or the `default` role, and it runs on exactly one model for its whole life. Every spawn without a per-call, host or seance model, from the task tool or from eval `agent()`/`workpool()`, goes through automatic model selection. One usable role alias is chosen without the judge (`only one configured alias`); two or more go to the judge, and a judge that fails, times out or is not confident chooses nothing (there is no fallback role). When selection cannot choose, a `task.agentModelOverrides` entry or the agent's own `model` is used with a visible warning (a notice, a warning line on the subagent row and a `<model-warning>` in the result); with neither, the spawn fails before the child starts and the error tells the parent agent to stop and report to you instead of changing settings.
 +- A subagent no longer falls back to the parent's model when its own model has no working credentials, and it no longer inherits the `default` or a role fallback chain. Only a chain you wrote in `retry.fallbackChains` under the exact `provider/model-id` it runs on can move it, and using it raises the same warning. A task result whose child ended on another model than it started on says so in a `<model-warning>`.
 +- `task.prewalk`, `task.agentPrewalk` and an agent's `prewalk` frontmatter no longer apply to subagents: a subagent never hands off to another model. Session-level prewalk is unchanged.
  - `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
@@ -482,7 +491,7 @@ index 084b5db879..47b6d92249 100644
   * Catalog slice covering every provider a selector's patterns name, or
   * `undefined` when a pattern is provider-less and needs the whole catalog.
 diff --git a/packages/coding-agent/src/task/auto-model.ts b/packages/coding-agent/src/task/auto-model.ts
-index 99684d3ea5..eab3e4e1aa 100644
+index 99684d3ea5..b95b56c285 100644
 --- a/packages/coding-agent/src/task/auto-model.ts
 +++ b/packages/coding-agent/src/task/auto-model.ts
 @@ -6,7 +6,7 @@ import type { Settings } from "../config/settings";
@@ -494,14 +503,14 @@ index 99684d3ea5..eab3e4e1aa 100644
  import { loadModelUsage } from "./model-usage";
  import { cfgTaskRoutingPreferences } from "./settings";
  
-@@ -35,6 +35,30 @@ export interface AutoTaskModelDecision {
+@@ -33,8 +33,28 @@ export interface AutoTaskModelOptions {
+ export interface AutoTaskModelDecision {
+ 	/** Pass this selector through the ordinary model-role resolver. */
  	role: `@${string}`;
- 	/** True when the conservative route was chosen without a confident usable judgment. */
- 	fallback: boolean;
+-	/** True when the conservative route was chosen without a confident usable judgment. */
+-	fallback: boolean;
 +	/** True when the role is the only configured alias, so there was nothing to decide and the judge did not run. */
 +	onlyAlias?: boolean;
-+	/** Why the conservative route was used, in plain words. Set whenever {@link fallback} is true. */
-+	failure?: string;
 +}
 +
 +/** No model was chosen. `failure` says why in plain words. */
@@ -525,14 +534,16 @@ index 99684d3ea5..eab3e4e1aa 100644
  }
  
  const QUESTIONS = judgeQuestions(questionFile);
-@@ -77,26 +101,41 @@ function usableAnswer(answer: ChoiceAnswer<string>, roles: readonly string[]): b
+@@ -77,26 +97,39 @@ function usableAnswer(answer: ChoiceAnswer<string>, roles: readonly string[]): b
  
  /**
   * Classify an omitted-model task. The caller must enforce explicit-model precedence.
 - * Undefined preserves normal routing when the chosen role is not configured and usable.
+- * Caller cancellation propagates; timeouts and judgment failures use the conservative role.
 + * One usable alias is chosen without the judge. A failure says why no model was chosen; the caller
-+ * decides what to do, and must never fall back to the parent model.
-  * Caller cancellation propagates; timeouts and judgment failures use the conservative role.
++ * decides what to do, and must never fall back to the parent model or to any model omp picks by itself.
++ * Every judge failure (no native judge, an error, a timeout, an unusable or unconfident answer) is a
++ * failure with its reason; there is no fallback role. Caller cancellation propagates.
   */
 -export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Promise<AutoTaskModelDecision | undefined> {
 +export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Promise<AutoTaskModelOutcome> {
@@ -559,44 +570,55 @@ index 99684d3ea5..eab3e4e1aa 100644
 +	}
 +	if (roles.size === 1) {
 +		const [only] = roles.keys();
-+		return { role: `@${only}`, fallback: false, onlyAlias: true };
++		return { role: `@${only}`, onlyAlias: true };
 +	}
-+	const fallback = (failure: string): AutoTaskModelOutcome =>
-+		roles.has("sonnet")
-+			? { role: "@sonnet", fallback: true, failure }
-+			: { failure: `${failure}, and no role alias named sonnet exists for the conservative fallback` };
++	let timeout: AbortSignal | undefined;
  	try {
 -		if (!options.task.trim() || roles.size < 2 || !hasNativeJudge(options.settings, options.registry))
 -			return fallback();
-+		if (!options.task.trim()) return fallback("the task text is empty");
++		if (!options.task.trim()) return { failure: "the task text is empty" };
 +		if (!hasNativeJudge(options.settings, options.registry)) {
-+			return fallback(`no native judge is available. ${JUDGE_HELP}`);
++			return { failure: `no native judge is available. ${JUDGE_HELP}` };
 +		}
  		const judge = resolveJudge({
  			settings: options.settings,
  			registry: options.registry,
-@@ -115,7 +154,8 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+@@ -108,14 +141,16 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+ 			costGate: options.costGate,
+ 			cache: sharedJudgmentCache(),
+ 		});
+-		const timeout = AbortSignal.timeout(AUTO_TASK_MODEL_TIMEOUT_MS);
+-		const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
++		const deadline = AbortSignal.timeout(AUTO_TASK_MODEL_TIMEOUT_MS);
++		timeout = deadline;
++		const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+ 		const state: Record<string, string> = { task: truncateTinyMessage(options.task) };
+ 		if (options.context) state.context = truncateTinyMessage(options.context);
  		if (options.agent) state.agent = truncateTinyMessage(options.agent);
  		const roleSelectors = JSON.stringify(Object.fromEntries(roles));
  		// Never truncate the candidate map: the judge must see every offered role and its full selector.
 -		if (roleSelectors.length > MAX_TINY_MESSAGE_CHARS) return fallback();
 +		if (roleSelectors.length > MAX_TINY_MESSAGE_CHARS)
-+			return fallback("the role aliases are too long for the judge to read");
++			return { failure: "the role aliases are too long for the judge to read" };
  		state.role_selectors = roleSelectors;
  		// Tiers and usage are advice, not a candidate list: leave them out rather than fail when they do not fit.
  		for (const [key, value] of [
-@@ -145,10 +185,27 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+@@ -145,10 +180,30 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
  		);
  		options.signal?.throwIfAborted();
  		const answer = answers.model;
 -		if (!usableAnswer(answer, [...roles.keys()])) return fallback();
-+		if (!usableAnswer(answer, [...roles.keys()])) return fallback("the judge gave no confident answer");
- 		return { role: `@${answer.choice}`, fallback: false };
+-		return { role: `@${answer.choice}`, fallback: false };
 -	} catch {
++		if (!usableAnswer(answer, [...roles.keys()])) return { failure: "the judge gave no confident answer" };
++		return { role: `@${answer.choice}` };
 +	} catch (error) {
  		options.signal?.throwIfAborted();
 -		return fallback();
-+		return fallback(`the judge failed (${describeError(error)})`);
++		if (timeout?.aborted) {
++			return { failure: `the judge timed out after ${AUTO_TASK_MODEL_TIMEOUT_MS / 1000} seconds` };
++		}
++		return { failure: `the judge failed (${describeError(error)})` };
  	}
  }
 +
@@ -610,8 +632,8 @@ index 99684d3ea5..eab3e4e1aa 100644
 +}
 +
 +/**
-+ * The warning shown when selection failed but an explicit non-parent model exists, or the conservative
-+ * fallback ran. `used` names what the subagent runs on instead.
++ * The warning shown when selection failed but an explicit non-parent model exists (a
++ * `task.agentModelOverrides` entry or the agent's own model). `used` names what the subagent runs on instead.
 + */
 +export function autoModelWarning(failure: string, used: string): string {
 +	return `Warning: automatic model selection failed: ${failure}. The subagent uses ${used}. ${FIX_HINT} ${STOP_AND_REPORT}`;
@@ -1148,7 +1170,7 @@ index 64b2d52302..56f0a002fb 100644
  			context.session.settings,
  			context.session.getSessionId?.() ?? undefined,
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index 835ddd0d70..cb497c3f42 100644
+index 835ddd0d70..865970ed37 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
 @@ -43,8 +43,15 @@ import type { ToolSession } from "../tools";
@@ -1180,7 +1202,7 @@ index 835ddd0d70..cb497c3f42 100644
 +	 * must pick a model at dispatch, or the spawn fails. The parent's model is never a source.
 +	 */
 +	modelOrigin: "per-call" | "host" | "seance" | "override" | "agent" | "none";
-+	/** Visible warning for the user: automatic selection failed, or a conservative fallback or explicit source stood in. */
++	/** Visible warning for the user: automatic selection failed and an explicit source stood in. */
 +	modelWarning?: string;
  	/** Whether the child gets the `yield` tool; see {@link StructuredSubagentRequest.structured}. */
  	structured: boolean;
@@ -1277,7 +1299,7 @@ index 835ddd0d70..cb497c3f42 100644
  		? await classifyAutoTaskModel({
  				settings: request.session.settings,
  				registry,
-@@ -764,18 +791,33 @@ async function applyAutoTaskModel(
+@@ -764,18 +791,27 @@ async function applyAutoTaskModel(
  				telemetry: request.session.getTelemetry?.(),
  				costGate: request.session.costGate,
  			})
@@ -1301,7 +1323,7 @@ index 835ddd0d70..cb497c3f42 100644
 +	if (autoTaskModelFailed(outcome)) return unusable(outcome.failure);
 +	const selection = resolveAgentModelSelection({ requestModel: outcome.role, settings: request.session.settings });
 +	if (selection.patterns.length === 0) return unusable(`the role ${outcome.role} does not resolve to a model`);
-+	const note = outcome.onlyAlias ? " (only one configured alias)" : outcome.fallback ? " (conservative fallback)" : "";
++	const note = outcome.onlyAlias ? " (only one configured alias)" : "";
  	return {
  		...policy,
  		modelOverride: selection.patterns,
@@ -1310,16 +1332,10 @@ index 835ddd0d70..cb497c3f42 100644
 -			? `Automatic model selection: ${decision.role} (conservative fallback).`
 -			: `Automatic model selection: ${decision.role}.`,
 +		modelRoute: `Automatic model selection: ${outcome.role}${note}.`,
-+		modelWarning: outcome.fallback
-+			? autoModelWarning(
-+					outcome.failure ?? "the judge gave no confident answer",
-+					`the conservative fallback ${outcome.role}`,
-+				)
-+			: undefined,
  	};
  }
  
-@@ -919,10 +961,11 @@ function buildExecutorOptions(
+@@ -919,10 +955,11 @@ function buildExecutorOptions(
  		modelOverride: policy.modelOverride,
  		modelRole: policy.modelRole,
  		modelRoute: policy.modelRoute,
@@ -1332,7 +1348,7 @@ index 835ddd0d70..cb497c3f42 100644
  		perCallModelGrants: policy.perCallModelGrants,
  		thinkingLevel: policy.effectiveAgent.thinkingLevel,
  		effort: request.effort,
-@@ -1028,6 +1071,7 @@ function buildFailureResult(
+@@ -1028,6 +1065,7 @@ function buildFailureResult(
  			modelOverride: policy.modelOverride,
  			modelRole: policy.modelRole,
  			resolvedModelRoute: policy.modelRoute,
@@ -1340,7 +1356,7 @@ index 835ddd0d70..cb497c3f42 100644
  			error: message,
  		};
  	};
-@@ -1134,6 +1178,7 @@ function describeSalvagedWork(result: SingleResult): string {
+@@ -1134,6 +1172,7 @@ function describeSalvagedWork(result: SingleResult): string {
  export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
  	const preflight = await resolveEffectiveSubagentPolicy(request);
  	const policy = await applySpawnHook(request, await applyAutoTaskModel(request, preflight));
@@ -2264,6 +2280,19 @@ index 5dea364947..cd71356099 100644
  		} finally {
  			await session.dispose();
  		}
+diff --git a/packages/coding-agent/test/task/auto-model.test.ts b/packages/coding-agent/test/task/auto-model.test.ts
+index 81269ab05d..3481a61d51 100644
+--- a/packages/coding-agent/test/task/auto-model.test.ts
++++ b/packages/coding-agent/test/task/auto-model.test.ts
+@@ -59,7 +59,7 @@ describe("automatic task model selection", () => {
+ 			registry,
+ 			task: "Rename a variable across three files.",
+ 		});
+-		expect(decision).toEqual({ role: "@haiku", fallback: false });
++		expect(decision).toEqual({ role: "@haiku" });
+ 		expect(JSON.parse(judge.shown().role_tiers)).toEqual({ haiku: "$", sonnet: "$$$$" });
+ 		expect(JSON.parse(judge.shown().role_usage_percent)).toEqual({ haiku: 10, sonnet: 100 });
+ 	});
 diff --git a/packages/coding-agent/test/task/autoload-skills.test.ts b/packages/coding-agent/test/task/autoload-skills.test.ts
 index d636076c78..357e7d610c 100644
 --- a/packages/coding-agent/test/task/autoload-skills.test.ts
@@ -2929,7 +2958,7 @@ index 1dfb407881..e6050ef783 100644
  		getSessionSpawns: () => "*",
  		getAgentId: () => null,
 diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
-index e384fb1413..5bc74829d9 100644
+index e384fb1413..16c1c63ae4 100644
 --- a/packages/coding-agent/test/task/structured-subagent.test.ts
 +++ b/packages/coding-agent/test/task/structured-subagent.test.ts
 @@ -56,6 +56,8 @@ const AGENT: AgentDefinition = {
@@ -2950,7 +2979,21 @@ index e384fb1413..5bc74829d9 100644
  		});
  		expect(events).toEqual([
  			{
-@@ -1541,8 +1543,7 @@ describe("per-call model preflight", () => {
+@@ -655,12 +657,7 @@ describe("structured subagent primitive", () => {
+ 	});
+ 
+ 	it.each([
+-		["a judged role", { role: "@sonnet", fallback: false }, "Automatic model selection: @sonnet."],
+-		[
+-			"the conservative role",
+-			{ role: "@sonnet", fallback: true },
+-			"Automatic model selection: @sonnet (conservative fallback).",
+-		],
++		["a judged role", { role: "@sonnet" }, "Automatic model selection: @sonnet."],
+ 	] as const)("routes %s only at dispatch when the call names no model", async (_name, decision, route) => {
+ 		mockDiscovery({ ...AGENT, model: ["openai/agent-own"] });
+ 		const childSession = Object.assign(session({ modelRoles: { sonnet: "anthropic/claude-sonnet-4-5" } }), {
+@@ -1541,8 +1538,7 @@ describe("per-call model preflight", () => {
  			}),
  		);
  		expect(policy.modelOverride).toEqual(["mock/target:high"]);
@@ -2960,7 +3003,7 @@ index e384fb1413..5bc74829d9 100644
  	});
  
  	it.each(["SDK overlay", "nested subagent"])("reloads removed on-disk role grants through an %s", async kind => {
-@@ -1794,7 +1795,7 @@ describe("per-call model preflight", () => {
+@@ -1794,7 +1790,7 @@ describe("per-call model preflight", () => {
  		);
  		expect(policy.modelOverride).toEqual(["mock/agent-own"]);
  		expect(policy.perCallModelGrants).toBeUndefined();
@@ -3074,10 +3117,10 @@ index a68684650f..061f43e90f 100644
  				"task.file": true,
 diff --git a/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts b/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
 new file mode 100644
-index 0000000000..1869282747
+index 0000000000..28cf576c3f
 --- /dev/null
 +++ b/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,377 @@
 +import { afterEach, describe, expect, it, vi } from "bun:test";
 +import * as fs from "node:fs/promises";
 +import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -3173,16 +3216,30 @@ index 0000000000..1869282747
 +	};
 +}
 +
-+/** Stand in for the native judge: `answer` is the judge's reply, a thrown error is its failure. */
-+function stubJudge(answer: { choice: string; confident: boolean } | Error): { calls: () => number } {
++/**
++ * Stand in for the native judge: `answer` is the judge's reply, a thrown error is its failure, and
++ * `"timeout"` is a judge that outlives its deadline (the deadline signal is already aborted, so no real timer runs).
++ */
++function stubJudge(answer: { choice: string; confident: boolean } | Error | "timeout"): { calls: () => number } {
 +	let calls = 0;
++	if (answer === "timeout") {
++		vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
++			const controller = new AbortController();
++			controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
++			return controller.signal;
++		});
++	}
 +	vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(true);
 +	vi.spyOn(judgmentModule, "resolveJudge").mockReturnValue({
 +		withCandidate: async (run: (candidate: unknown, kind: string) => Promise<unknown>) =>
 +			run(
 +				{
-+					judge: async () => {
++					judge: async (_input: unknown, options?: { signal?: AbortSignal }) => {
 +						calls += 1;
++						if (answer === "timeout") {
++							options?.signal?.throwIfAborted();
++							throw new Error("the judge was expected to outlive its deadline");
++						}
 +						if (answer instanceof Error) throw answer;
 +						const other = answer.choice === "haiku" ? "sonnet" : "haiku";
 +						const high = answer.confident ? 0.95 : 0.4;
@@ -3315,7 +3372,7 @@ index 0000000000..1869282747
 +		expect(failure).toBeInstanceOf(StructuredSubagentError);
 +		const message = (failure as StructuredSubagentError).message;
 +		expect(message).toContain("no native judge is available");
-+		expect(message).toContain("no role alias named sonnet exists for the conservative fallback");
++		expect(message).not.toMatch(/sonnet|conservative|fallback/i);
 +		expect(message).toContain("The parent agent must stop and report this to the user.");
 +		expect(dispatched).toHaveLength(0);
 +	});
@@ -3359,19 +3416,49 @@ index 0000000000..1869282747
 +
 +	it.each([
 +		["the judge fails", new Error("boom"), "the judge failed (boom)"],
++		["the judge times out", "timeout", "the judge timed out after 4 seconds"],
 +		["the judge is unsure", { choice: "haiku", confident: false }, "the judge gave no confident answer"],
-+	] as const)("uses the conservative @sonnet fallback and warns when %s", async (_name, answer, reason) => {
-+		const { childSession, dispatched, notices } = harness({
-+			modelRoles: { haiku: "mock/m1", sonnet: "mock/m3" },
-+		});
++	] as const)(
++		"fails the spawn with the reason, and starts no child, when %s even though a @sonnet alias exists",
++		async (_name, answer, reason) => {
++			const { childSession, dispatched, notices } = harness({
++				modelRoles: { haiku: "mock/m1", sonnet: "mock/m3" },
++			});
++			const judge = stubJudge(answer);
++
++			const failure = await runStructuredSubagent(request(childSession)).catch(error => error);
++
++			// Classification ran, and nothing stood in for it.
++			expect(judge.calls()).toBe(1);
++			expect(failure).toBeInstanceOf(StructuredSubagentError);
++			expect((failure as StructuredSubagentError).kind).toBe("preflight");
++			const message = (failure as StructuredSubagentError).message;
++			expect(message).toBe(autoModelModule.autoModelFailureMessage(reason));
++			expect(message).toContain(`Automatic model selection failed: ${reason}.`);
++			expect(message).not.toMatch(/conservative|fallback/i);
++			expect(message).toContain("The parent agent must stop and report this to the user.");
++			expect(dispatched).toHaveLength(0);
++			expect(notices).toHaveLength(0);
++		},
++	);
++
++	it.each([
++		["the judge fails", new Error("boom"), "the judge failed (boom)"],
++		["the judge times out", "timeout", "the judge timed out after 4 seconds"],
++		["the judge is unsure", { choice: "haiku", confident: false }, "the judge gave no confident answer"],
++	] as const)("runs the agent's own model with the reason as a warning when %s", async (_name, answer, reason) => {
++		const { childSession, dispatched, notices } = harness(
++			{ modelRoles: { haiku: "mock/m1", sonnet: "mock/m3" } },
++			{ ...BARE_AGENT, model: ["mock/m2"] },
++		);
 +		stubJudge(answer);
 +
 +		const settled = await runStructuredSubagent(request(childSession, { retainArtifacts: true }));
 +
-+		expect(dispatched[0]?.modelOverride).toEqual(["mock/m3"]);
-+		expect(dispatched[0]?.modelRoute).toBe("Automatic model selection: @sonnet (conservative fallback).");
-+		expect(dispatched[0]?.modelWarning).toContain(`Warning: automatic model selection failed: ${reason}`);
-+		expect(dispatched[0]?.modelWarning).toContain("The subagent uses the conservative fallback @sonnet.");
++		expect(dispatched[0]?.modelOverride).toEqual(["mock/m2"]);
++		expect(dispatched[0]?.modelWarning).toBe(
++			autoModelModule.autoModelWarning(reason, 'the model of the "worker" agent definition (mock/m2)'),
++		);
 +		expect(notices).toHaveLength(1);
 +		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 +	});

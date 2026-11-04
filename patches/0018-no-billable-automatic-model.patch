@@ -1,18 +1,18 @@
 diff --git a/docs/task-agent-discovery.md b/docs/task-agent-discovery.md
-index d0fbb24924..f9b9f21c00 100644
+index be4b8ea371..248c0cdb78 100644
 --- a/docs/task-agent-discovery.md
 +++ b/docs/task-agent-discovery.md
 @@ -296,6 +296,8 @@ Automatic selection applies to every spawn that carries no model of any kind (no
  
  The native judge needs the `judge` role to resolve first (after its own configured fallback chain and the credentialed models) to a model whose API is a native judgment API: TypeSafe (`typesafe/jev-latest` with `TYPESAFE_API_KEY`), OpenRouter Decisions, Workers AI or OpenAI Decisions. A judge role that resolves to an ordinary chat model is not a native judge.
  
-+Automatic selection never picks a model that bills real money. Having an alias in `modelRoles` does not name it for this call, so an alias whose model bills real money is not offered to the judge and cannot be the `@sonnet` fallback; the warning on the result, the subagent row and the notice name each alias that was left out. When every alias is left out the spawn fails before the child starts and says that each one bills real money. A model bills real money unless its provider is signed in with OAuth, the catalogue lists it as free or included, it runs on this machine, or the provider's usage endpoint reports plan limit windows for your account; what that evidence cannot decide counts as billable. A model named for the call (a per-call `@role`, a `task.agentModelOverrides` entry, an agent's `model`) is always allowed. The same rule keeps billable models out of the judge's role chain and its session-model fallback, and out of the built-in defaults of helper roles (`smol`, `tiny`, `memory`, `widget`); a role you configured yourself keeps its model.
++Automatic selection never picks a model that bills real money. Having an alias in `modelRoles` does not name it for this call, so an alias whose model bills real money is not offered to the judge; the warning on the result, the subagent row and the notice name each alias that was left out. When every alias is left out the spawn fails before the child starts and says that each one bills real money. A model bills real money unless its provider is signed in with OAuth, the catalogue lists it as free or included, it runs on this machine, or the provider's usage endpoint reports plan limit windows for your account; what that evidence cannot decide counts as billable. A model named for the call (a per-call `@role`, a `task.agentModelOverrides` entry, an agent's `model`) is always allowed. The same rule keeps billable models out of the judge's role chain and its session-model fallback, and out of the built-in defaults of helper roles (`smol`, `tiny`, `memory`, `widget`); a role you configured yourself keeps its model.
 +
  After automatic selection, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block any spawn, or replace model patterns when no host or per-call model was supplied; a replacement and its routing note are reported. An explicit host or per-call selector cannot be replaced by the hook. A subagent has no runtime fallback model: the only chain it keeps is one you wrote in `retry.fallbackChains` under the exact `provider/model-id` it runs on. Using that chain raises the same visible warning, and a result whose child ended on another model than it started on says so in its `<model-warning>`. Task results report the requested and actual model.
  
  The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions. These agent overrides apply when automatic selection does not pick a usable role.
 diff --git a/docs/tools/task.md b/docs/tools/task.md
-index 579cbe8e01..ce9e43e4fc 100644
+index 7c0e6aea3a..76c98d7ea9 100644
 --- a/docs/tools/task.md
 +++ b/docs/tools/task.md
 @@ -70,6 +70,8 @@ When per-call selection is enabled for a surface, the task/eval tool description
@@ -25,14 +25,14 @@ index 579cbe8e01..ce9e43e4fc 100644
  
  `write proc://<agentId>/model` with a configured role (`@haiku`), a price tier (`$` to `$$$$`, resolved exactly as for a task `model`) or one exact `provider/model-id[:level]` as `content` switches a running subagent that the caller spawned (the task description tells the agent to use it when the user names a model or tier for a running agent, for example "use haiku for RefactorWork"). The id is the agent's name or the id of the job running it. The call never aborts or restarts the agent: it finishes the request in flight on its current model, and its next model request uses the new one, with its context, tools and turn intact. The change is session-only (a `temporary` model change in the agent's transcript, plus a notice in its view when a queued switch lands) and is not persisted to settings or roles. An agent between requests switches immediately; a switch queued while a request is in flight is applied at the next request boundary and the newest one wins. A per-call worker's saved identity follows the switch, so a revival restores it on the model it last ran on.
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index a29af431bf..5227aa0810 100644
+index 1854ed904e..186f7fa6d8 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -26,6 +26,8 @@
  - `task.prewalk`, `task.agentPrewalk` and an agent's `prewalk` frontmatter no longer apply to subagents: a subagent never hands off to another model. Session-level prewalk is unchanged.
  - `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
  
-+- Automatic model selection never picks a model that bills real money. That covers the subagent classifier and its `@sonnet` fallback, the price tiers `$` to `$$$$`, the judge (its role chain and the session-model fallback) and the helper roles (titles, memory, widgets, commit messages, skill descriptions, the vision fallback). A model counts as free of real money when its provider is signed in with OAuth, the catalogue lists it as free or included, it runs on this machine, or the provider's own usage endpoint reports plan limit windows for your account (opencode-go and other flat-rate plans on an API key). Anything the evidence cannot decide is billable. A billable alias is left out with a visible note that names it, and when every alias is left out the spawn fails with a message that says so. A model you name yourself (a per-call `@role`, `task.agentModelOverrides`, an agent's `model`, or a role you configured for that helper) is still used.
++- Automatic model selection never picks a model that bills real money. That covers the subagent classifier, the price tiers `$` to `$$$$`, the judge (its role chain and the session-model fallback) and the helper roles (titles, memory, widgets, commit messages, skill descriptions, the vision fallback). A model counts as free of real money when its provider is signed in with OAuth, the catalogue lists it as free or included, it runs on this machine, or the provider's own usage endpoint reports plan limit windows for your account (opencode-go and other flat-rate plans on an API key). Anything the evidence cannot decide is billable. A billable alias is left out with a visible note that names it, and when every alias is left out the spawn fails with a message that says so. A model you name yourself (a per-call `@role`, `task.agentModelOverrides`, an agent's `model`, or a role you configured for that helper) is still used.
 +
  ### Fixed
  
@@ -243,7 +243,7 @@ index d1dfa97f32..2394046e18 100644
  	}
  
 diff --git a/packages/coding-agent/src/task/auto-model.ts b/packages/coding-agent/src/task/auto-model.ts
-index eab3e4e1aa..ae62595db0 100644
+index b95b56c285..b31847bc40 100644
 --- a/packages/coding-agent/src/task/auto-model.ts
 +++ b/packages/coding-agent/src/task/auto-model.ts
 @@ -6,7 +6,13 @@ import type { Settings } from "../config/settings";
@@ -261,10 +261,10 @@ index eab3e4e1aa..ae62595db0 100644
  import { loadModelUsage } from "./model-usage";
  import { cfgTaskRoutingPreferences } from "./settings";
  
-@@ -39,12 +45,16 @@ export interface AutoTaskModelDecision {
+@@ -35,12 +41,16 @@ export interface AutoTaskModelDecision {
+ 	role: `@${string}`;
+ 	/** True when the role is the only configured alias, so there was nothing to decide and the judge did not run. */
  	onlyAlias?: boolean;
- 	/** Why the conservative route was used, in plain words. Set whenever {@link fallback} is true. */
- 	failure?: string;
 +	/** Billable role aliases left out of the choice. They are usable only when a call names them. */
 +	excluded?: BillableExclusion[];
  }
@@ -278,7 +278,7 @@ index eab3e4e1aa..ae62595db0 100644
  }
  
  export type AutoTaskModelOutcome = AutoTaskModelDecision | AutoTaskModelFailure;
-@@ -62,22 +72,32 @@ function describeError(error: unknown): string {
+@@ -58,22 +68,32 @@ function describeError(error: unknown): string {
  }
  
  const QUESTIONS = judgeQuestions(questionFile);
@@ -314,7 +314,7 @@ index eab3e4e1aa..ae62595db0 100644
  }
  
  function usableAnswer(answer: ChoiceAnswer<string>, roles: readonly string[]): boolean {
-@@ -110,14 +130,24 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+@@ -107,14 +127,24 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
  	let roles: Map<string, string>;
  	let tiers: Map<string, string>;
  	let usage: Map<string, number>;
@@ -340,37 +340,25 @@ index eab3e4e1aa..ae62595db0 100644
  		const configured = configuredAliasNames(options.settings).length;
  		return {
  			failure: `no usable role alias exists (${configured} configured, 0 usable)`,
-@@ -125,12 +155,17 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+@@ -122,7 +152,7 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
  	}
  	if (roles.size === 1) {
  		const [only] = roles.keys();
--		return { role: `@${only}`, fallback: false, onlyAlias: true };
-+		return { role: `@${only}`, fallback: false, onlyAlias: true, ...left };
+-		return { role: `@${only}`, onlyAlias: true };
++		return { role: `@${only}`, onlyAlias: true, ...left };
  	}
- 	const fallback = (failure: string): AutoTaskModelOutcome =>
- 		roles.has("sonnet")
--			? { role: "@sonnet", fallback: true, failure }
--			: { failure: `${failure}, and no role alias named sonnet exists for the conservative fallback` };
-+			? { role: "@sonnet", fallback: true, failure, ...left }
-+			: excluded.some(entry => entry.name === "@sonnet")
-+				? {
-+						failure: `${failure}, and @sonnet bills real money, so it cannot be the conservative fallback (${describeExcluded(excluded.filter(entry => entry.name === "@sonnet"))})`,
-+						billable: true,
-+					}
-+				: { failure: `${failure}, and no role alias named sonnet exists for the conservative fallback` };
+ 	let timeout: AbortSignal | undefined;
  	try {
- 		if (!options.task.trim()) return fallback("the task text is empty");
- 		if (!hasNativeJudge(options.settings, options.registry)) {
-@@ -186,7 +221,7 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+@@ -181,7 +211,7 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
  		options.signal?.throwIfAborted();
  		const answer = answers.model;
- 		if (!usableAnswer(answer, [...roles.keys()])) return fallback("the judge gave no confident answer");
--		return { role: `@${answer.choice}`, fallback: false };
-+		return { role: `@${answer.choice}`, fallback: false, ...left };
+ 		if (!usableAnswer(answer, [...roles.keys()])) return { failure: "the judge gave no confident answer" };
+-		return { role: `@${answer.choice}` };
++		return { role: `@${answer.choice}`, ...left };
  	} catch (error) {
  		options.signal?.throwIfAborted();
- 		return fallback(`the judge failed (${describeError(error)})`);
-@@ -196,16 +231,18 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+ 		if (timeout?.aborted) {
+@@ -194,16 +224,18 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
  const STOP_AND_REPORT =
  	"The parent agent must stop and report this to the user. The parent agent must not change settings and must not choose a model.";
  const FIX_HINT = "To fix this, the user must add at least two role aliases to modelRoles, or fix the judge.";
@@ -385,8 +373,8 @@ index eab3e4e1aa..ae62595db0 100644
  }
  
  /**
-  * The warning shown when selection failed but an explicit non-parent model exists, or the conservative
-  * fallback ran. `used` names what the subagent runs on instead.
+  * The warning shown when selection failed but an explicit non-parent model exists (a
+  * `task.agentModelOverrides` entry or the agent's own model). `used` names what the subagent runs on instead.
   */
 -export function autoModelWarning(failure: string, used: string): string {
 -	return `Warning: automatic model selection failed: ${failure}. The subagent uses ${used}. ${FIX_HINT} ${STOP_AND_REPORT}`;
@@ -666,7 +654,7 @@ index d0181814b7..07376cf159 100644
  
  /**
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index cb497c3f42..f6d29daaa5 100644
+index 865970ed37..3626bb2930 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
 @@ -45,12 +45,14 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -720,7 +708,7 @@ index cb497c3f42..f6d29daaa5 100644
  	return resolveCallerRoleSelector(request, `@${picked.role}`);
  }
  
-@@ -792,32 +799,37 @@ async function applyAutoTaskModel(
+@@ -792,18 +799,18 @@ async function applyAutoTaskModel(
  				costGate: request.session.costGate,
  			})
  		: { failure: "the session has no model registry" };
@@ -742,29 +730,13 @@ index cb497c3f42..f6d29daaa5 100644
 +	if (autoTaskModelFailed(outcome)) return unusable(outcome.failure, outcome.billable === true);
  	const selection = resolveAgentModelSelection({ requestModel: outcome.role, settings: request.session.settings });
  	if (selection.patterns.length === 0) return unusable(`the role ${outcome.role} does not resolve to a model`);
- 	const note = outcome.onlyAlias ? " (only one configured alias)" : outcome.fallback ? " (conservative fallback)" : "";
--	return {
--		...policy,
--		modelOverride: selection.patterns,
--		modelRole: selection.role,
--		modelRoute: `Automatic model selection: ${outcome.role}${note}.`,
--		modelWarning: outcome.fallback
-+	// Billable aliases the choice skipped are named in the warning, so leaving them out is never silent.
-+	const warnings = [
-+		outcome.fallback
- 			? autoModelWarning(
- 					outcome.failure ?? "the judge gave no confident answer",
- 					`the conservative fallback ${outcome.role}`,
- 				)
- 			: undefined,
-+		outcome.excluded ? billableExclusionNote(outcome.excluded) : undefined,
-+	].filter((warning): warning is string => warning !== undefined);
-+	return {
-+		...policy,
-+		modelOverride: selection.patterns,
-+		modelRole: selection.role,
-+		modelRoute: `Automatic model selection: ${outcome.role}${note}.`,
-+		modelWarning: warnings.length > 0 ? warnings.join(" ") : undefined,
+ 	const note = outcome.onlyAlias ? " (only one configured alias)" : "";
+@@ -812,6 +819,8 @@ async function applyAutoTaskModel(
+ 		modelOverride: selection.patterns,
+ 		modelRole: selection.role,
+ 		modelRoute: `Automatic model selection: ${outcome.role}${note}.`,
++		// Billable aliases the choice skipped are named in the warning, so leaving them out is never silent.
++		modelWarning: outcome.excluded ? billableExclusionNote(outcome.excluded) : undefined,
  	};
  }
  
@@ -974,7 +946,7 @@ index fb3854eacf..1be520024c 100644
  	}
  
 diff --git a/packages/coding-agent/test/task/auto-model.test.ts b/packages/coding-agent/test/task/auto-model.test.ts
-index 81269ab05d..2226e2e150 100644
+index 3481a61d51..801f98c5b0 100644
 --- a/packages/coding-agent/test/task/auto-model.test.ts
 +++ b/packages/coding-agent/test/task/auto-model.test.ts
 @@ -1,17 +1,18 @@
@@ -1009,10 +981,10 @@ index 81269ab05d..2226e2e150 100644
  		expect(JSON.parse(judge.shown().role_tiers)).toEqual({ sonnet: "$$$$" });
 diff --git a/packages/coding-agent/test/task/no-billable-automatic-selection.test.ts b/packages/coding-agent/test/task/no-billable-automatic-selection.test.ts
 new file mode 100644
-index 0000000000..43ffa392bd
+index 0000000000..5ead91c804
 --- /dev/null
 +++ b/packages/coding-agent/test/task/no-billable-automatic-selection.test.ts
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,487 @@
 +import { afterEach, describe, expect, it, vi } from "bun:test";
 +import * as fs from "node:fs/promises";
 +import type { Api, Model } from "@oh-my-pi/pi-ai";
@@ -1045,11 +1017,11 @@ index 0000000000..43ffa392bd
 +
 +/**
 + * Automatic model selection never picks a model that bills real money. "Automatic" is any model omp chose
-+ * and the user or caller did not name for this call: the classifier's aliases and its @sonnet fallback,
++ * and the user or caller did not name for this call: the classifier's aliases,
 + * price tiers, the judge, helper roles and their defaults. A model named for the call is always allowed.
 + *
 + * The failure list these tests are written against:
-+ * - a billable alias still reaches the classifier (or its @sonnet fallback)
++ * - a billable alias still reaches the classifier
 + * - a price tier still resolves to a billable model
 + * - the judge resolves to a billable model (its role chain, its session fallback)
 + * - a helper-role default (smol, tiny) resolves to a billable model
@@ -1217,7 +1189,7 @@ index 0000000000..43ffa392bd
 +		});
 +
 +		expect(Object.keys(JSON.parse(judge.shown().role_selectors))).toEqual(["fast", "cheap"]);
-+		expect(decision).toMatchObject({ role: "@fast", fallback: false });
++		expect(decision).toMatchObject({ role: "@fast" });
 +		expect(decision.role === undefined ? undefined : decision.excluded).toEqual([
 +			{
 +				name: "@dear",
@@ -1236,7 +1208,7 @@ index 0000000000..43ffa392bd
 +		});
 +
 +		expect(judge.ran()).toBe(0);
-+		expect(decision).toMatchObject({ role: "@cheap", fallback: false, onlyAlias: true });
++		expect(decision).toMatchObject({ role: "@cheap", onlyAlias: true });
 +		expect(decision.role === undefined ? undefined : decision.excluded?.map(entry => entry.name)).toEqual(["@dear"]);
 +	});
 +
@@ -1264,7 +1236,7 @@ index 0000000000..43ffa392bd
 +		expect(judge.ran()).toBe(0);
 +	});
 +
-+	it("does not use a billable @sonnet as the conservative fallback", async () => {
++	it("fails with the judge's reason, and offers no fallback role, when the judge cannot choose among the aliases left", async () => {
 +		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
 +		vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(false);
 +		const outcome = await classifyAutoTaskModel({
@@ -1275,10 +1247,8 @@ index 0000000000..43ffa392bd
 +			task: "Plan a migration.",
 +		});
 +
-+		expect(outcome).toMatchObject({ billable: true });
-+		expect(failureOf(outcome)).toContain(
-+			"and @sonnet bills real money, so it cannot be the conservative fallback (@sonnet (payg/payg-pro:",
-+		);
++		expect(failureOf(outcome)).toStartWith("no native judge is available.");
++		expect(failureOf(outcome)).not.toMatch(/sonnet|conservative|fallback/i);
 +	});
 +});
 +
@@ -1503,7 +1473,7 @@ index 0000000000..43ffa392bd
 +	});
 +});
 diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
-index 5bc74829d9..15741d83c9 100644
+index 16c1c63ae4..bbe087ed39 100644
 --- a/packages/coding-agent/test/task/structured-subagent.test.ts
 +++ b/packages/coding-agent/test/task/structured-subagent.test.ts
 @@ -46,6 +46,7 @@ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
@@ -1514,7 +1484,7 @@ index 5bc74829d9..15741d83c9 100644
  
  import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
  import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
-@@ -1700,11 +1701,7 @@ describe("per-call model preflight", () => {
+@@ -1695,11 +1696,7 @@ describe("per-call model preflight", () => {
  				}),
  				{
  					getActiveModelString: () => "mock/parent",
@@ -1541,7 +1511,7 @@ index 04ed7c1580..d7d3c6a2dc 100644
  	// `other` is deliberately not a configured role: the operator has not granted it.
  	const settings = Settings.isolated({
 diff --git a/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts b/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
-index 1869282747..b2e3f6720a 100644
+index 28cf576c3f..73fdc025a3 100644
 --- a/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
 +++ b/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
 @@ -1,7 +1,7 @@
