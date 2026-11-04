@@ -31,6 +31,25 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
 
+## Download the latest release
+
+One script downloads the latest release, checks the binary against `SHA256SUMS.txt` and installs it as
+`~/.local/bin/omp`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kierandrewett/omp/main/scripts/get-omp.sh | bash
+```
+
+It picks `omp-linux-x64` or `omp-linux-arm64` for your machine.
+
+* Set `OMP_VERSION=v18.14.2-fork.7` to pin a release.
+* Set `OMP_INSTALL_PATH` to install somewhere else.
+* On Alpine (musl) the script stops and points you at the apk, because the raw binary is glibc.
+
+Fedora, Debian and Arch have an rpm, a deb and a `pkg.tar.zst` on the
+[releases page](https://github.com/kierandrewett/omp/releases/latest). After that, `omp update` reads the same
+releases and checks the same `SHA256SUMS.txt`.
+
 ## Use
 
 You need `git`, `bun`, `just`, `cargo` and `python3`.
