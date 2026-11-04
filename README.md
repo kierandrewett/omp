@@ -33,22 +33,31 @@ Upstream gates the per-call `model` field behind `task.perCallModel`, and the de
 
 ## Download the latest release
 
-One script downloads the latest release, checks the binary against `SHA256SUMS.txt` and installs it as
-`~/.local/bin/omp`:
+One script downloads the latest release, checks it against `SHA256SUMS.txt` and installs it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kierandrewett/omp/main/scripts/get-omp.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kierandrewett/omp/main/scripts/install.sh | bash
 ```
 
-It picks `omp-linux-x64` or `omp-linux-arm64` for your machine.
+It reads `/etc/os-release` and installs the package your distro uses, for your architecture (x86_64 or arm64):
+
+|Distro|Installs|
+|---|---|
+|Fedora, RHEL family|the `.rpm`, with `dnf`|
+|Debian, Ubuntu family|the `.deb`, with `apt-get`|
+|Arch family|the `.pkg.tar.zst`, with `pacman -U`|
+|Alpine|the `.apk`, with `apk add`|
+|Anything else, or no root and no `sudo`|the raw glibc binary in `~/.local/bin/omp`|
+
+Package installs use `sudo` when you are not root.
 
 * Set `OMP_VERSION=v18.14.2-fork.7` to pin a release.
-* Set `OMP_INSTALL_PATH` to install somewhere else.
-* On Alpine (musl) the script stops and points you at the apk, because the raw binary is glibc.
+* Set `OMP_METHOD=binary` to skip the package and install the raw binary.
+* Set `OMP_INSTALL_PATH` to choose where the raw binary goes. It implies `OMP_METHOD=binary`.
 
-Fedora, Debian and Arch have an rpm, a deb and a `pkg.tar.zst` on the
-[releases page](https://github.com/kierandrewett/omp/releases/latest). After that, `omp update` reads the same
-releases and checks the same `SHA256SUMS.txt`.
+A musl system that is not Alpine has no package, and the script stops. After an install, `omp update` reads the same
+releases and checks the same `SHA256SUMS.txt`. `just install` still installs a local build, through
+`scripts/install-local.sh`.
 
 ## Use
 

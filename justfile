@@ -21,7 +21,7 @@ build:
 
 # Install dist/omp-linux-<arch> as ~/.local/bin/omp.
 install:
-    scripts/install.sh
+    scripts/install-local.sh
 
 # Install the binary into build/prefix, a folder laid out like an installed system (builds the binary if dist/ has none).
 prefix:
