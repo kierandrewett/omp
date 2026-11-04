@@ -1,0 +1,3606 @@
+diff --git a/docs/prewalk.md b/docs/prewalk.md
+index b7cf866fa1..54da8cdaf9 100644
+--- a/docs/prewalk.md
++++ b/docs/prewalk.md
+@@ -61,7 +61,7 @@ Calls to other tools do not trigger the handoff. A read-only `xd://` device requ
+ 
+ The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model and effective thinking configuration already match, prewalk disarms without switching.
+ 
+-The handoff is recorded in the session, so resuming it, restoring it with `--restore`, or reviving a parked subagent continues on the handoff model and thinking level instead of returning to the planning model. A retry fallback taken after the handoff supersedes it, as for any session-local model. A revived subagent does not arm its prewalk again while it is still on that target.
++The handoff is recorded in the session, so resuming it, restoring it with `--restore`, or reviving a parked subagent continues on the handoff model and thinking level instead of returning to the planning model. A retry fallback taken after the handoff supersedes it, as for any session-local model. 
+ 
+ ## Arm from an active session
+ 
+@@ -161,4 +161,4 @@ Auto-prewalk is an optimization and fails open. A missing native judge, a judge
+ 
+ ## Subagent prewalk
+ 
+-Task subagents have separate prewalk controls: agent frontmatter, `task.prewalk`, and per-agent `task.agentPrewalk` overrides. See [Task agent discovery](./task-agent-discovery.md) for their precedence and target selection.
++Task subagents never prewalk. A subagent runs on exactly one model for its whole life, so agent frontmatter `prewalk`, `task.prewalk` and per-agent `task.agentPrewalk` entries are ignored, and a subagent session never starts armed. See [Task agent discovery](./task-agent-discovery.md).
+diff --git a/docs/task-agent-discovery.md b/docs/task-agent-discovery.md
+index c489d00aaa..d0fbb24924 100644
+--- a/docs/task-agent-discovery.md
++++ b/docs/task-agent-discovery.md
+@@ -45,7 +45,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
+ - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
+ - `structured: true` keeps structured results for that agent while `task.structured` (default `false`) is off: its task spawns get the `yield` tool and resolve their output schema exactly as with `task.structured: true` (see [structured-output precedence](#model-and-structured-output-precedence)). With `task.structured` on, the field changes nothing; `false` or absent follows the setting. The caller-side `outputSchema`/`schemaMode` task parameters stay hidden while the setting is off. The decision is made from the resolved agent in `resolveEffectiveSubagentPolicy()`, so plan-mode spawns keep it, and cold revival restores `yield` from the child's persisted tool list.
+ - `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
+-- `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
++- `prewalk` is ignored for subagents. A subagent runs on exactly one model for its whole life, so no frontmatter value, `task.agentPrewalk` entry or `task.prewalk` setting arms a hand-off in a subagent session; the executor logs a warning when one asked for it. Session-level prewalk of the top-level session is unchanged.
+ - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
+ 
+ ## Role-backed custom agents
+@@ -224,12 +224,15 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
+ For ordinary task dispatch, model precedence is:
+ 
+ 1. the call's approved per-call `model` (an exact selector, or for task calls a configured `@role`)
+-2. automatic role selection when `model` is omitted and a usable role is selected
++2. automatic role selection when `model` is omitted: the native judge picks one of two or more configured role aliases, a single configured alias is chosen without the judge, and `@sonnet` is the conservative fallback
+ 3. `task.agentModelOverrides[agentName]`
+ 4. the agent frontmatter's prioritized `model` list
+-5. the parent's active model, then its configured/default model fallback
+ 
+-A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below) replaces steps 2 to 5 when it is approved, and is a conflict error for an agent with a step-3 entry rather than outranking it. Role aliases in steps 3 and 4 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override; the bundled seance agent's `model` overrides its source session's saved model as before.
++There is no fifth step. A subagent never takes the parent's model, the session's active model or the `default` role. An agent `model` of `default`, `@default` or `@task` names the session model, so it is not a source either. A subagent runs on exactly one model for its whole life.
++
++Steps 3 and 4 apply only when automatic selection could not choose, and then a visible warning says so: the result carries a `<model-warning>`, the subagent row shows it in warning colour and the interface shows a notice. When automatic selection cannot choose and neither step 3 nor step 4 names a model, the spawn fails before the child starts, with an error that says why (no usable role alias, no native judge, the judge failed or gave no confident answer) and tells the parent agent to stop, report it to you and not change settings or pick a model.
++
++A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below) replaces steps 2 to 4 when it is approved, and is a conflict error for an agent with a step-3 entry rather than outranking it. Role aliases in steps 3 and 4 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override; the bundled seance agent's `model` overrides its source session's saved model as before.
+ 
+ ### Per-call `model`
+ 
+@@ -289,9 +292,11 @@ OVERRIDE for this user: send work to haiku whenever the task says what to do and
+ 
+ Set it with `omp config set task.routingPreferences "<text>"` or in the settings UI under Tasks.
+ 
+-Automatic selection applies only to ordinary task calls that carry no model of any kind (no per-call `model`, no host `model`, not the bundled seance); eval calls keep their existing routing. It takes precedence over `task.agentModelOverrides` and agent frontmatter. The judgment has a four-second timeout. If native judgment is unavailable, fails, times out, is insufficiently confident, or cannot choose among at least two usable roles, routing falls back to `@sonnet` when that role is configured and usable. If no conservative role can be used, or the session has no model registry, the existing override/frontmatter/parent resolution is preserved. Caller cancellation propagates instead of triggering a fallback. The result and progress routing note identifies the chosen role, conservative fallback, or use of existing resolution; actual model selection may still change under authentication or retry fallback.
++Automatic selection applies to every spawn that carries no model of any kind (no per-call `model`, no host `model`, not the bundled seance), whether it comes from the task tool or from an eval `agent()`/`workpool()` call. It takes precedence over `task.agentModelOverrides` and agent frontmatter. With exactly one usable role alias there is nothing to decide, so that alias is chosen without calling the judge and the routing note says `only one configured alias`. With two or more, the judgment has a four-second timeout; if native judgment is unavailable, fails, times out or is insufficiently confident, routing falls back to `@sonnet` when that role is configured and usable, with a visible warning that names the reason. With no usable alias, or no conservative role, a `task.agentModelOverrides` entry or the agent frontmatter `model` is used with the same warning, and without either the spawn fails before the child starts. The parent's model is never used. Caller cancellation propagates instead of triggering a fallback. The result and progress routing note identifies the choice and its reason.
++
++The native judge needs the `judge` role to resolve first (after its own configured fallback chain and the credentialed models) to a model whose API is a native judgment API: TypeSafe (`typesafe/jev-latest` with `TYPESAFE_API_KEY`), OpenRouter Decisions, Workers AI or OpenAI Decisions. A judge role that resolves to an ordinary chat model is not a native judge.
+ 
+-After automatic selection, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block any spawn, or replace model patterns when no host or per-call model was supplied; a replacement and its routing note are reported. An explicit host or per-call selector cannot be replaced by the hook. Authentication and retry fallback policies remain in force; task results report the requested and actual model.
++After automatic selection, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block any spawn, or replace model patterns when no host or per-call model was supplied; a replacement and its routing note are reported. An explicit host or per-call selector cannot be replaced by the hook. A subagent has no runtime fallback model: the only chain it keeps is one you wrote in `retry.fallbackChains` under the exact `provider/model-id` it runs on. Using that chain raises the same visible warning, and a result whose child ended on another model than it started on says so in its `<model-warning>`. Task results report the requested and actual model.
+ 
+ The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions. These agent overrides apply when automatic selection does not pick a usable role.
+ 
+@@ -310,7 +315,7 @@ Service-tier precedence is independent of model selection: an exact, case-sensit
+ `task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
+ the global behavior. `inherit` snapshots the parent session's live per-family tiers (including
+ `/fast` changes) for the next spawn. The child session resolves a concrete value against the model
+-it finally settles on — after auth fallback and after patterns only the session can resolve, such as
++it finally settles on — after patterns only the session can resolve, such as
+ extension-registered models — and populates only that model's provider family when the family
+ supports the value, so same-family retry fallbacks retain the tier and cross-family fallbacks never
+ inherit it. The resolved map is persisted with the child's session, even when it is empty, so a
+diff --git a/docs/tools/task.md b/docs/tools/task.md
+index 512ae0785e..579cbe8e01 100644
+--- a/docs/tools/task.md
++++ b/docs/tools/task.md
+@@ -135,14 +135,14 @@ Artifacts and side channels:
+    - a mixed call registers the async jobs first, then runs its blocking items inline and returns once they settle — the text combines the inline summaries with the spawned-job listing, and the block keeps rendering the still-running background rows beside the inline results.
+ 5. Each `SpawnRun` calls `#runSpawn` → `runStructuredSubagent(...)`. Shared policy resolution reloads settings and rediscovers agents from disk, so runtime resolution can differ from the create-time description.
+ 6. It resolves the requested agent, enforces depth/spawn policy and `PI_BLOCKED_AGENT` self-recursion prevention, validates the effective output schema, and applies `before_subagent_spawn` routing/blocking hooks.
+-7. Model priority: an approved per-call `model` (exact selector or configured role; a conflict error for an agent with a `task.agentModelOverrides` entry) → for a call without `model`, the automatic role when the judge or its conservative fallback selects a usable one → `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. The bundled seance source-model path is unchanged. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
++7. Model priority: an approved per-call `model` (exact selector or configured role; a conflict error for an agent with a `task.agentModelOverrides` entry) → for a call without `model`, the automatic role (the judge, the only configured alias, or the conservative fallback) → `task.agentModelOverrides` → agent frontmatter. Never the parent's model: with no usable choice the spawn fails before the child starts, or uses an override or frontmatter model with a visible warning. The bundled seance source-model path is unchanged. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
+ 8. Plan mode supplies `read`, `grep`, `glob`, `web_search`, and any configured `ast_grep`, replaces the agent's spawn/prewalk controls, and disables LSP/IRC. Eval-defined tools and isolation/apply/merge controls are rejected.
+ 9. If `isolated`, it requires a git repo (`getRepoRoot(...)` / `captureBaseline(...)`), maps `isolation.backend` to a backend-kind hint (`parseIsolationBackend`), and materializes the workspace via the natives PAL (`ensureIsolation` → `isoResolve`/`isoStart`), walking the candidate list when a backend is unavailable.
+ 10.   Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.
+ 11.   Non-isolated spawns call `runSubprocess(...)` with parent cwd. Isolated spawns run in their workspace and capture root/nested patches or a branch. Successful changes apply only when `task.isolation.apply=true`; failed capture/merge paths preserve recovery artifacts. Kept-alive runs transfer workspace cleanup to the lifecycle owner rather than tearing it down at completion.
+ 12.   `runSubprocess(...)` creates a child agent session with an isolated settings snapshot (parent settings inherited — `async.enabled` and `bash.autoBackground.enabled` are **inherited** from the parent, not force-disabled; `tier.openai`/`tier.anthropic`/`tier.google` are first re-resolved through `tier.subagent`, then the child session resolves an exact `task.agentServiceTierOverrides[agentName]` entry handed over by task/eval dispatch against its final model and persists the result; `tools.approvalMode` is forced to `yolo` because headless subagents have no UI to confirm prompts against; `advisor.enabled` is forced off unless the spawn opts in per agent; per-spawn overrides may disable read summarization and clear extra workspace roots for isolated runs), child `agentId` equal to the allocated id, child internal URL router/`AgentOutputManager`, output schema, the shared `context` (batch calls) in the system prompt's `CONTEXT` section, and the IRC peer roster in the system prompt.
+       An exact `task.agentAccountPools[agentName]` entry is installed on the child's provider session right after the parent's account affinity is copied, and the child's model registry enforces it on every key lookup, so for each listed provider the child, its side requests, and subagents it spawns without their own entry authenticate only with those OAuth accounts; vibe workers and revived agents take the live entry. See [Task agent discovery](../task-agent-discovery.md#model-and-structured-output-precedence).
+-13.   Child tool availability starts from explicit `agent.tools` when provided; auto-add `task` for declared spawns below the depth limit. Explicit lists containing `task`/`bash` gain `wait` unless restricted, and the registry still requires an async/IRC/service wake source. `exec` expands to `bash` plus `eval` when a backend is enabled. Outbound messaging requires explicit `write`, while inbound steering does not. Parent-owned `todo` is stripped unless prewalk is armed.
++13.   Child tool availability starts from explicit `agent.tools` when provided; auto-add `task` for declared spawns below the depth limit. Explicit lists containing `task`/`bash` gain `wait` unless restricted, and the registry still requires an async/IRC/service wake source. `exec` expands to `bash` plus `eval` when a backend is enabled. Outbound messaging requires explicit `write`, while inbound steering does not. Parent-owned `todo` is stripped.
+ 14.   The child must finish through the hidden `yield` tool; up to 3 reminder prompts, the last forcing `toolChoice = yield` when supported. `finalizeSubprocessOutput(...)` reconciles raw text, `yield` payloads, structured schemas, and abort states.
+ 15.   End-of-run lifecycle (keep-alive, in the run finalizer):
+       - caller signal, user interrupt, wall-clock timeout, or soft-request-budget abort on a kept-alive agent with a reviver → only the run stops: the agent becomes `idle` and may receive a follow-up/revival;
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 04178ff714..a29af431bf 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -21,6 +21,9 @@
+ 
+ ### Changed
+ 
++- A subagent never takes the parent's model, the session model or the `default` role, and it runs on exactly one model for its whole life. Every spawn without a per-call, host or seance model, from the task tool or from eval `agent()`/`workpool()`, goes through automatic model selection. One usable role alias is chosen without the judge (`only one configured alias`); two or more go to the judge, with `@sonnet` as the conservative fallback. When selection cannot choose, a `task.agentModelOverrides` entry or the agent's own `model` is used with a visible warning (a notice, a warning line on the subagent row and a `<model-warning>` in the result); with neither, the spawn fails before the child starts and the error tells the parent agent to stop and report to you instead of changing settings.
++- A subagent no longer falls back to the parent's model when its own model has no working credentials, and it no longer inherits the `default` or a role fallback chain. Only a chain you wrote in `retry.fallbackChains` under the exact `provider/model-id` it runs on can move it, and using it raises the same warning. A task result whose child ended on another model than it started on says so in a `<model-warning>`.
++- `task.prewalk`, `task.agentPrewalk` and an agent's `prewalk` frontmatter no longer apply to subagents: a subagent never hands off to another model. Session-level prewalk is unchanged.
+ - `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
+ 
+ ### Fixed
+diff --git a/packages/coding-agent/src/config/model-resolver.ts b/packages/coding-agent/src/config/model-resolver.ts
+index f2b32bb649..fdec8a67cd 100644
+--- a/packages/coding-agent/src/config/model-resolver.ts
++++ b/packages/coding-agent/src/config/model-resolver.ts
+@@ -1312,28 +1312,30 @@ export interface AgentModelPatternResolutionOptions {
+ 	settingsOverride?: string | string[];
+ 	agentModel?: string | string[];
+ 	settings?: Settings;
+-	activeModelPattern?: string;
+-	fallbackModelPattern?: string;
+ }
+ 
++/** Where an agent's model came from. A subagent never takes the parent's model, so there is no parent origin. */
++export type AgentModelOrigin = "request" | "override" | "agent" | "none";
++
+ interface EffectiveAgentModelSelection {
+ 	source?: string | string[];
+ 	patterns: string[];
++	origin: AgentModelOrigin;
+ }
+ 
+ function resolveEffectiveAgentModelSelection(
+ 	options: AgentModelPatternResolutionOptions,
+ ): EffectiveAgentModelSelection {
+-	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
++	const { requestModel, settingsOverride, agentModel, settings } = options;
+ 
+ 	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
+ 	if (requestPatterns.length > 0) {
+-		return { source: requestModel, patterns: requestPatterns };
++		return { source: requestModel, patterns: requestPatterns, origin: "request" };
+ 	}
+ 
+ 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
+ 	if (overridePatterns.length > 0) {
+-		return { source: settingsOverride, patterns: overridePatterns };
++		return { source: settingsOverride, patterns: overridePatterns, origin: "override" };
+ 	}
+ 
+ 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
+@@ -1345,14 +1347,13 @@ function resolveEffectiveAgentModelSelection(
+ 			singleAgentPattern === formatModelRoleAlias("task") ||
+ 			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
+ 		) {
+-			return { source: agentModel, patterns: configuredAgentPatterns };
++			return { source: agentModel, patterns: configuredAgentPatterns, origin: "agent" };
+ 		}
+-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
++		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns, origin: "agent" };
+ 	}
+ 
+-	const fallback =
+-		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
+-	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
++	// No explicit source: the parent's model, the session model and the default role are not a choice anyone made.
++	return { patterns: [], origin: "none" };
+ }
+ 
+ /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
+@@ -1361,6 +1362,8 @@ export interface AgentModelSelection {
+ 	patterns: string[];
+ 	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
+ 	role: string | undefined;
++	/** Which explicit source the patterns came from; `none` means nothing chose a model and `patterns` is empty. */
++	origin: AgentModelOrigin;
+ }
+ 
+ /**
+@@ -1370,8 +1373,8 @@ export interface AgentModelSelection {
+  * discards, and deriving the two halves separately is how they drift apart.
+  */
+ export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
+-	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
+-	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
++	const { source, patterns, origin } = resolveEffectiveAgentModelSelection(options);
++	return { patterns, role: resolveExplicitModelRole(source, options.settings), origin };
+ }
+ 
+ /** Effective agent model patterns alone, for callers with no interest in role identity. */
+@@ -1787,18 +1790,15 @@ export function sessionModelDiscoveryProviders(
+ }
+ 
+ /**
+- * Resolve a list of override patterns to the first matching model, with an
+- * auth-aware fallback to the parent session's active model.
++ * Resolve a list of override patterns to the first matching model whose
++ * provider has working credentials.
+  *
+  * Providers disabled through settings are removed before matching so ordered
+  * overrides skip them and an all-disabled list resolves to no model.
+  *
+- * If the resolved subagent model has no working credentials (provider has no
+- * usable auth), and the parent's active model resolves with working auth,
+- * use the parent's model instead. This prevents subagent dispatch from
+- * silently routing to a provider the user can't actually call (e.g.
+- * `modelRoles.task` pointing at an unqualified id whose only available
+- * provider variant has no configured credentials — see #985).
++ * If the first match has no working credentials, a later entry of the same
++ * list that does have them wins. The parent session's model is never a
++ * candidate: a subagent runs only a model its own selector names.
+  *
+  * `sessionId` is forwarded to `getApiKey` so that session-sticky OAuth
+  * credentials resolve correctly during the pre-flight auth check. Without it,
+@@ -1811,13 +1811,11 @@ export function sessionModelDiscoveryProviders(
+  * configured local model is never silently rerouted to the parent's remote
+  * provider (see #1008).
+  *
+- * If neither the subagent nor the parent has working auth, returns the
+- * primary resolution unchanged so the existing error path still surfaces
+- * a meaningful failure downstream.
++ * If no entry has working auth, returns the primary resolution unchanged so
++ * the existing error path still surfaces a meaningful failure downstream.
+  */
+ export async function resolveModelOverrideWithAuthFallback(
+ 	modelPatterns: string[],
+-	parentActiveModelPattern: string | undefined,
+ 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
+ 	settings?: Settings,
+ 	sessionId?: string,
+@@ -1826,7 +1824,6 @@ export async function resolveModelOverrideWithAuthFallback(
+ 	model?: Model<Api>;
+ 	thinkingLevel?: ConfiguredThinkingLevel;
+ 	explicitThinkingLevel: boolean;
+-	authFallbackUsed: boolean;
+ 	warning?: string;
+ }> {
+ 	const disabledProviders = disabledProviderIds(settings);
+@@ -1836,38 +1833,27 @@ export async function resolveModelOverrideWithAuthFallback(
+ 		lookupRegistry = { getAvailable: () => enabledModels };
+ 	}
+ 	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings, options);
+-	if (!primary.model || !parentActiveModelPattern) {
+-		return { ...primary, authFallbackUsed: false };
++	// With a single entry there is no later entry to prefer, so the credentials are not probed here.
++	const entries = resolveConfiguredModelPatterns(modelPatterns, settings);
++	if (!primary.model || entries.length < 2) {
++		return primary;
+ 	}
+ 
+ 	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
+ 	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
+-		return { ...primary, authFallbackUsed: false };
++		return primary;
+ 	}
+-	// The ordered override list is the caller's own fallback chain: an
+-	// authenticated later entry beats the parent's model.
+-	for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
++	// The ordered override list is the caller's own list: an authenticated later entry is still the caller's choice.
++	for (const pattern of entries) {
+ 		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+ 		if (!candidate.model || modelsAreEqual(candidate.model, primary.model)) continue;
+ 		const candidateKey = await modelRegistry.getApiKey(candidate.model, sessionId);
+ 		if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
+-			return { ...candidate, authFallbackUsed: false };
++			return candidate;
+ 		}
+ 	}
+ 
+-	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
+-	if (!fallback.model) {
+-		return { ...primary, authFallbackUsed: false };
+-	}
+-	if (modelsAreEqual(fallback.model, primary.model)) {
+-		return { ...primary, authFallbackUsed: false };
+-	}
+-	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
+-	if (!isAuthenticated(fallbackKey)) {
+-		return { ...primary, authFallbackUsed: false };
+-	}
+-
+-	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
++	return primary;
+ }
+ 
+ /**
+diff --git a/packages/coding-agent/src/modes/agents-hub-deps.ts b/packages/coding-agent/src/modes/agents-hub-deps.ts
+index 17f17c8baa..51d97208d4 100644
+--- a/packages/coding-agent/src/modes/agents-hub-deps.ts
++++ b/packages/coding-agent/src/modes/agents-hub-deps.ts
+@@ -88,8 +88,6 @@ export function createAgentsHubDeps(
+ 				settingsOverride: agent.overrideModel,
+ 				agentModel: agent.model,
+ 				settings,
+-				activeModelPattern,
+-				fallbackModelPattern: defaultModelPattern,
+ 			}),
+ 		resolvePatterns: patterns => {
+ 			if (patterns.length === 0) return undefined;
+diff --git a/packages/coding-agent/src/prompts/tools/task-summary.md b/packages/coding-agent/src/prompts/tools/task-summary.md
+index e918dc209e..a92bfbab3e 100644
+--- a/packages/coding-agent/src/prompts/tools/task-summary.md
++++ b/packages/coding-agent/src/prompts/tools/task-summary.md
+@@ -2,6 +2,7 @@
+ {{#if requestedModel}}<requested-model>{{requestedModel}}</requested-model>{{/if}}
+ {{#if model}}<model{{#if modelFallback}} fallback="true"{{/if}}>{{model}}</model>{{/if}}
+ {{#if modelRoute}}<model-route>{{modelRoute}}</model-route>{{/if}}
++{{#if modelWarning}}<model-warning>{{modelWarning}}</model-warning>{{/if}}
+ {{#if truncated}}{{#if meta}}<meta lines="{{meta.lineCount}}" size="{{meta.charSize}}" />{{/if}}{{/if}}
+ {{#if abortReason}}
+ <abort-reason>{{abortReason}}{{#if resumable}} — the agent is still live with its full context; message it via `write agent://{{id}}` to resume instead of redoing the work.{{/if}}</abort-reason>
+diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
+index c4ed1785dd..52dc38734d 100644
+--- a/packages/coding-agent/src/sdk.ts
++++ b/packages/coding-agent/src/sdk.ts
+@@ -64,7 +64,7 @@ import type { EffectiveExtensionRoots } from "./capability/types";
+ import { type OAuthAccountPools, SessionAccountPoolScope } from "./config/account-pools";
+ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
+ import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
+-import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
++import { ModelRegistry } from "./config/model-registry";
+ import {
+ 	disabledProviderIds,
+ 	formatModelString,
+@@ -216,7 +216,7 @@ import {
+ import {
+ 	expandDefaultRetryFallbackChains,
+ 	findRetryFallbackCandidates,
+-	installRetryFallbackRole,
++	pinSubagentRetryChains,
+ 	type RetryFallbackResolutionContext,
+ 	resolveRetryFallbackChainKey,
+ } from "./session/retry-fallback-chains";
+@@ -605,12 +605,8 @@ export interface CreateAgentSessionOptions {
+ 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
+ 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
+ 	modelPattern?: string | string[];
+-	/** Authenticated fallback selector for deferred subagent model patterns. */
+-	modelPatternAuthFallback?: string;
+-	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
++	/** Role name pinning a subagent to its resolved model once its deferred patterns resolve; see {@link pinSubagentRetryChains}. */
+ 	modelPatternFallbackRole?: string;
+-	/** Validated inherited retry chain for a deferred singleton pattern; empty explicitly disables fallbacks. */
+-	modelPatternDefaultFallbackChain?: string[];
+ 	/**
+ 	 * Called with the model of every main-loop request before it is sent; throw to
+ 	 * refuse it. Per-call `model` subagents use it so no switch reaches a model the
+@@ -2519,6 +2515,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
+ 			getActiveModelString,
+ 			getActiveModel: () => agent?.state.model ?? model,
++			emitNotice: (level, message, source) => session?.emitNotice(level, message, source),
+ 			getServiceTierByFamily: () => session?.serviceTierByFamily,
+ 			getImageAttachments: () => session?.getImageAttachments() ?? [],
+ 			getPlanModeState: () => session?.getPlanModeState(),
+@@ -3234,7 +3231,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 						}
+ 					}
+ 				}
+-				let selectedModel = primary.model;
++				const selectedModel = primary.model;
+ 				let selectedThinkingLevel = primary.thinkingLevel;
+ 				let selectedExplicitThinkingLevel = primary.explicitThinkingLevel;
+ 				// A chain entry without its own `:level` suffix inherits the
+@@ -3244,58 +3241,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					selectedThinkingLevel = retryFallback.originalThinkingLevel;
+ 					selectedExplicitThinkingLevel = true;
+ 				}
+-				let authFallbackUsed = false;
+-				if (options.modelPatternAuthFallback) {
+-					const primaryKey = await modelRegistry.getApiKey(primary.model);
+-					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
+-						const fallback = parseModelPattern(
+-							options.modelPatternAuthFallback,
+-							resolutionModels,
+-							matchPreferences,
+-						);
+-						if (fallback.model) {
+-							const fallbackKey = await modelRegistry.getApiKey(fallback.model);
+-							if (isAuthenticated(fallbackKey)) {
+-								selectedModel = fallback.model;
+-								selectedThinkingLevel = fallback.thinkingLevel;
+-								selectedExplicitThinkingLevel = fallback.explicitThinkingLevel;
+-								authFallbackUsed = true;
+-							}
+-						}
+-					}
+-				}
+-				if (!authFallbackUsed && options.modelPatternFallbackRole) {
+-					const primarySelector = formatModelSelectorValue(
+-						formatModelStringWithRouting(primary.model),
+-						primary.thinkingLevel,
++				if (options.modelPatternFallbackRole) {
++					// A subagent stays on the model it starts on; only the user's own chain for that exact model survives.
++					pinSubagentRetryChains(
++						settings,
++						options.modelPatternFallbackRole,
++						formatModelSelectorValue(formatModelStringWithRouting(primary.model), primary.thinkingLevel),
++						primary.model,
+ 					);
+-					const seenSelectors = new Set<string>([primarySelector]);
+-					const fallbackSelectors: string[] = [];
+-					for (const fallbackEntry of expandedModelPatterns.slice(patternIndex + 1)) {
+-						const fallback = parseModelPattern(fallbackEntry.pattern, resolutionModels, matchPreferences);
+-						if (!fallback.model) continue;
+-						const fallbackSelector = formatModelSelectorValue(
+-							formatModelStringWithRouting(fallback.model),
+-							fallback.thinkingLevel,
+-						);
+-						if (seenSelectors.has(fallbackSelector)) continue;
+-						seenSelectors.add(fallbackSelector);
+-						fallbackSelectors.push(fallbackSelector);
+-					}
+-					if (fallbackSelectors.length === 0) {
+-						for (const selector of options.modelPatternDefaultFallbackChain ?? []) {
+-							if (typeof selector !== "string" || seenSelectors.has(selector)) continue;
+-							seenSelectors.add(selector);
+-							fallbackSelectors.push(selector);
+-						}
+-					}
+-					if (fallbackSelectors.length > 0 || options.modelPatternDefaultFallbackChain?.length === 0) {
+-						installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
+-							primary: primarySelector,
+-							chain: fallbackSelectors,
+-						});
+-						modelPatternRetryFallbackRole = options.modelPatternFallbackRole;
+-					}
++					modelPatternRetryFallbackRole = options.modelPatternFallbackRole;
+ 				}
+ 				model = selectedModel;
+ 				initialRetryFallback =
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index 71f78a3474..d1dfa97f32 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -2060,7 +2060,8 @@ export class AgentSession implements SettingsScope {
+ 			localProtocolOptions: () => this.#localProtocolOptions(),
+ 		};
+ 		this.#prewalk = new PrewalkCoordinator(prewalkHost, {
+-			prewalk: config.prewalk,
++			// A subagent runs on one model for its whole life: it never starts armed for a hand-off.
++			prewalk: config.agentKind === "sub" ? undefined : config.prewalk,
+ 			planYolo: config.planYolo,
+ 			suppressAutoPrewalk: config.suppressAutoPrewalk,
+ 		});
+diff --git a/packages/coding-agent/src/session/retry-fallback-chains.ts b/packages/coding-agent/src/session/retry-fallback-chains.ts
+index 084b5db879..47b6d92249 100644
+--- a/packages/coding-agent/src/session/retry-fallback-chains.ts
++++ b/packages/coding-agent/src/session/retry-fallback-chains.ts
+@@ -223,6 +223,35 @@ export function installRetryFallbackRole(
+ 	cfgRetryFallbackChains.override(settings, fallbackChains);
+ }
+ 
++/**
++ * Pins a subagent to the one model it started on. The only fallback chain it may keep is one the user wrote
++ * under that exact model's own `provider/id` key in `retry.fallbackChains`. Role chains, the `default` chain,
++ * provider wildcards and the other entries of an agent's model list would move the child to a model nobody
++ * chose for it, so every other configured chain is emptied for this session. Settings layers merge by key, so
++ * a dropped chain is an explicit empty one, which means "no fallbacks". Nothing is written to the user's
++ * config. Returns the user's own chain for `model`; empty when there is none.
++ */
++export function pinSubagentRetryChains(
++	settings: Settings,
++	role: string,
++	primary: string,
++	model: Pick<Model, "provider" | "id">,
++): string[] {
++	const configured = cfgRetryFallbackChains.get(settings);
++	const key = `${model.provider}/${model.id}`;
++	const own = configured && typeof configured === "object" ? configured[key] : undefined;
++	const chain = Array.isArray(own) && own.every(entry => typeof entry === "string") ? [...own] : [];
++	const pinned: RetryFallbackChains = { [role]: chain };
++	if (configured && typeof configured === "object") {
++		for (const configuredKey in configured) {
++			if (configuredKey !== role) pinned[configuredKey] = configuredKey === key ? chain : [];
++		}
++	}
++	installRetryFallbackRole(settings, role, { primary, chain });
++	cfgRetryFallbackChains.override(settings, pinned);
++	return chain;
++}
++
+ /**
+  * Catalog slice covering every provider a selector's patterns name, or
+  * `undefined` when a pattern is provider-less and needs the whole catalog.
+diff --git a/packages/coding-agent/src/task/auto-model.ts b/packages/coding-agent/src/task/auto-model.ts
+index 99684d3ea5..eab3e4e1aa 100644
+--- a/packages/coding-agent/src/task/auto-model.ts
++++ b/packages/coding-agent/src/task/auto-model.ts
+@@ -6,7 +6,7 @@ import type { Settings } from "../config/settings";
+ import { hasNativeJudge, type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+ import questionFile from "../prompts/judge/task-model.json" with { type: "json" };
+ import type { CostGate } from "../session/cost-gate";
+-import { describeConfiguredRoles, formatTier } from "./model-economy";
++import { configuredAliasNames, describeConfiguredRoles, formatTier } from "./model-economy";
+ import { loadModelUsage } from "./model-usage";
+ import { cfgTaskRoutingPreferences } from "./settings";
+ 
+@@ -35,6 +35,30 @@ export interface AutoTaskModelDecision {
+ 	role: `@${string}`;
+ 	/** True when the conservative route was chosen without a confident usable judgment. */
+ 	fallback: boolean;
++	/** True when the role is the only configured alias, so there was nothing to decide and the judge did not run. */
++	onlyAlias?: boolean;
++	/** Why the conservative route was used, in plain words. Set whenever {@link fallback} is true. */
++	failure?: string;
++}
++
++/** No model was chosen. `failure` says why in plain words. */
++export interface AutoTaskModelFailure {
++	role?: undefined;
++	failure: string;
++}
++
++export type AutoTaskModelOutcome = AutoTaskModelDecision | AutoTaskModelFailure;
++
++/** Whether the outcome is a failure: no model was chosen. */
++export function autoTaskModelFailed(outcome: AutoTaskModelOutcome): outcome is AutoTaskModelFailure {
++	return outcome.role === undefined;
++}
++
++const JUDGE_HELP =
++	"The judge role must resolve to a native judge model with credentials: TypeSafe, OpenRouter Decisions, Workers AI or OpenAI Decisions.";
++
++function describeError(error: unknown): string {
++	return error instanceof Error && error.message ? error.message : String(error);
+ }
+ 
+ const QUESTIONS = judgeQuestions(questionFile);
+@@ -77,26 +101,41 @@ function usableAnswer(answer: ChoiceAnswer<string>, roles: readonly string[]): b
+ 
+ /**
+  * Classify an omitted-model task. The caller must enforce explicit-model precedence.
+- * Undefined preserves normal routing when the chosen role is not configured and usable.
++ * One usable alias is chosen without the judge. A failure says why no model was chosen; the caller
++ * decides what to do, and must never fall back to the parent model.
+  * Caller cancellation propagates; timeouts and judgment failures use the conservative role.
+  */
+-export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Promise<AutoTaskModelDecision | undefined> {
++export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Promise<AutoTaskModelOutcome> {
+ 	options.signal?.throwIfAborted();
+ 	let roles: Map<string, string>;
+ 	let tiers: Map<string, string>;
+ 	let usage: Map<string, number>;
+ 	try {
+ 		({ roles, tiers, usage } = availableRoles(options));
+-	} catch {
++	} catch (error) {
+ 		options.signal?.throwIfAborted();
+-		return undefined;
++		return { failure: `the configured model roles could not be read (${describeError(error)})` };
+ 	}
+ 	options.signal?.throwIfAborted();
+-	const fallback = (): AutoTaskModelDecision | undefined =>
+-		roles.has("sonnet") ? { role: "@sonnet", fallback: true } : undefined;
++	if (roles.size === 0) {
++		const configured = configuredAliasNames(options.settings).length;
++		return {
++			failure: `no usable role alias exists (${configured} configured, 0 usable)`,
++		};
++	}
++	if (roles.size === 1) {
++		const [only] = roles.keys();
++		return { role: `@${only}`, fallback: false, onlyAlias: true };
++	}
++	const fallback = (failure: string): AutoTaskModelOutcome =>
++		roles.has("sonnet")
++			? { role: "@sonnet", fallback: true, failure }
++			: { failure: `${failure}, and no role alias named sonnet exists for the conservative fallback` };
+ 	try {
+-		if (!options.task.trim() || roles.size < 2 || !hasNativeJudge(options.settings, options.registry))
+-			return fallback();
++		if (!options.task.trim()) return fallback("the task text is empty");
++		if (!hasNativeJudge(options.settings, options.registry)) {
++			return fallback(`no native judge is available. ${JUDGE_HELP}`);
++		}
+ 		const judge = resolveJudge({
+ 			settings: options.settings,
+ 			registry: options.registry,
+@@ -115,7 +154,8 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+ 		if (options.agent) state.agent = truncateTinyMessage(options.agent);
+ 		const roleSelectors = JSON.stringify(Object.fromEntries(roles));
+ 		// Never truncate the candidate map: the judge must see every offered role and its full selector.
+-		if (roleSelectors.length > MAX_TINY_MESSAGE_CHARS) return fallback();
++		if (roleSelectors.length > MAX_TINY_MESSAGE_CHARS)
++			return fallback("the role aliases are too long for the judge to read");
+ 		state.role_selectors = roleSelectors;
+ 		// Tiers and usage are advice, not a candidate list: leave them out rather than fail when they do not fit.
+ 		for (const [key, value] of [
+@@ -145,10 +185,27 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+ 		);
+ 		options.signal?.throwIfAborted();
+ 		const answer = answers.model;
+-		if (!usableAnswer(answer, [...roles.keys()])) return fallback();
++		if (!usableAnswer(answer, [...roles.keys()])) return fallback("the judge gave no confident answer");
+ 		return { role: `@${answer.choice}`, fallback: false };
+-	} catch {
++	} catch (error) {
+ 		options.signal?.throwIfAborted();
+-		return fallback();
++		return fallback(`the judge failed (${describeError(error)})`);
+ 	}
+ }
++
++const STOP_AND_REPORT =
++	"The parent agent must stop and report this to the user. The parent agent must not change settings and must not choose a model.";
++const FIX_HINT = "To fix this, the user must add at least two role aliases to modelRoles, or fix the judge.";
++
++/** The preflight error when automatic selection fails and no explicit non-parent model exists. */
++export function autoModelFailureMessage(failure: string): string {
++	return `Subagent not started. Automatic model selection failed: ${failure}. No parent model is used. ${FIX_HINT} ${STOP_AND_REPORT}`;
++}
++
++/**
++ * The warning shown when selection failed but an explicit non-parent model exists, or the conservative
++ * fallback ran. `used` names what the subagent runs on instead.
++ */
++export function autoModelWarning(failure: string, used: string): string {
++	return `Warning: automatic model selection failed: ${failure}. The subagent uses ${used}. ${FIX_HINT} ${STOP_AND_REPORT}`;
++}
+diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
+index 8ac2523af8..48d49f7bfd 100644
+--- a/packages/coding-agent/src/task/executor.ts
++++ b/packages/coding-agent/src/task/executor.ts
+@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
+ import path from "node:path";
+ import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
+ import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
++import type { Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+ import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+ import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
+@@ -28,10 +28,8 @@ import {
+ 	resolveAgentAdvisorRolePattern,
+ 	resolveAgentAdvisorSelection,
+ 	resolveAgentPrewalkPattern,
+-	resolveConfiguredModelPatterns,
+ 	resolveExactModelIdentity,
+ 	resolveExplicitModelRole,
+-	resolveModelOverride,
+ 	resolveModelOverrideWithAuthFallback,
+ } from "../config/model-resolver";
+ import type { PromptTemplate } from "../config/prompt-templates";
+@@ -71,7 +69,6 @@ import {
+ import {
+ 	type AgentSession,
+ 	type AgentSessionEvent,
+-	type Prewalk,
+ 	PromptDroppedError,
+ 	type PromptOptions,
+ } from "../session/agent-session";
+@@ -87,7 +84,6 @@ import {
+ 	assertModelSupportsEffortCeiling,
+ 	type ConfiguredThinkingLevel,
+ 	clampThinkingLevelToCeiling,
+-	prewalkWouldBeNoop,
+ 	resolveTaskEffortLevel,
+ 	type TaskEffort,
+ } from "@oh-my-pi/pi-tui/thinking";
+@@ -156,11 +152,9 @@ import {
+ 	cfgTierGoogle,
+ 	cfgTierAnthropic,
+ 	cfgTierOpenai,
+-	cfgRetryFallbackChains,
+ 	cfgDefaultThinkingLevel,
+ } from "../session/settings";
+-import { cfgDisabledProviders } from "../config/model-settings";
+-import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
++import { getRetryFallbackRole, pinSubagentRetryChains } from "../session/retry-fallback-chains";
+ import {
+ 	cfgCompactionModelThresholdsEnabled,
+ 	cfgCompactionThresholdPercent,
+@@ -256,95 +250,6 @@ export function subagentRetryFallbackRole(id: string): string {
+ 	return `subagent:${id}`;
+ }
+ 
+-interface SubagentRetryFallbackCandidate {
+-	model: Model<Api>;
+-	selector: string;
+-}
+-
+-function resolveSubagentRetryFallbackCandidates(
+-	modelPatterns: string[],
+-	modelRegistry: ModelRegistry,
+-	settings: Settings,
+-): SubagentRetryFallbackCandidate[] {
+-	const candidates: SubagentRetryFallbackCandidate[] = [];
+-	const seen = new Set<string>();
+-	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+-	for (const pattern of modelPatterns) {
+-		const resolved = resolveModelOverride([pattern], modelRegistry, settings);
+-		if (!resolved.model) continue;
+-		if (disabledProviders.has(resolved.model.provider)) continue;
+-		const selector = resolved.explicitThinkingLevel
+-			? formatModelSelectorValue(formatModelStringWithRouting(resolved.model), resolved.thinkingLevel)
+-			: formatModelStringWithRouting(resolved.model);
+-		if (seen.has(selector)) continue;
+-		seen.add(selector);
+-		candidates.push({ model: resolved.model, selector });
+-	}
+-	return candidates;
+-}
+-
+-/**
+- * Chain a single-model subagent inherits when its own model patterns supply no
+- * fallbacks of their own. The child is pinned to a `subagent:<id>` role whose
+- * chain shadows every configured role chain (see
+- * {@link installSubagentRetryFallbackChain}), so a role-alias request (`@smol`,
+- * the bundled `task` agent's `@task`) MUST inherit that role's chain —
+- * otherwise the pin silently re-routes the child onto the `default` role's
+- * chain. Explicit model selectors keep inheriting `default`: they carry no role
+- * identity, and a role that happens to be assigned the same model must not
+- * capture the child's fallback routing.
+- *
+- * Spawn paths preserve the pre-expansion alias as `modelRole` because their
+- * model patterns are already expanded. Direct callers may still supply an
+- * unexpanded alias through `modelOverride` or `agent.model`; retain that
+- * existing path by deriving the role only when no preserved role was supplied.
+- */
+-function resolveSubagentInheritedRetryFallbackChain(
+-	settings: Settings,
+-	modelRegistry: ModelRegistry,
+-	role: string | undefined,
+-): string[] | undefined {
+-	const configuredChains = cfgRetryFallbackChains.get(settings);
+-	// An explicitly emptied role chain means "no fallbacks", not "inherit
+-	// default" — mirrors expandDefaultRetryFallbackChains.
+-	const fallbackChain = (role !== undefined ? configuredChains?.[role] : undefined) ?? configuredChains?.default;
+-	if (!Array.isArray(fallbackChain) || !fallbackChain.every(entry => typeof entry === "string")) {
+-		return undefined;
+-	}
+-	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+-	return fallbackChain.filter(entry => {
+-		const resolved = resolveModelOverride([entry], modelRegistry, settings);
+-		return !resolved.model || !disabledProviders.has(resolved.model.provider);
+-	});
+-}
+-
+-function installSubagentRetryFallbackChain(args: {
+-	settings: Settings;
+-	id: string;
+-	candidates: SubagentRetryFallbackCandidate[];
+-	inheritedFallbackChain: string[] | undefined;
+-	model: Model<Api> | undefined;
+-	authFallbackUsed: boolean;
+-}): string | undefined {
+-	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
+-	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
+-
+-	const selectedIndex = candidates.findIndex(
+-		candidate => candidate.model.provider === model.provider && candidate.model.id === model.id,
+-	);
+-	if (selectedIndex < 0) return undefined;
+-	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
+-	// A single configured model may reuse its role's (or the default) configured chain, but never an implicit parent fallback.
+-	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : inheritedFallbackChain;
+-	if (!Array.isArray(fallbackChain) || !fallbackChain.every(entry => typeof entry === "string")) {
+-		return undefined;
+-	}
+-
+-	const role = subagentRetryFallbackRole(id);
+-	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
+-	return role;
+-}
+-
+ export interface IrcPeerRosterRow {
+ 	id: string;
+ 	displayName: string;
+@@ -442,11 +347,10 @@ export interface ExecutorOptions {
+ 	modelRole?: string;
+ 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
+ 	modelRoute?: string;
+-	/**
+-	 * Active model selector of the parent session, used as an auth-aware fallback
+-	 * if the resolved subagent model has no working credentials. See #985.
+-	 */
+-	parentActiveModelPattern?: string;
++	/** Visible warning about how this child's model was chosen; surfaced as `resolvedModelWarning`. */
++	modelWarning?: string;
++	/** Called with a warning the user must see, such as the child leaving the model it started on. */
++	onModelWarning?: (warning: string) => void;
+ 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
+ 	perCallModelGrants?: PerCallModelGrants;
+ 	thinkingLevel?: ConfiguredThinkingLevel;
+@@ -1242,6 +1146,10 @@ interface RunMonitorArgs {
+ 	modelRole?: string;
+ 	/** Extension routing note for the chosen model. */
+ 	modelRoute?: string;
++	/** Visible warning about how the model was chosen. */
++	modelWarning?: string;
++	/** Called when the child leaves the model it started on. */
++	onModelWarning?: (warning: string) => void;
+ 	signal?: AbortSignal;
+ 	onProgress?: (progress: AgentProgress) => void;
+ 	/** See {@link ExecutorOptions.onToolResult}. */
+@@ -1383,6 +1291,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
+ 		modelOverride: args.modelOverride,
+ 		modelRole: args.modelRole,
+ 		resolvedModelRoute: args.modelRoute,
++		resolvedModelWarning: args.modelWarning,
+ 	};
+ 
+ 	const outputChunks: string[] = [];
+@@ -2238,10 +2147,30 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
+ 			progress.contextWindow = contextWindow;
+ 			scheduleProgress(true);
+ 		};
++		// A child runs on the one model it started on. When its session model is anything else, say so in the
++		// result: the serving model only moves once a turn settles, so a model that was switched to and then
++		// failed would otherwise leave the result naming the model that never ran the work.
++		let observedModel = session.model;
++		const warnedIdentities = new Set<string>();
++		const publishModelDrift = (): void => {
++			const current = session.model;
++			if (!current || current === observedModel) return;
++			observedModel = current;
++			const identity = formatModelStringWithRouting(current);
++			if (!initialModelIdentity || identity === initialModelIdentity || warnedIdentities.has(identity)) return;
++			warnedIdentities.add(identity);
++			const warning = `Warning: the subagent started on ${initialModelIdentity} but its model changed to ${identity}. A retry fallback chain or a model switch did this. Work may have run on a model other than the one first resolved.`;
++			progress.resolvedModelWarning = progress.resolvedModelWarning
++				? `${progress.resolvedModelWarning} ${warning}`
++				: warning;
++			args.onModelWarning?.(warning);
++			scheduleProgress(true);
++		};
+ 		return session.subscribe(event => {
+ 			emitSubagentEvent(event);
+ 			publishAdvisorState(session);
+ 			publishServingModel();
++			publishModelDrift();
+ 			if (event.type === "auto_retry_start") {
+ 				progress.retryState = {
+ 					attempt: event.attempt,
+@@ -3028,6 +2957,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
+ 		resolvedThinkingLevel: progress.resolvedThinkingLevel,
+ 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+ 		resolvedModelRoute: progress.resolvedModelRoute,
++		resolvedModelWarning: progress.resolvedModelWarning,
+ 		advisor: progress.advisor,
+ 		error: exitCode !== 0 && stderr ? stderr : undefined,
+ 		aborted: wasAborted,
+@@ -4100,7 +4030,7 @@ interface WarmReviveCapture {
+ 	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
+ 	settings: SubagentSettingsRecipe;
+ 	parentArtifactManager: ArtifactManager | undefined;
+-	/** Todos are parent-owned and stripped from subagents, except under prewalk (its todo gate needs them). */
++	/** Todos are parent-owned and stripped from subagents. */
+ 	keepTodo: boolean;
+ 	wake: IrcWakeTurnMonitorOptions;
+ 	/** Exact agent name the live `task.agentAccountPools` entry is looked up by on revive. */
+@@ -4221,7 +4151,6 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+ 											: [options.modelPattern].flat()),
+ 								],
+ 								modelPatternFallbackRole: undefined,
+-								modelPatternDefaultFallbackChain: undefined,
+ 								thinkingLevel: undefined,
+ 							}
+ 						: undefined),
+@@ -4441,6 +4370,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 		modelOverride,
+ 		modelRole,
+ 		modelRoute: options.modelRoute,
++		modelWarning: options.modelWarning,
++		onModelWarning: options.onModelWarning,
+ 		signal,
+ 		onProgress,
+ 		onToolResult: options.onToolResult,
+@@ -4553,25 +4484,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 			if (options.perCallModelGrants) {
+ 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+ 			}
+-			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+-			const inheritedRetryFallbackChain =
+-				configuredModelPatterns.length === 1
+-					? resolveSubagentInheritedRetryFallbackChain(
+-							subagentSettings,
+-							modelRegistry,
+-							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
+-						)
+-					: undefined;
+ 			const {
+ 				model,
+ 				thinkingLevel: resolvedThinkingLevel,
+ 				explicitThinkingLevel,
+-				authFallbackUsed,
+ 				warning: modelResolutionWarning,
+ 			} = await awaitAbortable(
+ 				resolveModelOverrideWithAuthFallback(
+ 					modelPatterns,
+-					options.parentActiveModelPattern,
+ 					modelRegistry,
+ 					settings,
+ 					id,
+@@ -4583,21 +4503,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 					`Requested exact model ${JSON.stringify(modelPatterns)} is unavailable. Use an exact provider/model[:level] selector; do not substitute another model.`,
+ 				);
+ 			}
+-			if (authFallbackUsed) progress.resolvedModelIsFallback = true;
+ 			if (modelResolutionWarning) {
+ 				logger.warn("Subagent model resolution warning", {
+ 					warning: modelResolutionWarning,
+ 					requested: modelPatterns,
+ 				});
+ 			}
+-			if (authFallbackUsed && model) {
+-				logger.warn("Subagent model has no working credentials; falling back to parent session model", {
+-					requested: modelPatterns,
+-					parentModel: options.parentActiveModelPattern,
+-					resolvedProvider: model.provider,
+-					resolvedModel: model.id,
+-				});
+-			}
+ 			// Preflight skips these checks while the registry is cold, so hold the model
+ 			// a per-call child actually starts on to them before its session exists.
+ 			if (options.perCallModelGrants && model) {
+@@ -4618,19 +4529,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 								resolvedModel,
+ 								inheritedSubagentServiceTiers(settings, options.parentServiceTier),
+ 							);
+-			const retryFallbackRole = installSubagentRetryFallbackChain({
+-				settings: subagentSettings,
+-				id,
+-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+-				inheritedFallbackChain: inheritedRetryFallbackChain,
+-				model,
+-				authFallbackUsed,
+-			});
+-			if (retryFallbackRole) {
+-				logger.debug("Configured subagent runtime model fallback chain", {
+-					role: retryFallbackRole,
+-					requested: modelPatterns,
+-				});
++			// The child stays on this model for its whole life. Only a chain the user wrote under this exact
++			// model's key in `retry.fallbackChains` can move it, and that move raises a warning.
++			const retryFallbackRole = model ? subagentRetryFallbackRole(id) : undefined;
++			if (model && retryFallbackRole) {
++				pinSubagentRetryChains(
++					subagentSettings,
++					retryFallbackRole,
++					explicitThinkingLevel
++						? formatModelSelectorValue(formatModelStringWithRouting(model), resolvedThinkingLevel)
++						: formatModelStringWithRouting(model),
++					model,
++				);
+ 			}
+ 			if (model?.contextWindow && model.contextWindow > 0) {
+ 				progress.contextWindow = model.contextWindow;
+@@ -4694,43 +4604,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 			// Setup below can fail before this promise's consumption boundary.
+ 			// Observe rejection immediately while preserving it for the later await.
+ 			sessionManagerPromise.catch(() => {});
+-			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
+-			// `task.agentPrewalk` settings override hands the subagent off to a
+-			// fast/cheap target at its first edit/write — the same mechanism as the
+-			// session-level --prewalk. The bundled generic `task` agent has no
+-			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
+-			// Resolution failures skip prewalk instead of failing the spawn. A per-call
+-			// worker never switches models, so it never prewalks.
++			// A subagent runs on exactly one model for its whole life, so it never hands off to another model
++			// at its first edit. `task.prewalk`, `task.agentPrewalk` and an agent's `prewalk` frontmatter do not
++			// apply to subagents; say so in the log when one of them asked for it.
+ 			const perCallModelGrants = options.perCallModelGrants;
+-			let prewalk: Prewalk | undefined;
+-			const prewalkPattern =
+-				preparedSession || perCallModelGrants
+-					? undefined
+-					: resolveAgentPrewalkPattern({
+-							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+-							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+-						});
+-			if (prewalkPattern) {
+-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
+-				const target = resolvedPrewalk.model;
+-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+-					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
+-						agent: agent.name,
+-						pattern: prewalkPattern,
+-						warning: resolvedPrewalk.warning,
+-					});
+-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
+-					// Same model AND same effective thinking level: switching would only
+-					// inject the plan/checklist nudges for no gain — skip. An effort-only
+-					// delta on the same model still arms (it is a real cheapening hand-off).
+-					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
+-						agent: agent.name,
+-						pattern: prewalkPattern,
+-					});
+-				} else {
+-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+-				}
++			if (
++				!preparedSession &&
++				!perCallModelGrants &&
++				resolveAgentPrewalkPattern({
++					settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
++					agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
++				})
++			) {
++				logger.warn("Subagent prewalk ignored: a subagent runs on exactly one model", { agent: agent.name });
+ 			}
+ 
+ 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+@@ -4793,12 +4679,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 					inheritedSessionAgents: options.inheritedSessionAgents,
+ 					model,
+ 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+-					modelPatternAuthFallback:
+-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+ 					modelPatternFallbackRole:
+ 						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+-					modelPatternDefaultFallbackChain:
+-						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+ 					thinkingLevel: effectiveThinkingLevel,
+ 					...(perCallModelGrants
+ 						? {
+@@ -4834,7 +4716,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
+ 					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
+ 					hasUI: false,
+-					prewalk,
+ 					spawns: spawnsEnv,
+ 					taskDepth: childDepth,
+ 					// The whole spawn tree shares the root session's observability bus,
+@@ -4977,10 +4858,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 				// createAgentSession was returning.
+ 				if (runRef.status === "aborted") monitor.requestAbort("signal");
+ 			}
+-			// Todos are parent-owned bookkeeping and stripped from subagents —
+-			// except under prewalk, whose plan nudge + todo gate require the
+-			// subagent to commit its own todo list before the hand-off.
+-			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
++			// Todos are parent-owned bookkeeping and stripped from subagents.
++			const isParentOwnedTool = (name: string): boolean => name === "todo";
+ 			if (sessionFile !== null) {
+ 				const reviveCapture: WarmReviveCapture = {
+ 					sessionFile,
+@@ -4989,7 +4868,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 					modelPolicy,
+ 					settings: captureSubagentSettings(settings, subagentSettings),
+ 					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
+-					keepTodo: prewalk !== undefined,
++					keepTodo: false,
+ 					wake: wakeOptions,
+ 					agentName: agent.name,
+ 					pendingCacheCandidate: undefined,
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 8f6cc6f009..09a88b79eb 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -1618,6 +1618,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 						progress.stage = nextProgress.stage ?? progress.stage;
+ 						progress.watch = nextProgress.watch ?? progress.watch;
+ 						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
++						progress.resolvedModelWarning = nextProgress.resolvedModelWarning ?? progress.resolvedModelWarning;
+ 						progress.tokens = nextProgress.tokens;
+ 						progress.cacheReadTokens = nextProgress.cacheReadTokens;
+ 						progress.requests = nextProgress.requests;
+@@ -1713,6 +1714,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
+ 					progress.advisor = singleResult?.advisor ?? progress.advisor;
+ 					progress.resolvedModelRoute = singleResult?.resolvedModelRoute ?? progress.resolvedModelRoute;
++					progress.resolvedModelWarning = singleResult?.resolvedModelWarning ?? progress.resolvedModelWarning;
+ 					if (singleResult?.resolvedModel) {
+ 						progress.resolvedModel = singleResult.resolvedModel;
+ 						progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;
+diff --git a/packages/coding-agent/src/task/model-economy.ts b/packages/coding-agent/src/task/model-economy.ts
+index 4b8a2d6e56..d0181814b7 100644
+--- a/packages/coding-agent/src/task/model-economy.ts
++++ b/packages/coding-agent/src/task/model-economy.ts
+@@ -95,6 +95,13 @@ export function usageScore(usage: ModelUsage, model: Pick<Model<Api>, "provider"
+ 	return Math.min(1, score);
+ }
+ 
++/** Names of the configured custom aliases, usable or not. Built-in semantic roles are routing policies, not aliases. */
++export function configuredAliasNames(settings: Settings): string[] {
++	return Object.entries(settings.getModelRoles())
++		.filter(([role, selector]) => selector?.trim() && !MODEL_ROLE_IDS.some(id => id === role))
++		.map(([role]) => role);
++}
++
+ /** A configured model role and what it costs and how much it is used. */
+ export interface RoleEconomy {
+ 	role: string;
+diff --git a/packages/coding-agent/src/task/persisted-revive.ts b/packages/coding-agent/src/task/persisted-revive.ts
+index d81d777cb8..8097e4bb4f 100644
+--- a/packages/coding-agent/src/task/persisted-revive.ts
++++ b/packages/coding-agent/src/task/persisted-revive.ts
+@@ -20,7 +20,7 @@ import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycl
+ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+ import { createAgentSession } from "../sdk";
+ import type { AgentSession } from "../session/agent-session";
+-import { installRetryFallbackRole } from "../session/retry-fallback-chains";
++import { parseRetryFallbackSelector, pinSubagentRetryChains } from "../session/retry-fallback-chains";
+ import type { AuthStorage } from "../session/auth-storage";
+ import {
+ 	extractSessionInit,
+@@ -294,11 +294,14 @@ export function createPersistedSubagentReviverFactory(
+ 					: undefined),
+ 				...compactionThresholdSettings(init.compactionThreshold),
+ 			});
+-			// Restore the `subagent:<id>` fallback chain the spawn installed; the
+-			// transcript alone cannot rebuild it (multi-model agent patterns and
+-			// inherited role chains are resolved only at spawn).
+-			if (init.retryFallback) {
+-				installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
++			// Restore the `subagent:<id>` pin the spawn installed; the transcript alone cannot rebuild it.
++			// Re-pinned on revive: a child saved before the one-model rule may carry role or default chains.
++			const pinned = init.retryFallback ? parseRetryFallbackSelector(init.retryFallback.primary) : undefined;
++			if (init.retryFallback && pinned) {
++				pinSubagentRetryChains(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback.primary, {
++					provider: pinned.provider,
++					id: pinned.id,
++				});
+ 			}
+ 			// Account pools are owner policy, like the extension roots below: take the
+ 			// live exact-name `task.agentAccountPools` entry, never a transcript copy.
+@@ -363,7 +366,6 @@ export function createPersistedSubagentReviverFactory(
+ 					modelRegistry: ctx.modelRegistry,
+ 					...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
+ 					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+-					modelPatternAuthFallback: restoredSeance || init.perCallModel ? undefined : init.resolvedModel,
+ 					settings: subagentSettings,
+ 					sessionManager: reopened,
+ 					agentId: ref.id,
+diff --git a/packages/coding-agent/src/task/result-summary.ts b/packages/coding-agent/src/task/result-summary.ts
+index 290f5f155e..2da8fa4f8e 100644
+--- a/packages/coding-agent/src/task/result-summary.ts
++++ b/packages/coding-agent/src/task/result-summary.ts
+@@ -84,6 +84,7 @@ export function formatTaskResultSummary(
+ 			model: result.resolvedModel ? escapeHarnessTags(result.resolvedModel) : undefined,
+ 			modelFallback: result.resolvedModelIsFallback,
+ 			modelRoute: result.resolvedModelRoute ? escapeHarnessTags(result.resolvedModelRoute) : undefined,
++			modelWarning: result.resolvedModelWarning ? escapeHarnessTags(result.resolvedModelWarning) : undefined,
+ 			duration: formatDuration(options.totalDurationMs),
+ 			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
+ 			error: error === undefined ? undefined : escapeHarnessTags(error),
+diff --git a/packages/coding-agent/src/task/seance.ts b/packages/coding-agent/src/task/seance.ts
+index 64b2d52302..56f0a002fb 100644
+--- a/packages/coding-agent/src/task/seance.ts
++++ b/packages/coding-agent/src/task/seance.ts
+@@ -266,7 +266,6 @@ export async function prepareSeance(context: {
+ 		}
+ 		const resolved = await resolveModelOverrideWithAuthFallback(
+ 			[selector],
+-			undefined,
+ 			modelRegistry,
+ 			context.session.settings,
+ 			context.session.getSessionId?.() ?? undefined,
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index 835ddd0d70..cb497c3f42 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -43,8 +43,15 @@ import type { ToolSession } from "../tools";
+ import { isIrcEnabled } from "../irc/messaging";
+ import { buildOutputValidator } from "../tools/output-schema-validator";
+ import { trackLateCleanup } from "../utils/late-cleanup";
+-import { classifyAutoTaskModel } from "./auto-model";
+-import { describeConfiguredRoles, formatTier, type PriceTier, parseTier, pickRoleForTier } from "./model-economy";
++import { autoModelFailureMessage, autoModelWarning, autoTaskModelFailed, classifyAutoTaskModel } from "./auto-model";
++import {
++	configuredAliasNames,
++	describeConfiguredRoles,
++	formatTier,
++	type PriceTier,
++	parseTier,
++	pickRoleForTier,
++} from "./model-economy";
+ import { loadModelUsage } from "./model-usage";
+ import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
+ import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
+@@ -222,8 +229,13 @@ export interface EffectiveSubagentPolicy {
+ 	compactionThresholdOverride?: CompactionThresholdPair;
+ 	/** Exact-name `task.agentAccountPools` entry: the only OAuth accounts the child may use, per listed provider. */
+ 	oauthAccountPools?: OAuthAccountPools;
+-	/** Absent for a per-call `model`: a requested model that cannot run fails instead of falling back to the parent's. */
+-	parentActiveModelPattern?: string;
++	/**
++	 * Which explicit source chose {@link modelOverride}. `none` means nothing did yet: automatic selection
++	 * must pick a model at dispatch, or the spawn fails. The parent's model is never a source.
++	 */
++	modelOrigin: "per-call" | "host" | "seance" | "override" | "agent" | "none";
++	/** Visible warning for the user: automatic selection failed, or a conservative fallback or explicit source stood in. */
++	modelWarning?: string;
+ 	/** Whether the child gets the `yield` tool; see {@link StructuredSubagentRequest.structured}. */
+ 	structured: boolean;
+ 	/** Present for a per-call `model`: every model the child sends to must stay approved by these grants. */
+@@ -674,23 +686,33 @@ export async function resolveEffectiveSubagentPolicy(
+ 						: request.session.getActiveModelString?.(),
+ 				);
+ 	const perCallModelGrants = perCallModel?.grants;
+-	const parentActiveModelPattern =
+-		hasPreparedSeance || perCallModelGrants ? undefined : request.session.getActiveModelString?.();
+ 	const modelResolution = {
+ 		requestModel: preparedSeance?.modelPatterns ?? request.model,
+ 		settingsOverride: hasPreparedSeance ? undefined : agentModelOverrides[agentName],
+ 		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
+ 		settings: request.session.settings,
+-		activeModelPattern: parentActiveModelPattern,
+-		fallbackModelPattern: hasPreparedSeance ? undefined : request.session.getModelString?.(),
+ 	};
+ 	// Role identity and patterns come from one call so they cannot be derived
+ 	// from different sources: the expansion below discards the alias, and the
+ 	// child's inherited retry-fallback chain is keyed off the role. A per-call
+ 	// model is already one exact selector and stays literal, never a role alias.
+-	const { patterns: modelOverride, role: modelRole } = perCallModel
+-		? { patterns: [perCallModel.selector], role: undefined }
++	const {
++		patterns: modelOverride,
++		role: modelRole,
++		origin,
++	} = perCallModel
++		? { patterns: [perCallModel.selector], role: undefined, origin: "per-call" as const }
+ 		: resolveAgentModelSelection(modelResolution);
++	// A host model on a prepared seance is the seance's own saved model; either way a person or the source chose it.
++	const modelOrigin: EffectiveSubagentPolicy["modelOrigin"] =
++		origin === "request" ? (hasPreparedSeance ? "seance" : "host") : origin;
++	if (modelOrigin === "none" && configuredAliasNames(request.session.settings).length === 0) {
++		// Decidable from settings alone, so fail before anything is allocated. Dispatch repeats the check with the judge.
++		throw new StructuredSubagentError(
++			"preflight",
++			autoModelFailureMessage("no usable role alias exists (0 configured, 0 usable)"),
++		);
++	}
+ 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
+ 	const isIsolated = request.isolation?.requested === true;
+ 	if (isIsolated && !isolationEnabled) {
+@@ -707,10 +729,10 @@ export async function resolveEffectiveSubagentPolicy(
+ 		modelOverride,
+ 		preparedSession: preparedSeance?.session,
+ 		modelRole,
++		modelOrigin,
+ 		serviceTierOverride,
+ 		compactionThresholdOverride,
+ 		oauthAccountPools,
+-		parentActiveModelPattern,
+ 		perCallModelGrants,
+ 		structured,
+ 		schema,
+@@ -733,24 +755,29 @@ export async function resolveEffectiveSubagentPolicy(
+ 	};
+ }
+ 
+-/** Classify only at dispatch, not during side-effect-free frontend preflight. */
++/** What an explicit source stands in with after a failed classification, for the warning. */
++function describeExplicitSource(policy: EffectiveSubagentPolicy): string {
++	const selectors = (policy.modelOverride ?? []).join(", ");
++	return policy.modelOrigin === "override"
++		? `the task.agentModelOverrides entry for "${policy.agentName}" (${selectors})`
++		: `the model of the "${policy.agentName}" agent definition (${selectors})`;
++}
++
++/**
++ * Choose the model of a spawn no caller named a model for. Classify only at dispatch, not during
++ * side-effect-free frontend preflight. A subagent never takes the parent's model: without a decision it
++ * runs an explicit non-parent source with a visible warning, or the spawn fails before anything starts.
++ */
+ async function applyAutoTaskModel(
+ 	request: StructuredSubagentRequest,
+ 	policy: EffectiveSubagentPolicy,
+ ): Promise<EffectiveSubagentPolicy> {
+-	if (
+-		request.invocationKind !== "task" ||
+-		request.model !== undefined ||
+-		request.perCallModel !== undefined ||
+-		request.seanceModel !== undefined ||
+-		policy.perCallModelGrants !== undefined ||
+-		policy.preparedSession !== undefined
+-	) {
++	if (policy.modelOrigin === "per-call" || policy.modelOrigin === "host" || policy.modelOrigin === "seance") {
+ 		return policy;
+ 	}
+ 	request.signal?.throwIfAborted();
+ 	const registry = request.session.modelRegistry;
+-	const decision = registry
++	const outcome = registry
+ 		? await classifyAutoTaskModel({
+ 				settings: request.session.settings,
+ 				registry,
+@@ -764,18 +791,33 @@ async function applyAutoTaskModel(
+ 				telemetry: request.session.getTelemetry?.(),
+ 				costGate: request.session.costGate,
+ 			})
+-		: undefined;
+-	if (!decision) {
+-		return { ...policy, modelRoute: "Automatic model selection unavailable; using existing model resolution." };
+-	}
+-	const selection = resolveAgentModelSelection({ requestModel: decision.role, settings: request.session.settings });
++		: { failure: "the session has no model registry" };
++	const unusable = (failure: string): EffectiveSubagentPolicy => {
++		if (policy.modelOrigin === "none") {
++			throw new StructuredSubagentError("preflight", autoModelFailureMessage(failure));
++		}
++		const used = describeExplicitSource(policy);
++		return {
++			...policy,
++			modelRoute: `Automatic model selection failed; using ${used}.`,
++			modelWarning: autoModelWarning(failure, used),
++		};
++	};
++	if (autoTaskModelFailed(outcome)) return unusable(outcome.failure);
++	const selection = resolveAgentModelSelection({ requestModel: outcome.role, settings: request.session.settings });
++	if (selection.patterns.length === 0) return unusable(`the role ${outcome.role} does not resolve to a model`);
++	const note = outcome.onlyAlias ? " (only one configured alias)" : outcome.fallback ? " (conservative fallback)" : "";
+ 	return {
+ 		...policy,
+ 		modelOverride: selection.patterns,
+ 		modelRole: selection.role,
+-		modelRoute: decision.fallback
+-			? `Automatic model selection: ${decision.role} (conservative fallback).`
+-			: `Automatic model selection: ${decision.role}.`,
++		modelRoute: `Automatic model selection: ${outcome.role}${note}.`,
++		modelWarning: outcome.fallback
++			? autoModelWarning(
++					outcome.failure ?? "the judge gave no confident answer",
++					`the conservative fallback ${outcome.role}`,
++				)
++			: undefined,
+ 	};
+ }
+ 
+@@ -919,10 +961,11 @@ function buildExecutorOptions(
+ 		modelOverride: policy.modelOverride,
+ 		modelRole: policy.modelRole,
+ 		modelRoute: policy.modelRoute,
++		modelWarning: policy.modelWarning,
++		onModelWarning: warning => session.emitNotice?.("warning", warning, "task-model"),
+ 		serviceTierOverride: policy.serviceTierOverride,
+ 		compactionThresholdOverride: policy.compactionThresholdOverride,
+ 		oauthAccountPools: policy.oauthAccountPools,
+-		parentActiveModelPattern: policy.parentActiveModelPattern,
+ 		perCallModelGrants: policy.perCallModelGrants,
+ 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
+ 		effort: request.effort,
+@@ -1028,6 +1071,7 @@ function buildFailureResult(
+ 			modelOverride: policy.modelOverride,
+ 			modelRole: policy.modelRole,
+ 			resolvedModelRoute: policy.modelRoute,
++			resolvedModelWarning: policy.modelWarning,
+ 			error: message,
+ 		};
+ 	};
+@@ -1134,6 +1178,7 @@ function describeSalvagedWork(result: SingleResult): string {
+ export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+ 	const preflight = await resolveEffectiveSubagentPolicy(request);
+ 	const policy = await applySpawnHook(request, await applyAutoTaskModel(request, preflight));
++	if (policy.modelWarning) request.session.emitNotice?.("warning", policy.modelWarning, "task-model");
+ 	const lease = await leaseArtifacts(request.session, request.invocationKind);
+ 	let changesApplied: boolean | null = null;
+ 	let mergeSummary = "";
+diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
+index 7e6027a1b7..7cb516fa7d 100644
+--- a/packages/coding-agent/src/tools/index.ts
++++ b/packages/coding-agent/src/tools/index.ts
+@@ -431,6 +431,8 @@ export interface ToolSession {
+ 	getActiveModelString?: () => string | undefined;
+ 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
+ 	getActiveModel?: () => Model | undefined;
++	/** Show the user a notice that the model should not act on, such as a warning about the model a subagent runs on. */
++	emitNotice?: (level: "info" | "warning" | "error", message: string, source?: string) => void;
+ 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
+ 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
+ 	/**
+diff --git a/packages/coding-agent/src/vibe/runtime.ts b/packages/coding-agent/src/vibe/runtime.ts
+index 0b7df3a9f9..223606bc71 100644
+--- a/packages/coding-agent/src/vibe/runtime.ts
++++ b/packages/coding-agent/src/vibe/runtime.ts
+@@ -364,9 +364,13 @@ export class VibeSessionRegistry {
+ 			settingsOverride: agentModelOverrides[agentName],
+ 			agentModel: agent.model,
+ 			settings: session.settings,
+-			activeModelPattern: session.getActiveModelString?.(),
+-			fallbackModelPattern: session.getModelString?.(),
+ 		});
++		// A worker never takes the parent's model. Vibe has no automatic selection, so without an explicit source it stops.
++		if (patterns.length === 0) {
++			throw new ToolError(
++				`Vibe worker not started. No model is configured for the "${agentName}" agent. No parent model is used. The parent agent must stop and report this to the user. The parent agent must not change settings and must not choose a model.`,
++			);
++		}
+ 		return { agent, modelOverride: patterns, modelRole: role };
+ 	}
+ 
+@@ -1296,7 +1300,6 @@ export class VibeSessionRegistry {
+ 			detached: true,
+ 			modelOverride: record.modelOverride,
+ 			modelRole: record.modelRole,
+-			parentActiveModelPattern: session.getActiveModelString?.(),
+ 			thinkingLevel: record.agent.thinkingLevel,
+ 			sessionFile,
+ 			persistArtifacts: Boolean(sessionFile),
+diff --git a/packages/coding-agent/test/agent-session-prewalk.test.ts b/packages/coding-agent/test/agent-session-prewalk.test.ts
+index 0e3d4378aa..cbd8f586fb 100644
+--- a/packages/coding-agent/test/agent-session-prewalk.test.ts
++++ b/packages/coding-agent/test/agent-session-prewalk.test.ts
+@@ -185,6 +185,20 @@ describe("AgentSession prewalk", () => {
+ 		return { session: created, primary, target, settings, requested, nudges };
+ 	}
+ 
++	it("never arms a hand-off in a subagent session, even when one is passed in", async () => {
++		const created = createLifecycleSession(
++			[toolCall("sub-todo", "todo"), toolCall("sub-write", "write"), { content: ["done"] }],
++			{ agentKind: "sub" },
++		);
++
++		expect(created.session.getPrewalkState()).toBeUndefined();
++		await created.session.prompt("subagent task");
++
++		// A subagent runs on exactly one model: the first write must not move it to the target.
++		expect(created.session.model?.id).toBe(created.primary.id);
++		expect(created.requested.every(id => id === created.primary.id)).toBe(true);
++	});
++
+ 	it("/new restores the previous prewalk source and effort, then requires a fresh todo before handoff", async () => {
+ 		const created = createLifecycleSession([
+ 			toolCall("old-todo", "todo"),
+diff --git a/packages/coding-agent/test/bundled-agent-parsing.test.ts b/packages/coding-agent/test/bundled-agent-parsing.test.ts
+index a7cfbd58db..b053359f5a 100644
+--- a/packages/coding-agent/test/bundled-agent-parsing.test.ts
++++ b/packages/coding-agent/test/bundled-agent-parsing.test.ts
+@@ -102,6 +102,7 @@ describe("bundled agent parsing", () => {
+ 			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings })).toEqual({
+ 				patterns: [model],
+ 				role,
++				origin: "agent",
+ 			});
+ 		}
+ 	});
+diff --git a/packages/coding-agent/test/discovery/agent-discovery-disabled-providers.test.ts b/packages/coding-agent/test/discovery/agent-discovery-disabled-providers.test.ts
+index 8261271b25..c73a118294 100644
+--- a/packages/coding-agent/test/discovery/agent-discovery-disabled-providers.test.ts
++++ b/packages/coding-agent/test/discovery/agent-discovery-disabled-providers.test.ts
+@@ -93,12 +93,8 @@ describe("discoverAgents — claude-plugins disabled provider", () => {
+ 		const { agents } = await discoverAgents(tempHome, tempHome);
+ 		const agent = agents.find(candidate => candidate.name === "simplifier");
+ 		expect(agent).toBeDefined();
+-		expect(
+-			resolveAgentModelPatterns({
+-				agentModel: agent?.model,
+-				activeModelPattern: "openai-codex/gpt-5.6-sol",
+-			}),
+-		).toEqual(["openai-codex/gpt-5.6-sol"]);
++		// The plugin agent names no model, and a subagent never takes the session's.
++		expect(resolveAgentModelPatterns({ agentModel: agent?.model })).toEqual([]);
+ 	});
+ 
+ 	test("disabledProviders wins over the opt-in", async () => {
+diff --git a/packages/coding-agent/test/eval/agent-bridge-policy.test.ts b/packages/coding-agent/test/eval/agent-bridge-policy.test.ts
+index 8ab25993b4..49feeaf544 100644
+--- a/packages/coding-agent/test/eval/agent-bridge-policy.test.ts
++++ b/packages/coding-agent/test/eval/agent-bridge-policy.test.ts
+@@ -31,7 +31,8 @@ const taskAgent = {
+ 	systemPrompt: "Run the task.",
+ 	source: "bundled",
+ 	spawns: "*",
+-	model: ["@task"],
++	// A subagent never takes the parent's model, so each agent names its own.
++	model: ["p/task-model"],
+ } satisfies AgentDefinition;
+ 
+ const reviewerAgent = {
+@@ -39,7 +40,7 @@ const reviewerAgent = {
+ 	description: "Reviewer agent",
+ 	systemPrompt: "Review the task.",
+ 	source: "bundled",
+-	model: ["@smol"],
++	model: ["p/reviewer-model"],
+ } satisfies AgentDefinition;
+ 
+ const jobManagers = new Set<AsyncJobManager>();
+@@ -331,7 +332,6 @@ describe("runEvalAgent", () => {
+ 		expect(firstOptions.taskDepth).toBe(2);
+ 		expect(firstOptions.signal).not.toBe(abortController.signal);
+ 		expect(firstOptions.signal?.aborted).toBe(false);
+-		expect(firstOptions.parentActiveModelPattern).toBe("p/current");
+ 		expect(firstOptions.outputSchema).toBe(schema);
+ 		expect(firstOptions.outputSchemaOverridesAgent).toBe(true);
+ 		// task.structured is off (default); eval agents keep yield + schemas regardless.
+@@ -340,7 +340,7 @@ describe("runEvalAgent", () => {
+ 		expect(firstOptions.assignment).toBe("hello");
+ 		expect(firstOptions.description).toBe("My Agent");
+ 		// No per-call override: the agent's own frontmatter model applies.
+-		expect(firstOptions.modelOverride).toEqual(["p/current"]);
++		expect(firstOptions.modelOverride).toEqual(["p/task-model"]);
+ 		expect(secondOptions.outputSchema).toBeUndefined();
+ 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
+ 	});
+diff --git a/packages/coding-agent/test/eval/agent-bridge.test.ts b/packages/coding-agent/test/eval/agent-bridge.test.ts
+index 15d9bb4a54..88d9f0f481 100644
+--- a/packages/coding-agent/test/eval/agent-bridge.test.ts
++++ b/packages/coding-agent/test/eval/agent-bridge.test.ts
+@@ -104,6 +104,7 @@ describe("runEvalAgent", () => {
+ 			description: "Task agent",
+ 			systemPrompt: "Handle task",
+ 			source: "bundled",
++			model: ["p/task-model"],
+ 		};
+ 		const sessionManager = SessionManager.inMemory();
+ 		sessionManager.beginTurnBudget(100_000, true);
+@@ -125,6 +126,7 @@ describe("runEvalAgent", () => {
+ 			description: "Task agent",
+ 			systemPrompt: "Handle task",
+ 			source: "bundled",
++			model: ["p/task-model"],
+ 		};
+ 		const sessionManager = SessionManager.inMemory();
+ 		sessionManager.beginTurnBudget(100_000, false);
+@@ -151,6 +153,7 @@ describe("runEvalAgent", () => {
+ 			description: "Task agent",
+ 			systemPrompt: "Handle task",
+ 			source: "bundled",
++			model: ["p/task-model"],
+ 		};
+ 		const sessionManager = SessionManager.inMemory();
+ 		sessionManager.beginTurnBudget(100_000, true);
+@@ -176,6 +179,7 @@ describe("runEvalAgent", () => {
+ 			description: "Task agent",
+ 			systemPrompt: "Handle task",
+ 			source: "bundled",
++			model: ["p/task-model"],
+ 		};
+ 		const recordEvalSubagentUsage = vi.fn();
+ 		const session = {
+diff --git a/packages/coding-agent/test/eval/workpool-bridge.test.ts b/packages/coding-agent/test/eval/workpool-bridge.test.ts
+index 51c55c9b27..665bdc4fd9 100644
+--- a/packages/coding-agent/test/eval/workpool-bridge.test.ts
++++ b/packages/coding-agent/test/eval/workpool-bridge.test.ts
+@@ -15,6 +15,7 @@ const SCOUT: AgentDefinition = {
+ 	description: "Test scout",
+ 	systemPrompt: "Inspect things.",
+ 	source: "bundled",
++	model: ["p/scout-model"],
+ };
+ 
+ const managers = new Set<AsyncJobManager>();
+diff --git a/packages/coding-agent/test/helpers/task-model-pin.ts b/packages/coding-agent/test/helpers/task-model-pin.ts
+new file mode 100644
+index 0000000000..a5a0cefd3e
+--- /dev/null
++++ b/packages/coding-agent/test/helpers/task-model-pin.ts
+@@ -0,0 +1,17 @@
++import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
++
++/**
++ * A subagent never takes the parent's model, so a test that spawns one through the real preflight needs an
++ * explicit model source. These settings give every bundled agent a `task.agentModelOverrides` entry.
++ * Pass the test's own settings: a per-call `model` conflicts with an override, so a test that enables
++ * `task.perCallModel` gets no pin and names its models itself.
++ */
++export function pinnedTaskModels(
++	settings: Record<string, unknown> = {},
++	model = "openai/gpt-4.1-mini",
++): { "task.agentModelOverrides"?: Record<string, string> } {
++	if (settings["task.perCallModel"] !== undefined) return {};
++	return {
++		"task.agentModelOverrides": Object.fromEntries(loadBundledAgents().map(agent => [agent.name, model])),
++	};
++}
+diff --git a/packages/coding-agent/test/issue-2750-subagent-runtime-fallback.test.ts b/packages/coding-agent/test/issue-2750-subagent-runtime-fallback.test.ts
+index 252371fd23..c766db4a88 100644
+--- a/packages/coding-agent/test/issue-2750-subagent-runtime-fallback.test.ts
++++ b/packages/coding-agent/test/issue-2750-subagent-runtime-fallback.test.ts
+@@ -26,6 +26,13 @@ import { createSessionDefaults } from "./helpers/session-defaults";
+ 
+ import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+ 
++/** The chains that could still move a child: every non-empty entry. A pinned child keeps none but the user's own for its exact model. */
++function nonEmptyChains(chains: Record<string, string[]> | undefined): Record<string, string[]> {
++	return Object.fromEntries(
++		Object.entries(chains ?? {}).filter(([, chain]) => Array.isArray(chain) && chain.length > 0),
++	);
++}
++
+ function model(provider: string, id: string): Model<Api> {
+ 	return buildModel({
+ 		provider,
+@@ -178,7 +185,7 @@ describe("subagent runtime model resolution", () => {
+ 		});
+ 	}
+ 
+-	it("keeps a subagent fallback reachable when default uses the same primary model", async () => {
++	it("offers no fallback candidate when default uses the same primary model and the request lists a second model", async () => {
+ 		const primary = model("primary", "bad-runtime-model");
+ 		const fallback = model("fallback", "working-model");
+ 		let candidates: string[] = [];
+@@ -228,10 +235,11 @@ describe("subagent runtime model resolution", () => {
+ 			} as never,
+ 			enableLsp: false,
+ 		});
+-		expect(candidates).toEqual(["fallback/working-model"]);
++		// The second requested model is not a fallback; with the empty pinned chain no candidate remains.
++		expect(candidates).toEqual([]);
+ 	});
+ 
+-	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
++	it("pins a multi-model request to the one model it resolved and drops every other chain", async () => {
+ 		const primary = model("primary", "bad-runtime-model");
+ 		const fallback = model("fallback", "working-model");
+ 		let childFallbackChains: Record<string, string[]> | undefined;
+@@ -282,14 +290,16 @@ describe("subagent runtime model resolution", () => {
+ 			}
+ 		}
+ 		expect(firstFallbackRole).toBe("subagent:issue-2750");
+-		expect(subagentFallbackChain).toEqual(["fallback/working-model"]);
+-		expect(inheritedFallbackChain).toEqual(["global/inherited-model"]);
++		// The second entry of the request is not a fallback, and `default`'s chain is gone for this child.
++		expect(subagentFallbackChain).toEqual([]);
++		expect(inheritedFallbackChain).toEqual([]);
+ 		expect(result.modelOverride).toEqual(["primary/bad-runtime-model", "fallback/working-model"]);
+-		expect(result.resolvedModel).toBe("fallback/working-model");
+-		expect(result.resolvedModelIsFallback).toBe(true);
++		// The fake session leaves its model anyway: the result must say so instead of naming only the served model.
++		expect(result.resolvedModelWarning).toContain("started on primary/bad-runtime-model");
++		expect(result.resolvedModelWarning).toContain("changed to fallback/working-model");
+ 	});
+ 
+-	it("persists the installed subagent fallback role for cold revival (#13789)", async () => {
++	it("persists the pinned subagent role for cold revival (#13789)", async () => {
+ 		const primary = model("primary", "bad-runtime-model");
+ 		const fallback = model("fallback", "working-model");
+ 		let persisted: RetryFallbackRole | undefined;
+@@ -316,7 +326,7 @@ describe("subagent runtime model resolution", () => {
+ 			} as never,
+ 			enableLsp: false,
+ 		});
+-		expect(persisted).toEqual({ primary: "primary/bad-runtime-model", chain: ["fallback/working-model"] });
++		expect(persisted).toEqual({ primary: "primary/bad-runtime-model", chain: [] });
+ 	});
+ 
+ 	it("does not attribute the run to a fallback that never served a turn", async () => {
+@@ -358,7 +368,7 @@ describe("subagent runtime model resolution", () => {
+ 		expect(result.resolvedModelIsFallback).toBeFalsy();
+ 	});
+ 
+-	it("inherits an explicitly configured default fallback chain for a single subagent model", async () => {
++	it("does not inherit the default or a role chain for a single subagent model", async () => {
+ 		const primary = model("lm-studio", "local-reviewer");
+ 		const fallback = model("openai-codex", "gpt-5.6-sol");
+ 		let childFallbackChains: Record<string, string[]> | undefined;
+@@ -399,12 +409,10 @@ describe("subagent runtime model resolution", () => {
+ 
+ 		expect(childModelRole).toBe("lm-studio/local-reviewer");
+ 		expect(childFallbackChainKeys[0]).toBe("subagent:single-model-configured-fallback");
+-		expect(childFallbackChains?.["subagent:single-model-configured-fallback"]).toEqual(["openai-codex/gpt-5.6-sol"]);
+-		expect(childFallbackChains?.default).toEqual(["openai-codex/gpt-5.6-sol"]);
+-		expect(childFallbackChains?.["existing-local-role"]).toEqual(["other-provider/other-model"]);
++		expect(nonEmptyChains(childFallbackChains)).toEqual({});
+ 	});
+ 
+-	it("inherits the aliased role's chain, not the default chain, for a role-alias subagent model", async () => {
++	it("drops the aliased role's chain and the default chain for a role-alias subagent model", async () => {
+ 		const fast = model("fast", "hy3");
+ 		const slow = model("slow", "opus");
+ 		let childFallbackChains: Record<string, string[]> | undefined;
+@@ -448,11 +456,10 @@ describe("subagent runtime model resolution", () => {
+ 		});
+ 
+ 		expect(childModelRole).toBe("fast/hy3");
+-		expect(childFallbackChains?.["subagent:role-alias-chain"]).toEqual(["fast/composer"]);
+-		expect(childFallbackChains?.default).toEqual(["slow/opus-backup"]);
++		expect(nonEmptyChains(childFallbackChains)).toEqual({});
+ 	});
+ 
+-	it("inherits the aliased role's chain when the spawn path pre-expands the alias", async () => {
++	it("drops the aliased role's chain when the spawn path pre-expands the alias", async () => {
+ 		// The real task flow (structured-subagent) resolves `@task` to a concrete
+ 		// selector before calling the executor and carries the role identity in
+ 		// `modelRole`. Re-deriving the role from the expanded patterns yields
+@@ -498,10 +505,10 @@ describe("subagent runtime model resolution", () => {
+ 			enableLsp: false,
+ 		});
+ 
+-		expect(childFallbackChains?.["subagent:pre-expanded-role"]).toEqual(["task-provider/sonnet"]);
++		expect(nonEmptyChains(childFallbackChains)).toEqual({});
+ 	});
+ 
+-	it("inherits the default chain for a role alias whose role configures no chain", async () => {
++	it("does not fall back to the default chain for a role alias whose role configures no chain", async () => {
+ 		const fast = model("fast", "hy3");
+ 		const slow = model("slow", "opus");
+ 		let childFallbackChains: Record<string, string[]> | undefined;
+@@ -538,7 +545,7 @@ describe("subagent runtime model resolution", () => {
+ 			enableLsp: false,
+ 		});
+ 
+-		expect(childFallbackChains?.["subagent:role-alias-default-chain"]).toEqual(["slow/opus-backup"]);
++		expect(nonEmptyChains(childFallbackChains)).toEqual({});
+ 	});
+ 
+ 	it("does not inherit the default chain when multiple requested models collapse to one candidate", async () => {
+@@ -576,13 +583,11 @@ describe("subagent runtime model resolution", () => {
+ 			enableLsp: false,
+ 		});
+ 
+-		expect(childModelRole).toBeUndefined();
+-		expect(childFallbackChains).toEqual({
+-			default: ["openai-codex/gpt-5.6-sol"],
+-		});
++		expect(childModelRole).toBe("lm-studio/local-reviewer");
++		expect(nonEmptyChains(childFallbackChains as Record<string, string[]>)).toEqual({});
+ 	});
+ 
+-	it("keeps a single local subagent model pinned without a configured fallback chain", async () => {
++	it("keeps a single local subagent model pinned with an empty chain", async () => {
+ 		const primary = model("lm-studio", "local-reviewer");
+ 		const parent = model("openai-codex", "gpt-5.6-sol");
+ 		let childModelRole: string | undefined;
+@@ -600,7 +605,6 @@ describe("subagent runtime model resolution", () => {
+ 			index: 0,
+ 			id: "single-model-no-fallback",
+ 			modelOverride: "lm-studio/local-reviewer",
+-			parentActiveModelPattern: "openai-codex/gpt-5.6-sol",
+ 			settings: Settings.isolated(),
+ 			modelRegistry: {
+ 				refresh: async () => {},
+@@ -610,10 +614,10 @@ describe("subagent runtime model resolution", () => {
+ 			enableLsp: false,
+ 		});
+ 
+-		expect(childModelRole).toBeUndefined();
++		expect(childModelRole).toBe("lm-studio/local-reviewer");
+ 	});
+ 
+-	it("leaves malformed default fallback entries for child validation", async () => {
++	it("drops malformed default fallback entries instead of leaving them for the child", async () => {
+ 		const primary = model("lm-studio", "local-reviewer");
+ 		let childFallbackChains: unknown;
+ 		let childModelRole: string | undefined;
+@@ -641,11 +645,11 @@ describe("subagent runtime model resolution", () => {
+ 			enableLsp: false,
+ 		});
+ 
+-		expect(childFallbackChains).toEqual({ default: [123] });
+-		expect(childModelRole).toBeUndefined();
++		expect(nonEmptyChains(childFallbackChains as Record<string, string[]>)).toEqual({});
++		expect(childModelRole).toBe("lm-studio/local-reviewer");
+ 	});
+ 
+-	it("preserves upstream routing selectors in the child retry fallback chain", async () => {
++	it("does not turn a second upstream-routed selector into a fallback", async () => {
+ 		const routedModel = model("openrouter", "z-ai/glm-4.7");
+ 		let childFallbackChains: Record<string, string[]> | undefined;
+ 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+@@ -673,23 +677,19 @@ describe("subagent runtime model resolution", () => {
+ 			enableLsp: false,
+ 		});
+ 
+-		expect(childFallbackChains?.["subagent:issue-2750-routed"]).toEqual(["openrouter/z-ai/glm-4.7@fireworks"]);
++		expect(nonEmptyChains(childFallbackChains)).toEqual({});
+ 	});
+ 
+ 	it("defers unresolved explicit subagent model selectors instead of picking an available default", async () => {
+ 		const defaultModel = model("zai", "glm-5.2");
+ 		let childModel: Model | undefined;
+ 		let childModelPattern: unknown;
+-		let childModelPatternAuthFallback: unknown;
+ 		let childModelPatternFallbackRole: unknown;
+-		let childModelPatternDefaultFallbackChain: unknown;
+ 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+ 			if (!options) throw new Error("Expected createAgentSession options");
+ 			childModel = options.model;
+ 			childModelPattern = options.modelPattern;
+-			childModelPatternAuthFallback = options.modelPatternAuthFallback;
+ 			childModelPatternFallbackRole = options.modelPatternFallbackRole;
+-			childModelPatternDefaultFallbackChain = options.modelPatternDefaultFallbackChain;
+ 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+ 		});
+ 
+@@ -701,7 +701,6 @@ describe("subagent runtime model resolution", () => {
+ 			index: 0,
+ 			id: "issue-4421",
+ 			modelOverride: ["openai-codex/gpt-5.5:auto"],
+-			parentActiveModelPattern: "openai-codex/gpt-5.5",
+ 			settings: Settings.isolated({
+ 				"retry.fallbackChains": {
+ 					default: ["openai-codex/gpt-5.6-sol"],
+@@ -717,9 +716,7 @@ describe("subagent runtime model resolution", () => {
+ 
+ 		expect(childModel).toBeUndefined();
+ 		expect(childModelPattern).toEqual(["openai-codex/gpt-5.5:auto"]);
+-		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
+ 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
+-		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
+ 	});
+ });
+ 
+@@ -772,7 +769,7 @@ describe("subagent runtime fallback on a real provider error", () => {
+ 	 * Spawns a real `pinned-worker` child whose role shares the `default` model. The primary
+ 	 * fails every request with a retryable error; `default`'s chain names a fallback that yields.
+ 	 */
+-	async function runPinnedWorker(id: string, roleChain: string[] | undefined) {
++	async function runPinnedWorker(id: string, roleChain: string[] | undefined, modelChain?: string[]) {
+ 		const authStorage = createInMemoryAuthStorage();
+ 		authStorage.keys.setRuntime("primary", "test-key");
+ 		authStorage.keys.setRuntime("fallback", "test-key");
+@@ -834,6 +831,7 @@ describe("subagent runtime fallback on a real provider error", () => {
+ 					"retry.fallbackChains": {
+ 						default: ["fallback/working-model"],
+ 						...(roleChain ? { "pinned-worker": roleChain } : {}),
++						...(modelChain ? { "primary/bad-runtime-model": modelChain } : {}),
+ 					},
+ 				}),
+ 				enableLsp: false,
+@@ -855,11 +853,24 @@ describe("subagent runtime fallback on a real provider error", () => {
+ 		expect(result.error).toContain(OVERLOADED);
+ 	});
+ 
+-	it("recovers on the inherited default fallback when the role has no chain", async () => {
+-		const { result, fallbackRequests } = await runPinnedWorker("UnsetRoleChain", undefined);
++	it("never moves to the default chain's model when the role has no chain", async () => {
++		const { result, primaryRequests, fallbackRequests } = await runPinnedWorker("UnsetRoleChain", undefined);
++		expect(primaryRequests).toBeGreaterThan(0);
++		expect(fallbackRequests).toBe(0);
++		expect(result.exitCode).not.toBe(0);
++		expect(result.resolvedModel).toBe("primary/bad-runtime-model");
++		expect(result.error).toContain(OVERLOADED);
++	});
++
++	it("uses the chain the user wrote for the exact model, and says so in the result", async () => {
++		const { result, fallbackRequests } = await runPinnedWorker("UserModelChain", undefined, [
++			"fallback/working-model",
++		]);
+ 		expect(fallbackRequests).toBeGreaterThan(0);
+ 		expect(result.exitCode).toBe(0);
+ 		expect(result.resolvedModel).toBe("fallback/working-model");
+ 		expect(result.resolvedModelIsFallback).toBe(true);
++		expect(result.resolvedModelWarning).toContain("started on primary/bad-runtime-model");
++		expect(result.resolvedModelWarning).toContain("changed to fallback/working-model");
+ 	});
+ });
+diff --git a/packages/coding-agent/test/issue-985-subagent-auth-fallback.test.ts b/packages/coding-agent/test/issue-985-subagent-auth-fallback.test.ts
+index b899f43091..08a04db31f 100644
+--- a/packages/coding-agent/test/issue-985-subagent-auth-fallback.test.ts
++++ b/packages/coding-agent/test/issue-985-subagent-auth-fallback.test.ts
+@@ -9,17 +9,12 @@ import {
+ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+ 
+ /**
+- * Regression test for #985.
++ * Regression test for #985, reworked for the one-model rule.
+  *
+- * Reporter screenshot showed parent session on DeepSeek V4 Pro dispatching a
+- * task subagent that resolved to `qwen3.6-plus-free` — an opencode-zen model
+- * the user has no working credentials for. The dispatch hit a provider that
+- * could not serve the model and surfaced a confusing API rejection instead of
+- * silently using the parent's already-authenticated model.
+- *
+- * The fix: at dispatch time, if the resolved subagent model has no working
+- * credentials, fall back to the parent session's active model (which by
+- * definition has working auth — the parent turn is using it).
++ * #985: a parent on DeepSeek V4 Pro dispatched a task subagent that resolved to `qwen3.6-plus-free`, an
++ * opencode-zen model the user has no credentials for. The old fix silently ran the child on the parent's model.
++ * A subagent never takes the parent's model. A later entry of the child's own list with working auth may stand
++ * in; with none, the unauthenticated primary stays and the spawn fails on its own provider error.
+  */
+ 
+ const parentModel: Model<Api> = buildModel({
+@@ -76,103 +71,60 @@ function createMockRegistry(options: MockRegistryOptions): ModelLookupRegistry &
+ 	} as unknown as ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> };
+ }
+ 
+-describe("issue #985: subagent dispatch auth fallback", () => {
+-	test("tries configured authenticated fallbacks before the parent model", async () => {
++describe("issue #985: subagent dispatch auth", () => {
++	test("tries the child's own authenticated later entries", async () => {
+ 		const registry = createMockRegistry({
+ 			models: [unauthedTaskModel, sharedModel, parentModel],
+ 			authedProviders: new Set(["deepseek"]),
+ 		});
+ 		const selected = await resolveModelOverrideWithAuthFallback(
+ 			["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
+-			"deepseek/deepseek-v4-pro",
+ 			registry,
+ 		);
+ 		expect(selected.model?.id).toBe("shared-id");
+ 		expect(selected.thinkingLevel?.toString()).toBe("high");
+-		expect(selected.authFallbackUsed).toBe(false);
+ 	});
+ 
+-	test("falls back to parent active model when resolved subagent model has no auth", async () => {
++	test("never swaps in another model when the resolved subagent model has no auth", async () => {
+ 		const registry = createMockRegistry({
+ 			models: [parentModel, unauthedTaskModel],
+ 			authedProviders: new Set(["deepseek"]), // user has DeepSeek; opencode-zen unauthed
+ 		});
+ 
+-		const result = await resolveModelOverrideWithAuthFallback(
+-			["qwen3.6-plus-free"],
+-			"deepseek/deepseek-v4-pro",
+-			registry,
+-		);
++		const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], registry);
+ 
+-		expect(result.authFallbackUsed).toBe(true);
+-		expect(result.model?.provider).toBe("deepseek");
+-		expect(result.model?.id).toBe("deepseek-v4-pro");
++		expect(result.model?.provider).toBe("opencode-zen");
++		expect(result.model?.id).toBe("qwen3.6-plus-free");
+ 	});
+ 
+-	test("does not fall back when resolved subagent model has working auth", async () => {
++	test("does not change the model when it has working auth", async () => {
+ 		const registry = createMockRegistry({
+ 			models: [parentModel, unauthedTaskModel],
+ 			authedProviders: new Set(["deepseek", "opencode-zen"]),
+ 		});
+ 
+-		const result = await resolveModelOverrideWithAuthFallback(
+-			["qwen3.6-plus-free"],
+-			"deepseek/deepseek-v4-pro",
+-			registry,
+-		);
++		const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], registry);
+ 
+-		expect(result.authFallbackUsed).toBe(false);
+ 		expect(result.model?.provider).toBe("opencode-zen");
+ 		expect(result.model?.id).toBe("qwen3.6-plus-free");
+ 	});
+ 
+-	test("returns primary unchanged when parent active model also has no auth", async () => {
++	test("returns the primary unchanged when nothing has auth", async () => {
+ 		const registry = createMockRegistry({
+ 			models: [parentModel, unauthedTaskModel],
+ 			authedProviders: new Set(), // nothing authed
+ 		});
+ 
+-		const result = await resolveModelOverrideWithAuthFallback(
+-			["qwen3.6-plus-free"],
+-			"deepseek/deepseek-v4-pro",
+-			registry,
+-		);
++		const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], registry);
+ 
+-		expect(result.authFallbackUsed).toBe(false);
+ 		expect(result.model?.provider).toBe("opencode-zen");
+ 		expect(result.model?.id).toBe("qwen3.6-plus-free");
+ 	});
+ 
+-	test("returns primary unchanged when no parent active model is provided", async () => {
+-		const registry = createMockRegistry({
+-			models: [parentModel, unauthedTaskModel],
+-			authedProviders: new Set(["deepseek"]),
+-		});
+-
+-		const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], undefined, registry);
+-
+-		expect(result.authFallbackUsed).toBe(false);
+-		expect(result.model?.provider).toBe("opencode-zen");
+-	});
+-
+-	test("does not fall back when subagent and parent resolve to the same model", async () => {
+-		const registry = createMockRegistry({
+-			models: [sharedModel],
+-			authedProviders: new Set(), // even with no auth, identical model means no benefit
+-		});
+-
+-		const result = await resolveModelOverrideWithAuthFallback(["deepseek/shared-id"], "deepseek/shared-id", registry);
+-
+-		expect(result.authFallbackUsed).toBe(false);
+-		expect(result.model?.id).toBe("shared-id");
+-	});
+-
+ 	test("treats keyless providers (kNoAuth marker) as authenticated", async () => {
+ 		// Keyless-by-design providers (Ollama, llama.cpp, lm-studio) advertise the
+ 		// kNoAuth sentinel from getApiKey to signal that they do not require
+-		// credentials. The helper treats this as authenticated so an explicitly
+-		// configured local model is never silently rerouted to the parent's
+-		// remote provider (see #1008).
++		// credentials (see #1008).
+ 		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
+ 			getAvailable: () => [parentModel, unauthedTaskModel],
+ 			getApiKey: async (model: Model<Api>) => {
+@@ -182,24 +134,17 @@ describe("issue #985: subagent dispatch auth fallback", () => {
+ 			},
+ 		} as never;
+ 
+-		const result = await resolveModelOverrideWithAuthFallback(
+-			["qwen3.6-plus-free"],
+-			"deepseek/deepseek-v4-pro",
+-			registry,
+-		);
++		const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], registry);
+ 
+-		expect(result.authFallbackUsed).toBe(false);
+ 		expect(result.model?.provider).toBe("opencode-zen");
+ 		expect(result.model?.id).toBe("qwen3.6-plus-free");
+ 	});
+ });
+ 
+ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth", () => {
+-	// The pre-flight auth check in resolveModelOverrideWithAuthFallback calls
+-	// getApiKey without a session id. For providers with session-sticky OAuth
+-	// credentials, this can return undefined even though the credential is
+-	// usable once the subagent session starts. The fix forwards a sessionId
+-	// so session-sticky credentials resolve during the pre-flight check.
++	// The pre-flight auth check calls getApiKey. For providers with session-sticky OAuth credentials, a call
++	// without a session id can return undefined even though the credential is usable once the subagent session
++	// starts. The check forwards a sessionId so session-sticky credentials resolve.
+ 	test("forwards sessionId to getApiKey for the primary model", async () => {
+ 		let receivedSessionId: string | undefined;
+ 		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
+@@ -216,19 +161,18 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
+ 		} as never;
+ 
+ 		const result = await resolveModelOverrideWithAuthFallback(
+-			["qwen3.6-plus-free"],
+-			"deepseek/deepseek-v4-pro",
++			["qwen3.6-plus-free", "deepseek/deepseek-v4-pro"],
+ 			registry,
+ 			undefined,
+ 			"subagent-session-123",
+ 		);
+ 
+ 		expect(receivedSessionId).toBe("subagent-session-123");
+-		expect(result.authFallbackUsed).toBe(false);
+ 		expect(result.model?.provider).toBe("opencode-zen");
+ 		expect(result.model?.id).toBe("qwen3.6-plus-free");
+ 	});
+-	test("forwards sessionId to getApiKey for the fallback model", async () => {
++
++	test("forwards sessionId to getApiKey for a later entry of the child's own list", async () => {
+ 		const receivedSessionIds: string[] = [];
+ 		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
+ 			getAvailable: () => [parentModel, unauthedTaskModel],
+@@ -240,34 +184,15 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
+ 		} as never;
+ 
+ 		const result = await resolveModelOverrideWithAuthFallback(
+-			["qwen3.6-plus-free"],
+-			"deepseek/deepseek-v4-pro",
++			["qwen3.6-plus-free", "deepseek/deepseek-v4-pro"],
+ 			registry,
+ 			undefined,
+ 			"subagent-session-456",
+ 		);
+ 
+ 		expect(receivedSessionIds).toEqual(["opencode-zen:subagent-session-456", "deepseek:subagent-session-456"]);
+-		expect(result.authFallbackUsed).toBe(true);
+ 		expect(result.model?.provider).toBe("deepseek");
+ 	});
+-	test("preserves the requested model warning when auth falls back", async () => {
+-		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
+-			getAvailable: () => [parentModel, unauthedTaskModel],
+-			getApiKey: async (model: Model<Api>) => (model.provider === "deepseek" ? "sk-test" : undefined),
+-		} as never;
+-
+-		const result = await resolveModelOverrideWithAuthFallback(
+-			["qwen3.6-plus-free:invalid"],
+-			"deepseek/deepseek-v4-pro",
+-			registry,
+-		);
+-
+-		expect(result.authFallbackUsed).toBe(true);
+-		expect(result.warning).toBe(
+-			'Invalid thinking level "invalid" in pattern "qwen3.6-plus-free:invalid". Using default instead.',
+-		);
+-	});
+ });
+ 
+ describe("issue #11709: disabled provider subagent model resolution", () => {
+@@ -287,7 +212,6 @@ describe("issue #11709: disabled provider subagent model resolution", () => {
+ 
+ 		const result = await resolveModelOverrideWithAuthFallback(
+ 			["opencode-zen/qwen3.6-plus-free", "deepseek/deepseek-v4-pro"],
+-			undefined,
+ 			registry,
+ 			settings,
+ 		);
+diff --git a/packages/coding-agent/test/model-resolver.test.ts b/packages/coding-agent/test/model-resolver.test.ts
+index 640e249d0a..27f7a30099 100644
+--- a/packages/coding-agent/test/model-resolver.test.ts
++++ b/packages/coding-agent/test/model-resolver.test.ts
+@@ -1236,7 +1236,7 @@ describe("resolveAgentModelPatterns", () => {
+ 				agentModel: ["@definition"],
+ 				settings,
+ 			}),
+-		).toEqual({ patterns: ["openai/gpt-4o"], role: "override" });
++		).toEqual({ patterns: ["openai/gpt-4o"], role: "override", origin: "override" });
+ 
+ 		expect(
+ 			resolveAgentModelSelection({
+@@ -1245,7 +1245,7 @@ describe("resolveAgentModelPatterns", () => {
+ 				agentModel: ["@definition"],
+ 				settings,
+ 			}),
+-		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition" });
++		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition", origin: "agent" });
+ 
+ 		// An explicit selector carries no role identity, so the child must not
+ 		// capture the routing of a role that happens to name the same model.
+@@ -1256,24 +1256,23 @@ describe("resolveAgentModelPatterns", () => {
+ 				agentModel: ["@definition"],
+ 				settings,
+ 			}),
+-		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
++		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined, origin: "request" });
+ 	});
+ 
+-	test("falls back to the active session model when @task is unset", () => {
++	test("chooses no model when @task is unset: the session model and the default role are not a source", () => {
+ 		const settings = Settings.isolated({
+ 			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+ 		});
+ 
+-		const result = resolveAgentModelPatterns({
+-			agentModel: "@task",
+-			settings,
+-			activeModelPattern: "openai/gpt-4o",
++		expect(resolveAgentModelSelection({ agentModel: "@task", settings })).toEqual({
++			patterns: [],
++			role: undefined,
++			origin: "none",
+ 		});
+-
+-		expect(result).toEqual(["openai/gpt-4o"]);
++		expect(resolveAgentModelSelection({ settings })).toEqual({ patterns: [], role: undefined, origin: "none" });
+ 	});
+ 
+-	test("uses the configured task role before falling back to the session model", () => {
++	test("uses the configured task role", () => {
+ 		const settings = Settings.isolated({
+ 			modelRoles: {
+ 				default: "openai/gpt-4o",
+@@ -1284,7 +1283,6 @@ describe("resolveAgentModelPatterns", () => {
+ 		const result = resolveAgentModelPatterns({
+ 			agentModel: "@task",
+ 			settings,
+-			activeModelPattern: "openai/gpt-4o",
+ 		});
+ 
+ 		expect(result).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+diff --git a/packages/coding-agent/test/sdk-model-selection.test.ts b/packages/coding-agent/test/sdk-model-selection.test.ts
+index 5dea364947..cd71356099 100644
+--- a/packages/coding-agent/test/sdk-model-selection.test.ts
++++ b/packages/coding-agent/test/sdk-model-selection.test.ts
+@@ -686,7 +686,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 		const { session, modelFallbackMessage } = await createAgentSession({
+ 			...buildSessionOptions("runtime-provider/runtime-model"),
+ 			settings,
+-			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+ 		});
+ 
+ 		try {
+@@ -765,7 +764,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 		}
+ 	});
+ 
+-	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
++	test("keeps the requested model when a deferred subagent modelPattern has no working credentials", async () => {
+ 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+ 		if (!parentModel) {
+ 			throw new Error("Expected bundled anthropic parent model");
+@@ -798,12 +797,12 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 			preloadedCustomToolPaths: [],
+ 			toolNames: ["read"],
+ 			modelPattern: "runtime-provider/runtime-model",
+-			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
+ 		});
+ 
+ 		try {
+-			expect(session.model?.provider).toBe(parentModel.provider);
+-			expect(session.model?.id).toBe(parentModel.id);
++			// Another authenticated model exists, but nothing swaps it in for the one the pattern names.
++			expect(session.model?.provider).toBe("runtime-provider");
++			expect(session.model?.id).toBe("runtime-model");
+ 			expect(modelFallbackMessage).toBeUndefined();
+ 		} finally {
+ 			await session.dispose();
+@@ -1170,7 +1169,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 		}
+ 	});
+ 
+-	test("preserves deferred bare role fallback chains", async () => {
++	test("pins a deferred bare role to its first model with no chain", async () => {
+ 		const settings = Settings.isolated();
+ 		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
+ 
+@@ -1184,9 +1183,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 			expect(session.model?.provider).toBe("runtime-provider");
+ 			expect(session.model?.id).toBe("runtime-model");
+ 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
+-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
+-				"runtime-provider/runtime-fallback-model",
+-			]);
++			// Later patterns are not fallbacks: the child stays on the model it started on.
++			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([]);
+ 			expect(modelFallbackMessage).toBeUndefined();
+ 		} finally {
+ 			await session.dispose();
+@@ -1311,7 +1309,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 		).rejects.toThrow("reserve policy is fail-closed");
+ 	});
+ 
+-	test("installs fallback chain for remaining deferred subagent modelPattern candidates", async () => {
++	test("installs an empty chain for a deferred subagent modelPattern with several candidates", async () => {
+ 		const { session } = await createAgentSession({
+ 			...buildSessionOptions(["runtime-provider/runtime-model", "runtime-provider/runtime-fallback-model"]),
+ 			modelPatternFallbackRole: "subagent:deferred",
+@@ -1321,15 +1319,14 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 			expect(session.model?.provider).toBe("runtime-provider");
+ 			expect(session.model?.id).toBe("runtime-model");
+ 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
+-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
+-				"runtime-provider/runtime-fallback-model",
+-			]);
++			// Later patterns are not fallbacks: the child stays on the model it started on.
++			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([]);
+ 		} finally {
+ 			await session.dispose();
+ 		}
+ 	});
+ 
+-	test("installs an inherited fallback chain for a deferred singleton modelPattern", async () => {
++	test("does not install the default chain for a deferred subagent modelPattern", async () => {
+ 		const settings = Settings.isolated({
+ 			"retry.fallbackChains": {
+ 				default: ["runtime-provider/runtime-fallback-model"],
+@@ -1340,16 +1337,15 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 			...buildSessionOptions("runtime-provider/runtime-model"),
+ 			settings,
+ 			modelPatternFallbackRole: "subagent:deferred-default",
+-			modelPatternDefaultFallbackChain: ["runtime-provider/runtime-fallback-model"],
+ 		});
+ 
+ 		try {
+ 			expect(session.model?.provider).toBe("runtime-provider");
+ 			expect(session.model?.id).toBe("runtime-model");
+ 			expect(session.settings.getModelRole("subagent:deferred-default")).toBe("runtime-provider/runtime-model");
+-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred-default"]).toEqual([
+-				"runtime-provider/runtime-fallback-model",
+-			]);
++			// The default chain would move the child to a model nobody chose for it.
++			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred-default"]).toEqual([]);
++			expect(cfgRetryFallbackChains.get(session.settings).default).toEqual([]);
+ 		} finally {
+ 			await session.dispose();
+ 		}
+@@ -1388,7 +1384,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 			settings: ownerSettings(),
+ 			sessionManager,
+ 			modelPatternFallbackRole: role,
+-			modelPatternDefaultFallbackChain: [],
+ 		});
+ 
+ 		let retryFallback: RetryFallbackRole | undefined;
+@@ -1444,7 +1439,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 		}
+ 	});
+ 
+-	test("splits deferred comma-delimited modelPattern and installs fallback chain", async () => {
++	test("splits deferred comma-delimited modelPattern and installs an empty chain", async () => {
+ 		const { session } = await createAgentSession({
+ 			...buildSessionOptions("runtime-provider/runtime-model,runtime-provider/runtime-fallback-model"),
+ 			modelPatternFallbackRole: "subagent:deferred",
+@@ -1454,9 +1449,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
+ 			expect(session.model?.provider).toBe("runtime-provider");
+ 			expect(session.model?.id).toBe("runtime-model");
+ 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
+-			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([
+-				"runtime-provider/runtime-fallback-model",
+-			]);
++			// Later patterns are not fallbacks: the child stays on the model it started on.
++			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred"]).toEqual([]);
+ 		} finally {
+ 			await session.dispose();
+ 		}
+diff --git a/packages/coding-agent/test/task/autoload-skills.test.ts b/packages/coding-agent/test/task/autoload-skills.test.ts
+index d636076c78..357e7d610c 100644
+--- a/packages/coding-agent/test/task/autoload-skills.test.ts
++++ b/packages/coding-agent/test/task/autoload-skills.test.ts
+@@ -299,6 +299,7 @@ describe("autoloadSkills through task spawn", () => {
+ 						description: "Autoloads a late skill",
+ 						systemPrompt: "test",
+ 						source: "project",
++						model: ["openai/gpt-4o"],
+ 						autoloadSkills: ["late-skill"],
+ 					},
+ 				],
+diff --git a/packages/coding-agent/test/task/executor-pass-through.test.ts b/packages/coding-agent/test/task/executor-pass-through.test.ts
+index 964b7cf6b8..959a828a61 100644
+--- a/packages/coding-agent/test/task/executor-pass-through.test.ts
++++ b/packages/coding-agent/test/task/executor-pass-through.test.ts
+@@ -719,13 +719,13 @@ describe("runSubprocess per-agent service-tier overrides", () => {
+ 		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({});
+ 	});
+ 
+-	it("resolves the override against the auth-fallback model rather than the requested one", async () => {
++	it("resolves the override against the requested model even when another authenticated model exists", async () => {
+ 		const requested = getBundledModel("anthropic", "claude-sonnet-4-5");
+ 		const parentModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+ 		if (!requested || !parentModel) throw new Error("Expected bundled service-tier models to exist");
+ 		const session = yieldEmittingSession();
+ 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+-		// The requested Anthropic model has no working credentials; the parent's OpenAI model does.
++		// The requested Anthropic model has no working credentials; an OpenAI model does, but is never swapped in.
+ 		const modelRegistry = createModelRegistry([requested, parentModel], async model =>
+ 			model.provider === parentModel.provider ? "test-key" : undefined,
+ 		);
+@@ -733,7 +733,6 @@ describe("runSubprocess per-agent service-tier overrides", () => {
+ 		const result = await runSubprocess({
+ 			...baseOptions,
+ 			agent: { ...baseAgent, name: "scout", model: [`${requested.provider}/${requested.id}`] },
+-			parentActiveModelPattern: `${parentModel.provider}/${parentModel.id}`,
+ 			serviceTierOverride: "scale",
+ 			id: "subagent-agent-service-tier-auth-fallback",
+ 			settings: Settings.isolated({ "tier.subagent": "priority" }),
+@@ -741,9 +740,9 @@ describe("runSubprocess per-agent service-tier overrides", () => {
+ 		});
+ 
+ 		expect(result.exitCode).toBe(0);
+-		expect(spy.mock.calls[0]?.[0]?.model?.provider).toBe(parentModel.provider);
+-		// `scale` is an OpenAI-only tier: it lands on the fallback family and never on Anthropic.
+-		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({ openai: "scale" });
++		expect(spy.mock.calls[0]?.[0]?.model?.provider).toBe(requested.provider);
++		// `scale` is an OpenAI-only tier: it never lands on Anthropic, and no OpenAI model stands in.
++		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({});
+ 	});
+ 
+ 	it("scopes a concrete override to the model the session resolves instead of broadcasting it", async () => {
+diff --git a/packages/coding-agent/test/task/executor-prewalk.test.ts b/packages/coding-agent/test/task/executor-prewalk.test.ts
+index aadf4ef55c..952fda603c 100644
+--- a/packages/coding-agent/test/task/executor-prewalk.test.ts
++++ b/packages/coding-agent/test/task/executor-prewalk.test.ts
+@@ -118,7 +118,8 @@ const baseAgent: AgentDefinition = {
+ 	source: "bundled",
+ };
+ 
+-describe("runSubprocess per-agent prewalk", () => {
++// A subagent runs on exactly one model for its whole life, so no prewalk setting arms a hand-off in one.
++describe("runSubprocess never arms prewalk for a subagent", () => {
+ 	const primary = modelOrThrow("claude-sonnet-4-5");
+ 	const target = modelOrThrow("claude-sonnet-4-6");
+ 
+@@ -138,7 +139,7 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		vi.restoreAllMocks();
+ 	});
+ 
+-	it("resolves a frontmatter prewalk pattern to a target for the spawned session", async () => {
++	it("ignores a frontmatter prewalk pattern", async () => {
+ 		const spy = vi
+ 			.spyOn(sdkModule, "createAgentSession")
+ 			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+@@ -153,40 +154,10 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		});
+ 
+ 		expect(result.exitCode).toBe(0);
+-		const forwarded = spy.mock.calls[0]?.[0];
+-		expect(forwarded?.prewalk?.target.id).toBe(target.id);
+-		expect(forwarded?.prewalk?.target.provider).toBe(target.provider);
+-	});
+-
+-	it("waits for background discovery before resolving a configured prewalk target", async () => {
+-		const models = [primary];
+-		const registry = createModelRegistry(models);
+-		const refreshGate = Promise.withResolvers<void>();
+-		vi.spyOn(registry, "awaitBackgroundRefresh").mockImplementation(async () => {
+-			await refreshGate.promise;
+-			models.push(target);
+-		});
+-		const spy = vi
+-			.spyOn(sdkModule, "createAgentSession")
+-			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+-
+-		const run = runSubprocess({
+-			...baseOptions("subagent-prewalk-discovery", Settings.isolated()),
+-			modelRegistry: registry,
+-			agent: {
+-				...baseAgent,
+-				model: [`${primary.provider}/${primary.id}`],
+-				prewalk: `${target.provider}/${target.id}`,
+-			},
+-		});
+-		expect(spy).not.toHaveBeenCalled();
+-
+-		refreshGate.resolve();
+-		expect((await run).exitCode).toBe(0);
+-		expect(spy.mock.calls[0]?.[0]?.prewalk?.target.id).toBe(target.id);
++		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+ 	});
+ 
+-	it("reports the prewalk target as the active model after handoff", async () => {
++	it("says so in the result when the child leaves its starting model anyway", async () => {
+ 		const progressModels: string[] = [];
+ 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(
+ 			createSessionResult(yieldEmittingSession(["read", "yield"], { from: primary, to: target })),
+@@ -206,9 +177,11 @@ describe("runSubprocess per-agent prewalk", () => {
+ 
+ 		expect(result.exitCode).toBe(0);
+ 		expect(progressModels.at(-1)).toBe(`${target.provider}/${target.id}`);
++		expect(result.resolvedModelWarning).toContain(`started on ${primary.provider}/${primary.id}`);
++		expect(result.resolvedModelWarning).toContain(`changed to ${target.provider}/${target.id}`);
+ 	});
+ 
+-	it("resolves prewalk: true through the smol role default target", async () => {
++	it("ignores prewalk: true and its smol role default target", async () => {
+ 		const settings = Settings.isolated();
+ 		settings.setModelRole("smol", `${target.provider}/${target.id}`);
+ 		const spy = vi
+@@ -221,8 +194,7 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		});
+ 
+ 		expect(result.exitCode).toBe(0);
+-		const forwarded = spy.mock.calls[0]?.[0];
+-		expect(forwarded?.prewalk?.target.id).toBe(target.id);
++		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+ 	});
+ 
+ 	it("task.agentPrewalk 'off' disables a frontmatter-enabled prewalk", async () => {
+@@ -245,7 +217,7 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+ 	});
+ 
+-	it("task.agentPrewalk 'on' enables prewalk for an agent without frontmatter", async () => {
++	it("ignores task.agentPrewalk 'on'", async () => {
+ 		const settings = Settings.isolated();
+ 		settings.setModelRole("smol", `${target.provider}/${target.id}`);
+ 		cfgTaskAgentPrewalk.set(settings, { task: "on" });
+@@ -259,10 +231,10 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		});
+ 
+ 		expect(result.exitCode).toBe(0);
+-		expect(spy.mock.calls[0]?.[0]?.prewalk?.target.id).toBe(target.id);
++		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+ 	});
+ 
+-	it("task.prewalk arms the bundled generic task agent without frontmatter", async () => {
++	it("ignores task.prewalk for the bundled generic task agent", async () => {
+ 		const settings = Settings.isolated();
+ 		settings.setModelRole("smol", `${target.provider}/${target.id}`);
+ 		cfgTaskPrewalk.set(settings, true);
+@@ -276,7 +248,7 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		});
+ 
+ 		expect(result.exitCode).toBe(0);
+-		expect(spy.mock.calls[0]?.[0]?.prewalk?.target.id).toBe(target.id);
++		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+ 	});
+ 
+ 	it("task.prewalk defaults off and leaves other bundled agents alone when on", async () => {
+@@ -319,7 +291,7 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		expect(result.exitCode).toBe(0);
+ 		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
+ 	});
+-	it("keeps the todo tool active for a prewalk-armed subagent (the todo gate needs it)", async () => {
++	it("strips the todo tool even from a subagent whose definition asks for prewalk", async () => {
+ 		const session = yieldEmittingSession(["read", "todo", "yield"]);
+ 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+ 
+@@ -333,7 +305,7 @@ describe("runSubprocess per-agent prewalk", () => {
+ 		});
+ 
+ 		expect(result.exitCode).toBe(0);
+-		expect(session.getActiveToolNames()).toContain("todo");
++		expect(session.getActiveToolNames()).not.toContain("todo");
+ 	});
+ 
+ 	it("strips the parent-owned todo tool from non-prewalk subagents", async () => {
+@@ -359,6 +331,7 @@ describe("task tool plan-mode prewalk guard", () => {
+ 		description: "General-purpose task agent",
+ 		systemPrompt: "You are a task agent.",
+ 		source: "bundled",
++		model: ["openai/gpt-4.1-mini"],
+ 		prewalk: true,
+ 	};
+ 
+diff --git a/packages/coding-agent/test/task/failed-child-artifact.test.ts b/packages/coding-agent/test/task/failed-child-artifact.test.ts
+index ca79dd45ba..b82f39f21f 100644
+--- a/packages/coding-agent/test/task/failed-child-artifact.test.ts
++++ b/packages/coding-agent/test/task/failed-child-artifact.test.ts
+@@ -29,6 +29,7 @@ const AGENT: AgentDefinition = {
+ 	description: "Test worker",
+ 	systemPrompt: "Do the assigned work.",
+ 	source: "bundled",
++	model: ["openai/gpt-4.1-mini"],
+ };
+ 
+ const BLOCKING_AGENT: AgentDefinition = {
+@@ -37,6 +38,7 @@ const BLOCKING_AGENT: AgentDefinition = {
+ 	systemPrompt: "Review the work.",
+ 	source: "bundled",
+ 	blocking: true,
++	model: ["openai/gpt-4.1-mini"],
+ };
+ 
+ async function initRepo(dir: string): Promise<void> {
+diff --git a/packages/coding-agent/test/task/parked-subagent-prewalk-revive.test.ts b/packages/coding-agent/test/task/parked-subagent-prewalk-revive.test.ts
+deleted file mode 100644
+index fe4afe0ad7..0000000000
+--- a/packages/coding-agent/test/task/parked-subagent-prewalk-revive.test.ts
++++ /dev/null
+@@ -1,245 +0,0 @@
+-/**
+- * A kept-alive subagent that handed off through prewalk and then parked must revive on
+- * the handoff target, not on the model it was spawned with, and must not re-arm the
+- * consumed handoff.
+- */
+-import { afterEach, beforeEach, expect, it, vi } from "bun:test";
+-import * as fs from "node:fs/promises";
+-import * as os from "node:os";
+-import * as path from "node:path";
+-import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+-import { Effort } from "@oh-my-pi/pi-ai";
+-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+-import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+-import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+-import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+-import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+-
+-const AGENT_ID = "HandedOff";
+-const MOCK_API_SOURCE = "test/parked-subagent-prewalk-revive";
+-const PLANNER = "mock-model";
+-const TARGET = "mock-handoff";
+-const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+-
+-/** The mock carries no effort ladder; without one every configured effort clamps away. */
+-const thinking = { mode: "effort", efforts: [Effort.Medium, Effort.High] } as const;
+-
+-let savedEnv: Record<string, string | undefined> = {};
+-let root: string;
+-
+-function restoreEnvValue(key: string, value: string | undefined): void {
+-	if (value === undefined) {
+-		delete process.env[key];
+-		delete Bun.env[key];
+-		return;
+-	}
+-	process.env[key] = value;
+-	Bun.env[key] = value;
+-}
+-
+-beforeEach(async () => {
+-	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+-	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prewalk-revive-"));
+-	const home = path.join(root, "home");
+-	await fs.mkdir(home, { recursive: true });
+-	restoreEnvValue("HOME", home);
+-	vi.spyOn(os, "homedir").mockReturnValue(home);
+-	setAgentDir(path.join(home, ".omp", "agent"));
+-	AgentRegistry.resetGlobalForTests();
+-	AgentLifecycleManager.resetGlobalForTests();
+-	registerMockApi(MOCK_API_SOURCE);
+-});
+-
+-afterEach(async () => {
+-	await AgentLifecycleManager.global().dispose();
+-	AgentLifecycleManager.resetGlobalForTests();
+-	AgentRegistry.resetGlobalForTests();
+-	unregisterCustomApis(MOCK_API_SOURCE);
+-	vi.restoreAllMocks();
+-	for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
+-	__resetDirsFromEnvForTests();
+-	AgentStorage.close();
+-	closeModelCache();
+-	await removeWithRetries(root);
+-});
+-
+-it("revives a parked subagent on its prewalk handoff target, keeping its todo list and not re-arming", async () => {
+-	const cwd = path.join(root, "home", "work");
+-	const artifactsDir = path.join(root, "artifacts");
+-	await fs.mkdir(cwd, { recursive: true });
+-	await fs.mkdir(artifactsDir, { recursive: true });
+-
+-	const authStorage = createInMemoryAuthStorage();
+-	authStorage.keys.setRuntime("mock", "test-key");
+-	const modelRegistry = new ModelRegistry(authStorage);
+-	const planner = Object.assign(
+-		createMockModel({
+-			id: PLANNER,
+-			reasoning: true,
+-			handler: context => {
+-				if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
+-				if (!context.messages.some(message => message.role === "toolResult" && message.toolName === "todo")) {
+-					return {
+-						content: [
+-							{
+-								type: "toolCall",
+-								name: "todo",
+-								arguments: { op: "init", list: [{ phase: "Work", items: ["Write the file"] }] },
+-							},
+-						],
+-					};
+-				}
+-				return {
+-					content: [
+-						{
+-							type: "toolCall",
+-							name: "write",
+-							arguments: { path: path.join(cwd, "out.txt"), content: "done\n" },
+-						},
+-					],
+-				};
+-			},
+-		}),
+-		{ thinking },
+-	);
+-	const target = Object.assign(
+-		createMockModel({
+-			id: TARGET,
+-			reasoning: true,
+-			handler: context =>
+-				(context.tools ?? []).some(tool => tool.name === "yield")
+-					? { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] }
+-					: { content: ["label"] },
+-		}),
+-		{ thinking },
+-	);
+-	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+-	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [planner, target, ...catalogAvailable(kind)]);
+-
+-	try {
+-		const result = await runSubprocess({
+-			cwd,
+-			artifactsDir,
+-			agent: {
+-				name: "task",
+-				description: "test",
+-				systemPrompt: "test",
+-				tools: ["read", "write", "todo"],
+-				source: "bundled",
+-			},
+-			task: "write out.txt",
+-			index: 0,
+-			id: AGENT_ID,
+-			modelOverride: `mock/${PLANNER}:medium`,
+-			authStorage,
+-			modelRegistry,
+-			settings: Settings.isolated({
+-				"task.agentIdleTtlMs": 0,
+-				"task.agentPrewalk": { task: `mock/${TARGET}:high` },
+-				"async.enabled": false,
+-				"compaction.enabled": false,
+-				"retry.enabled": false,
+-				"todo.reminders": false,
+-				"advisor.enabled": false,
+-				modelRoles: { default: `mock/${PLANNER}` },
+-			}),
+-			enableLsp: false,
+-			enableMCP: false,
+-			enableIrc: false,
+-		});
+-		expect(result.exitCode).toBe(0);
+-
+-		const live = AgentRegistry.global().get(AGENT_ID)?.session;
+-		if (!live) throw new Error("Expected a kept-alive subagent session");
+-		expect(live.model?.id).toBe(TARGET);
+-		expect(live.configuredThinkingLevel()).toBe(Effort.High);
+-
+-		await AgentLifecycleManager.global().park(AGENT_ID);
+-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+-
+-		expect(revived.model?.id).toBe(TARGET);
+-		expect(revived.configuredThinkingLevel()).toBe(Effort.High);
+-		expect(revived.getPrewalkState()).toBeUndefined();
+-		expect(revived.getActiveToolNames()).toContain("todo");
+-	} finally {
+-		authStorage.close();
+-	}
+-}, 30_000);
+-
+-it("revives a parked per-call worker on its exact model, not on a session-local switch", async () => {
+-	const cwd = path.join(root, "home", "work");
+-	const artifactsDir = path.join(root, "artifacts");
+-	await fs.mkdir(cwd, { recursive: true });
+-	await fs.mkdir(artifactsDir, { recursive: true });
+-
+-	const authStorage = createInMemoryAuthStorage();
+-	authStorage.keys.setRuntime("mock", "test-key");
+-	const modelRegistry = new ModelRegistry(authStorage);
+-	const [exact, switched] = [PLANNER, TARGET].map(id =>
+-		Object.assign(
+-			createMockModel({
+-				id,
+-				reasoning: true,
+-				handler: context =>
+-					(context.tools ?? []).some(tool => tool.name === "yield")
+-						? { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] }
+-						: { content: ["label"] },
+-			}),
+-			{ thinking },
+-		),
+-	);
+-	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+-	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [exact, switched, ...catalogAvailable(kind)]);
+-	vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockResolvedValue(undefined);
+-	// Both models are operator-approved, so only the revive's model choice can move the worker.
+-	const settings = Settings.isolated({
+-		"task.agentIdleTtlMs": 0,
+-		"task.perCallModel": "on",
+-		"async.enabled": false,
+-		"compaction.enabled": false,
+-		"retry.enabled": false,
+-		"todo.reminders": false,
+-		"advisor.enabled": false,
+-		modelRoles: { default: `mock/${PLANNER}`, review: `mock/${PLANNER}`, smol: `mock/${TARGET}` },
+-	});
+-
+-	try {
+-		const result = await runSubprocess({
+-			cwd,
+-			artifactsDir,
+-			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+-			task: "answer",
+-			index: 0,
+-			id: AGENT_ID,
+-			modelOverride: `mock/${PLANNER}:medium`,
+-			perCallModelGrants: { settings, agentName: "task", agentSource: "bundled" },
+-			authStorage,
+-			modelRegistry,
+-			settings,
+-			enableLsp: false,
+-			enableMCP: false,
+-			enableIrc: false,
+-		});
+-		expect(result.exitCode).toBe(0);
+-
+-		const live = AgentRegistry.global().get(AGENT_ID)?.session;
+-		if (!live) throw new Error("Expected a kept-alive subagent session");
+-		expect(live.model?.id).toBe(PLANNER);
+-		// A focused worker can still be switched by hand; that persists a session-local model change.
+-		await live.setModelTemporary(switched);
+-		expect(live.sessionManager.getSessionLocalModelChange()?.model).toBe(`mock/${TARGET}`);
+-
+-		await AgentLifecycleManager.global().park(AGENT_ID);
+-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+-
+-		expect(revived.model?.id).toBe(PLANNER);
+-		expect(revived.configuredThinkingLevel()).toBe(Effort.Medium);
+-	} finally {
+-		authStorage.close();
+-	}
+-}, 30_000);
+diff --git a/packages/coding-agent/test/task/persisted-revive.test.ts b/packages/coding-agent/test/task/persisted-revive.test.ts
+index 1381081304..eb32742ba9 100644
+--- a/packages/coding-agent/test/task/persisted-revive.test.ts
++++ b/packages/coding-agent/test/task/persisted-revive.test.ts
+@@ -1371,7 +1371,6 @@ describe("persisted subagent revival", () => {
+ 		await reviver(ref);
+ 
+ 		expect(capturedOptions?.modelPattern).toEqual(["@review-fast", "anthropic/claude-sonnet-4-5"]);
+-		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+ 	});
+ 
+ 	it("restores compaction threshold behavior after parent settings change", async () => {
+@@ -1419,10 +1418,9 @@ describe("persisted subagent revival", () => {
+ 		await reviver(ref);
+ 
+ 		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
+-		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+ 	});
+ 
+-	it("reinstalls the spawn's subagent fallback chain so it still routes at a changed effort (#13789)", async () => {
++	it("re-pins the spawn's subagent role on revive so it still routes at a changed effort (#13789)", async () => {
+ 		const cwd = makeTempDir("@pi-revive-retry-fallback-");
+ 		const sessionFile = await createPersistedSession(cwd, false, "task", undefined, {
+ 			retryFallback: { primary: "xai-oauth/grok-4.7:high", chain: ["openai/gpt-4o-mini"] },
+@@ -1453,9 +1451,8 @@ describe("persisted subagent revival", () => {
+ 		const chainKey = resolveRetryFallbackChainKey(context, live, grok);
+ 		expect(chainKey).toBe("subagent:persisted-restricted");
+ 		if (!chainKey) throw new Error("Expected the revived subagent chain");
+-		expect(findRetryFallbackCandidates(context, chainKey, live, grok).map(candidate => candidate.raw)).toEqual([
+-			"openai/gpt-4o-mini",
+-		]);
++		// Re-pinned on revive: the saved chain named a model nobody chose, so no candidate remains.
++		expect(findRetryFallbackCandidates(context, chainKey, live, grok).map(candidate => candidate.raw)).toEqual([]);
+ 	});
+ 
+ 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {
+diff --git a/packages/coding-agent/test/task/prompt-cache.test.ts b/packages/coding-agent/test/task/prompt-cache.test.ts
+index 77a40e2bad..4765c8c362 100644
+--- a/packages/coding-agent/test/task/prompt-cache.test.ts
++++ b/packages/coding-agent/test/task/prompt-cache.test.ts
+@@ -222,7 +222,8 @@ describe("task sibling prompt-cache routing", () => {
+ 						description: "Review",
+ 						systemPrompt: "Review the assignment.",
+ 						source: "bundled",
+-						...(parentOverride ? { model: [`${provider}/${modelId}`] } : {}),
++						// A subagent never takes the parent's model, so the child names the model the parent also runs.
++						model: [`${provider}/${modelId}`],
+ 					},
+ 				],
+ 				projectAgentsDir: null,
+@@ -442,6 +443,7 @@ describe("task sibling prompt-cache routing", () => {
+ 					description: "Review",
+ 					systemPrompt: "Review the assignment.",
+ 					source: "bundled",
++					model: [`${model.provider}/${model.id}`],
+ 				},
+ 			],
+ 			projectAgentsDir: null,
+@@ -575,6 +577,7 @@ describe("task sibling prompt-cache routing", () => {
+ 					description: "Review",
+ 					systemPrompt: "Review the assignment.",
+ 					source: "bundled",
++					model: [`${initialModel.provider}/${initialModel.id}`],
+ 				},
+ 			],
+ 			projectAgentsDir: null,
+@@ -749,65 +752,6 @@ describe("task sibling prompt-cache routing", () => {
+ 		}
+ 	});
+ 
+-	it.each([
+-		["muse-code/muse-spark-1.3-contributor", "openai-codex", "gpt-6-luna", undefined],
+-		["openai-codex/gpt-6-luna", "muse-code", "muse-spark-1.3-contributor", "parent:task"],
+-	] as const)(
+-		"gates the authenticated fallback after deferred %s selection",
+-		async (requested, provider, modelId, expected) => {
+-			using directory = TempDir.createSync("@omp-task-cache-fallback-");
+-			vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network is disabled in this test"));
+-			const requests: Array<{ model: Model; cacheKey: string | undefined }> = [];
+-			const mock = createMockModel({ handler: { content: [{ type: "text", text: "Done." }] } });
+-			const realSettingsStream = settingsStream.createSettingsAwareStreamFn;
+-			vi.spyOn(settingsStream, "createSettingsAwareStreamFn").mockImplementation((settings, _base, slowMode) =>
+-				realSettingsStream(
+-					settings,
+-					(model, context, options) => {
+-						requests.push({ model, cacheKey: options?.promptCacheKey });
+-						return mock.stream(model, context, options);
+-					},
+-					slowMode,
+-				),
+-			);
+-			const authStorage = await AuthStorage.create(directory.join("auth.db"));
+-			authStorage.keys.setRuntime(provider, "test-key");
+-			try {
+-				const { session } = await sdk.createAgentSession({
+-					cwd: directory.path(),
+-					agentDir: directory.path(),
+-					authStorage,
+-					modelPattern: requested,
+-					modelPatternAuthFallback: `${provider}/${modelId}`,
+-					taskPromptCacheKey: "parent:task",
+-					sessionManager: SessionManager.inMemory(directory.path()),
+-					settings: Settings.isolated({
+-						"async.enabled": false,
+-						"marketplace.autoUpdate": "off",
+-						"compaction.enabled": false,
+-					}),
+-					toolNames: [],
+-					disableExtensionDiscovery: true,
+-					skills: [],
+-					contextFiles: [],
+-					promptTemplates: [],
+-					rules: [],
+-					enableMCP: false,
+-					enableLsp: false,
+-				});
+-				sessions.push(session);
+-				await session.agent.prompt("Review the change.");
+-				expect(requests).toHaveLength(1);
+-				expect(requests[0]?.model.provider).toBe(provider);
+-				expect(requests[0]?.model.id).toBe(modelId);
+-				expect(requests[0]?.cacheKey).toBe(expected);
+-			} finally {
+-				await Promise.all(sessions.splice(0).map(session => session.dispose()));
+-				authStorage.close();
+-			}
+-		},
+-	);
+-
+ 	const cacheModels = ["muse-spark-1.3-contributor", "muse-wonder-full-1.0-contributor"];
+ 	it.each(cacheModels)("rechecks %s while explicit session and request keys win", async modelId => {
+ 		using directory = TempDir.createSync("@omp-task-cache-model-");
+diff --git a/packages/coding-agent/test/task/spawn-advisory.test.ts b/packages/coding-agent/test/task/spawn-advisory.test.ts
+index 6d9ebd5a46..00c060b0ab 100644
+--- a/packages/coding-agent/test/task/spawn-advisory.test.ts
++++ b/packages/coding-agent/test/task/spawn-advisory.test.ts
+@@ -8,6 +8,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ // Contract: the task tool appends an advisory (never a rejection) steering the
+ // spawner toward more specific agent types when one call resolves ≥2 items to
+@@ -73,7 +74,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
+ 			cwd: "/tmp",
+ 			hasUI: false,
+ 			suppressSpawnAdvisory: suppress,
+-			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
++			settings: Settings.isolated({ ...pinnedTaskModels(), "task.isolation.enabled": false, "task.batch": true }),
+ 			getSessionFile: () => null,
+ 			getSessionSpawns: () => "*",
+ 		} as unknown as ToolSession;
+@@ -86,6 +87,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
+ 			// `task.disabledAgents` is what the task tool reads to drop scout from
+ 			// the rendered description and the appended specialization advisory.
+ 			settings: Settings.isolated({
++				...pinnedTaskModels(),
+ 				"task.isolation.enabled": false,
+ 				"task.batch": true,
+ 				"task.disabledAgents": ["scout"],
+diff --git a/packages/coding-agent/test/task/speculative-launch.test.ts b/packages/coding-agent/test/task/speculative-launch.test.ts
+index 1dfb407881..e6050ef783 100644
+--- a/packages/coding-agent/test/task/speculative-launch.test.ts
++++ b/packages/coding-agent/test/task/speculative-launch.test.ts
+@@ -24,12 +24,14 @@ import { BatchArgsScanner, type TaskLaunchSession } from "@oh-my-pi/pi-coding-ag
+ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ const taskAgent: AgentDefinition = {
+ 	name: "task",
+ 	description: "General-purpose task agent",
+ 	systemPrompt: "You are a task agent.",
+ 	source: "bundled",
++	model: ["openai/gpt-4.1-mini"],
+ };
+ 
+ const sink: SpeculativeOperationSink = {
+@@ -43,7 +45,12 @@ function createSession(manager: AsyncJobManager): ToolSession {
+ 	return {
+ 		cwd: "/tmp",
+ 		hasUI: false,
+-		settings: Settings.isolated({ "async.enabled": true, "task.batch": true, "task.perCallModel": "on" }),
++		settings: Settings.isolated({
++			...pinnedTaskModels({ "task.perCallModel": "on" }),
++			"async.enabled": true,
++			"task.batch": true,
++			"task.perCallModel": "on",
++		}),
+ 		getSessionFile: () => null,
+ 		getSessionSpawns: () => "*",
+ 		getAgentId: () => null,
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index e384fb1413..5bc74829d9 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -56,6 +56,8 @@ const AGENT: AgentDefinition = {
+ 	systemPrompt: "Do the assigned work.",
+ 	source: "bundled",
+ 	tools: ["read", "write", "ast_grep"],
++	// A subagent never takes the parent's model, so the test agent names its own.
++	model: ["openai/test-worker"],
+ 	output: { type: "object", properties: { agent: { type: "boolean" } } },
+ };
+ 
+@@ -640,7 +642,7 @@ describe("structured subagent primitive", () => {
+ 			modelOverride: ["openai/gpt-4o"],
+ 			modelRole: "definition",
+ 			modelRoute:
+-				"Automatic model selection unavailable; using existing model resolution. Extension replaced the model: pool test",
++				'Automatic model selection failed; using the model of the "worker" agent definition (anthropic/claude-opus-4-5). Extension replaced the model: pool test',
+ 		});
+ 		expect(events).toEqual([
+ 			{
+@@ -1541,8 +1543,7 @@ describe("per-call model preflight", () => {
+ 			}),
+ 		);
+ 		expect(policy.modelOverride).toEqual(["mock/target:high"]);
+-		// A requested model never falls back to the parent's.
+-		expect(policy.parentActiveModelPattern).toBeUndefined();
++		expect(policy.modelOrigin).toBe("per-call");
+ 	});
+ 
+ 	it.each(["SDK overlay", "nested subagent"])("reloads removed on-disk role grants through an %s", async kind => {
+@@ -1794,7 +1795,7 @@ describe("per-call model preflight", () => {
+ 		);
+ 		expect(policy.modelOverride).toEqual(["mock/agent-own"]);
+ 		expect(policy.perCallModelGrants).toBeUndefined();
+-		expect(policy.parentActiveModelPattern).toBe("mock/parent");
++		expect(policy.modelOrigin).toBe("agent");
+ 	});
+ 
+ 	describe("an agent shadowing the seance name", () => {
+diff --git a/packages/coding-agent/test/task/subagent-lsp.test.ts b/packages/coding-agent/test/task/subagent-lsp.test.ts
+index 738046e916..33a0174042 100644
+--- a/packages/coding-agent/test/task/subagent-lsp.test.ts
++++ b/packages/coding-agent/test/task/subagent-lsp.test.ts
+@@ -21,6 +21,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
+ import "@oh-my-pi/pi-coding-agent/tools/yield";
+ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+ import { createSessionDefaults } from "../helpers/session-defaults";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ const TEST_TASK: TaskParams = { agent: "task", name: "CheckLsp", task: "Inspect LSP tools." };
+ 
+@@ -109,6 +110,7 @@ function createSession(
+ 		hasUI: false,
+ 		enableLsp: options.parentEnableLsp,
+ 		settings: Settings.isolated({
++			...pinnedTaskModels(),
+ 			"async.enabled": false,
+ 			"task.isolation.enabled": options.isolationEnabled ?? false,
+ 			...(options.taskEnableLsp !== undefined ? { "task.enableLsp": options.taskEnableLsp } : {}),
+diff --git a/packages/coding-agent/test/task/task-batch.test.ts b/packages/coding-agent/test/task/task-batch.test.ts
+index 92638d289d..ad065e6b24 100644
+--- a/packages/coding-agent/test/task/task-batch.test.ts
++++ b/packages/coding-agent/test/task/task-batch.test.ts
+@@ -31,6 +31,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+ import { isRecord } from "@oh-my-pi/pi-utils";
+ 
+ import { cfgTaskDisabledAgents, cfgTaskEnableEffort, cfgTaskStructured } from "@oh-my-pi/pi-coding-agent/task/settings";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ const taskAgent: AgentDefinition = {
+ 	name: "task",
+@@ -51,7 +52,7 @@ function createSession(
+ 	return {
+ 		cwd: "/tmp",
+ 		hasUI: false,
+-		settings: Settings.isolated(options.settings ?? {}),
++		settings: Settings.isolated({ ...pinnedTaskModels(options.settings), ...(options.settings ?? {}) }),
+ 		getSessionFile: () => null,
+ 		getSessionSpawns: () => options.spawns ?? "*",
+ 		getAgentId: () => options.agentId ?? null,
+@@ -721,7 +722,16 @@ describe("task.batch spawning", () => {
+ 
+ 		const manager = createManager();
+ 		const tool = await TaskTool.create(
+-			createSession({ manager, settings: { "async.enabled": true, "task.batch": true, "task.structured": true } }),
++			createSession({
++				manager,
++				settings: {
++					"async.enabled": true,
++					"task.batch": true,
++					"task.structured": true,
++					// The agents here carry their own models.
++					"task.agentModelOverrides": {},
++				},
++			}),
+ 		);
+ 		const result = await tool.execute("tc-mixed-agents", {
+ 			context: "Shared routing context.",
+diff --git a/packages/coding-agent/test/task/task-blocking-split.test.ts b/packages/coding-agent/test/task/task-blocking-split.test.ts
+index cabf32a293..476c5bed93 100644
+--- a/packages/coding-agent/test/task/task-blocking-split.test.ts
++++ b/packages/coding-agent/test/task/task-blocking-split.test.ts
+@@ -28,6 +28,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+ import type { SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ const taskAgent: AgentDefinition = {
+ 	name: "task",
+@@ -48,7 +49,10 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
+ 	return {
+ 		cwd: "/tmp",
+ 		hasUI: false,
+-		settings: Settings.isolated(options.settings ?? { "async.enabled": true, "task.batch": true }),
++		settings: Settings.isolated({
++			...pinnedTaskModels(),
++			...(options.settings ?? { "async.enabled": true, "task.batch": true }),
++		}),
+ 		getSessionFile: () => null,
+ 		getSessionSpawns: () => "*",
+ 		getAgentId: () => null,
+diff --git a/packages/coding-agent/test/task/task-file.test.ts b/packages/coding-agent/test/task/task-file.test.ts
+index a68684650f..061f43e90f 100644
+--- a/packages/coding-agent/test/task/task-file.test.ts
++++ b/packages/coding-agent/test/task/task-file.test.ts
+@@ -17,6 +17,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+ import { recordApprovalGrant, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
+ import { getApprovalGrants } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
+ import type { AgentProgress, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+ 	return result.content.find(part => part.type === "text")?.text ?? "";
+@@ -96,6 +97,7 @@ describe("taskFile dispatch", () => {
+ 			cwd,
+ 			hasUI: false,
+ 			settings: Settings.isolated({
++				...pinnedTaskModels(settings),
+ 				"async.enabled": manager !== undefined,
+ 				"task.batch": batch,
+ 				"task.file": true,
+diff --git a/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts b/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
+new file mode 100644
+index 0000000000..1869282747
+--- /dev/null
++++ b/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
+@@ -0,0 +1,333 @@
++import { afterEach, describe, expect, it, vi } from "bun:test";
++import * as fs from "node:fs/promises";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import * as judgmentModule from "@oh-my-pi/pi-coding-agent/judgment";
++import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
++import * as autoModelModule from "@oh-my-pi/pi-coding-agent/task/auto-model";
++import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
++import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
++import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
++import {
++	resolveEffectiveSubagentPolicy,
++	runStructuredSubagent,
++	StructuredSubagentError,
++	type StructuredSubagentRequest,
++} from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
++import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
++import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
++
++/**
++ * A subagent never defaults to the parent's model. Every spawn without a per-call, host or seance model goes
++ * through classification. These tests run the real preflight and dispatch path (policy, classifier, artifact
++ * lease) with the judge stubbed and the child process mocked, so what they show is what a spawn would start.
++ */
++
++const PARENT = "mock/parent-model";
++const MODELS = [1, 2, 3].map(step =>
++	createMockModel({ id: `m${step}`, cost: { input: step, output: step, cacheRead: 0, cacheWrite: 0 } }),
++);
++const registry = { getAll: () => MODELS, getAvailable: () => MODELS } as unknown as ModelRegistry;
++
++/** A worker with no model of its own, so only classification, an override or nothing can choose one. */
++const BARE_AGENT: AgentDefinition = {
++	name: "worker",
++	description: "Test worker",
++	systemPrompt: "Do the assigned work.",
++	source: "bundled",
++};
++
++type Notice = { level: string; message: string; source?: string };
++
++interface Harness {
++	childSession: ToolSession;
++	notices: Notice[];
++	dispatched: executorModule.ExecutorOptions[];
++}
++
++function harness(settings: Record<string, unknown> = {}, agent: AgentDefinition = BARE_AGENT): Harness {
++	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
++	const notices: Notice[] = [];
++	const dispatched: executorModule.ExecutorOptions[] = [];
++	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
++		dispatched.push(options);
++		return result();
++	});
++	const childSession = {
++		cwd: "/tmp",
++		hasUI: false,
++		settings: Settings.isolated({ "task.maxRecursionDepth": 2, "task.isolation.enabled": false, ...settings }),
++		getSessionFile: () => null,
++		getSessionSpawns: () => "*",
++		getSessionAgents: () => [],
++		getPlanModeState: () => undefined,
++		modelRegistry: registry,
++		// The parent runs on PARENT; nothing below may ever hand it to a child.
++		getActiveModelString: () => PARENT,
++		getModelString: () => PARENT,
++		emitNotice: (level: string, message: string, source?: string) => notices.push({ level, message, source }),
++	} as unknown as ToolSession;
++	return { childSession, notices, dispatched };
++}
++
++function request(session: ToolSession, overrides: Partial<StructuredSubagentRequest> = {}): StructuredSubagentRequest {
++	return { session, invocationKind: "task", assignment: "Inspect the target.", agent: "worker", ...overrides };
++}
++
++function result(): SingleResult {
++	return {
++		index: 0,
++		id: "Worker",
++		agent: "worker",
++		agentSource: "bundled",
++		task: "Inspect the target.",
++		exitCode: 0,
++		output: "ok",
++		stderr: "",
++		truncated: false,
++		durationMs: 1,
++		tokens: 0,
++		requests: 1,
++	};
++}
++
++/** Stand in for the native judge: `answer` is the judge's reply, a thrown error is its failure. */
++function stubJudge(answer: { choice: string; confident: boolean } | Error): { calls: () => number } {
++	let calls = 0;
++	vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(true);
++	vi.spyOn(judgmentModule, "resolveJudge").mockReturnValue({
++		withCandidate: async (run: (candidate: unknown, kind: string) => Promise<unknown>) =>
++			run(
++				{
++					judge: async () => {
++						calls += 1;
++						if (answer instanceof Error) throw answer;
++						const other = answer.choice === "haiku" ? "sonnet" : "haiku";
++						const high = answer.confident ? 0.95 : 0.4;
++						return {
++							answers: {
++								model: {
++									choice: answer.choice,
++									confidence: high,
++									probabilities: { [answer.choice]: high, [other]: 1 - high },
++								},
++							},
++						};
++					},
++				},
++				"native",
++			),
++	} as never);
++	return { calls: () => calls };
++}
++
++function noNativeJudge(): void {
++	vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(false);
++	vi.spyOn(judgmentModule, "resolveJudge").mockImplementation(() => {
++		throw new Error("the judge must not run without a native judge");
++	});
++}
++
++afterEach(() => {
++	vi.restoreAllMocks();
++	resetRegisteredArtifactDirsForTests();
++});
++
++describe("a subagent never defaults to the parent model", () => {
++	it.each(["task", "eval"] as const)(
++		"fails a %s spawn before anything starts when no alias and no explicit model exist",
++		async invocationKind => {
++			const { childSession, dispatched, notices } = harness();
++			const classify = vi.spyOn(autoModelModule, "classifyAutoTaskModel");
++
++			const failure = await runStructuredSubagent(request(childSession, { invocationKind })).catch(error => error);
++
++			expect(failure).toBeInstanceOf(StructuredSubagentError);
++			expect((failure as StructuredSubagentError).kind).toBe("preflight");
++			const message = (failure as StructuredSubagentError).message;
++			expect(message).toContain("Subagent not started");
++			expect(message).toContain("no usable role alias exists (0 configured, 0 usable)");
++			expect(message).toContain("the user must add at least two role aliases to modelRoles, or fix the judge.");
++			expect(message).toContain("The parent agent must stop and report this to the user.");
++			expect(message).toContain("must not change settings and must not choose a model");
++			// The error never offers the parent's model, and never invites the parent to edit settings itself.
++			expect(message).not.toContain(PARENT);
++			expect(message).not.toMatch(/\bedit\b/i);
++			expect(message).not.toMatch(/(?<!not )\bchange (the )?(config|settings)\b/i);
++			expect(dispatched).toHaveLength(0);
++			expect(notices).toHaveLength(0);
++			// Preflight knows from settings alone that nothing can be chosen, so the judge is never consulted.
++			expect(classify).not.toHaveBeenCalled();
++		},
++	);
++
++	it("counts configured and usable aliases separately in the reason", async () => {
++		const { childSession, dispatched } = harness({ modelRoles: { worker: "mock/missing" } });
++
++		const failure = await runStructuredSubagent(request(childSession)).catch(error => error);
++
++		expect(failure).toBeInstanceOf(StructuredSubagentError);
++		expect((failure as StructuredSubagentError).message).toContain(
++			"no usable role alias exists (1 configured, 0 usable)",
++		);
++		expect(dispatched).toHaveLength(0);
++	});
++
++	it.each(["@default", "default", "@task"])(
++		"does not treat an agent model of %s as an explicit source, because it names the session model",
++		async inherited => {
++			const { childSession, dispatched } = harness(
++				{ modelRoles: { default: PARENT } },
++				{ ...BARE_AGENT, model: [inherited] },
++			);
++
++			await expect(runStructuredSubagent(request(childSession))).rejects.toThrow("Subagent not started");
++			expect(dispatched).toHaveLength(0);
++		},
++	);
++
++	it("fails preflight, not only dispatch, when nothing can choose a model", async () => {
++		const { childSession } = harness();
++
++		await expect(resolveEffectiveSubagentPolicy(request(childSession))).rejects.toThrow("Subagent not started");
++	});
++
++	it.each(["task", "eval"] as const)(
++		"chooses the only configured alias for a %s spawn without calling the judge",
++		async invocationKind => {
++			const { childSession, dispatched, notices } = harness({ modelRoles: { worker: "mock/m1" } });
++			const judge = stubJudge(new Error("the judge must not run for one alias"));
++
++			const settled = await runStructuredSubagent(request(childSession, { invocationKind, retainArtifacts: true }));
++
++			expect(judge.calls()).toBe(0);
++			expect(judgmentModule.resolveJudge).not.toHaveBeenCalled();
++			expect(dispatched[0]?.modelOverride).toEqual(["mock/m1"]);
++			expect(dispatched[0]?.modelRole).toBe("worker");
++			expect(dispatched[0]?.modelRoute).toBe("Automatic model selection: @worker (only one configured alias).");
++			expect(dispatched[0]?.modelWarning).toBeUndefined();
++			expect(notices).toHaveLength(0);
++			expect(Object.hasOwn(dispatched[0] ?? {}, "parentActiveModelPattern")).toBe(false);
++			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++		},
++	);
++
++	it("keeps the judge path for two aliases", async () => {
++		const { childSession, dispatched } = harness({ modelRoles: { haiku: "mock/m1", sonnet: "mock/m3" } });
++		const judge = stubJudge({ choice: "haiku", confident: true });
++
++		const settled = await runStructuredSubagent(request(childSession, { retainArtifacts: true }));
++
++		expect(judge.calls()).toBe(1);
++		expect(dispatched[0]?.modelOverride).toEqual(["mock/m1"]);
++		expect(dispatched[0]?.modelRoute).toBe("Automatic model selection: @haiku.");
++		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++	});
++
++	it("fails with the judge reason when two aliases exist, no judge is available and nothing explicit exists", async () => {
++		const { childSession, dispatched } = harness({ modelRoles: { haiku: "mock/m1", opus: "mock/m3" } });
++		noNativeJudge();
++
++		const failure = await runStructuredSubagent(request(childSession)).catch(error => error);
++
++		expect(failure).toBeInstanceOf(StructuredSubagentError);
++		const message = (failure as StructuredSubagentError).message;
++		expect(message).toContain("no native judge is available");
++		expect(message).toContain("no role alias named sonnet exists for the conservative fallback");
++		expect(message).toContain("The parent agent must stop and report this to the user.");
++		expect(dispatched).toHaveLength(0);
++	});
++
++	it("runs the agent's own model, never the parent's, and warns visibly when two aliases exist and no judge does", async () => {
++		const { childSession, dispatched, notices } = harness(
++			{ modelRoles: { haiku: "mock/m1", opus: "mock/m3" } },
++			{ ...BARE_AGENT, model: ["mock/m2"] },
++		);
++		noNativeJudge();
++
++		const settled = await runStructuredSubagent(request(childSession, { retainArtifacts: true }));
++
++		expect(dispatched[0]?.modelOverride).toEqual(["mock/m2"]);
++		expect(dispatched[0]?.modelOverride).not.toContain(PARENT);
++		const warning = dispatched[0]?.modelWarning ?? "";
++		expect(warning).toContain("Warning: automatic model selection failed: no native judge is available");
++		expect(warning).toContain('the model of the "worker" agent definition (mock/m2)');
++		expect(warning).toContain("The parent agent must stop and report this to the user.");
++		expect(dispatched[0]?.modelRoute).toContain("Automatic model selection failed; using the model of");
++		// The user sees the same text in the interface, not only the model route.
++		expect(notices).toEqual([{ level: "warning", message: warning, source: "task-model" }]);
++		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++	});
++
++	it("runs the task.agentModelOverrides entry and warns when classification fails", async () => {
++		const { childSession, dispatched, notices } = harness({
++			modelRoles: { haiku: "mock/m1", opus: "mock/m3" },
++			"task.agentModelOverrides": { worker: "mock/m2" },
++		});
++		noNativeJudge();
++
++		const settled = await runStructuredSubagent(request(childSession, { retainArtifacts: true }));
++
++		expect(dispatched[0]?.modelOverride).toEqual(["mock/m2"]);
++		expect(dispatched[0]?.modelWarning).toContain('the task.agentModelOverrides entry for "worker" (mock/m2)');
++		expect(notices).toHaveLength(1);
++		expect(notices[0]?.level).toBe("warning");
++		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++	});
++
++	it.each([
++		["the judge fails", new Error("boom"), "the judge failed (boom)"],
++		["the judge is unsure", { choice: "haiku", confident: false }, "the judge gave no confident answer"],
++	] as const)("uses the conservative @sonnet fallback and warns when %s", async (_name, answer, reason) => {
++		const { childSession, dispatched, notices } = harness({
++			modelRoles: { haiku: "mock/m1", sonnet: "mock/m3" },
++		});
++		stubJudge(answer);
++
++		const settled = await runStructuredSubagent(request(childSession, { retainArtifacts: true }));
++
++		expect(dispatched[0]?.modelOverride).toEqual(["mock/m3"]);
++		expect(dispatched[0]?.modelRoute).toBe("Automatic model selection: @sonnet (conservative fallback).");
++		expect(dispatched[0]?.modelWarning).toContain(`Warning: automatic model selection failed: ${reason}`);
++		expect(dispatched[0]?.modelWarning).toContain("The subagent uses the conservative fallback @sonnet.");
++		expect(notices).toHaveLength(1);
++		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++	});
++
++	it("never classifies a per-call, host or seance model", async () => {
++		const { childSession, dispatched } = harness({
++			"task.perCallModel": "on",
++			modelRoles: { review: "mock/m1" },
++		});
++		const classify = vi.spyOn(autoModelModule, "classifyAutoTaskModel");
++
++		const perCall = await runStructuredSubagent(
++			request(childSession, { perCallModel: "mock/m1", retainArtifacts: true }),
++		);
++		const host = await runStructuredSubagent(request(childSession, { model: "mock/m2", retainArtifacts: true }));
++
++		expect(classify).not.toHaveBeenCalled();
++		expect(dispatched.map(options => options.modelOverride)).toEqual([["mock/m1"], ["mock/m2"]]);
++		expect(dispatched.map(options => options.modelWarning)).toEqual([undefined, undefined]);
++		await fs.rm(perCall.artifactsDir, { recursive: true, force: true });
++		await fs.rm(host.artifactsDir, { recursive: true, force: true });
++	});
++
++	it("shows the user's warning in the result the parent reads", () => {
++		const summary = formatTaskResultSummary(
++			{
++				...result(),
++				resolvedModel: "mock/m2",
++				resolvedModelWarning: "Warning: the subagent started on mock/m2 but its model changed to mock/m1.",
++			},
++			{ totalDurationMs: 5 },
++		);
++
++		expect(summary).toContain("<model>mock/m2</model>");
++		expect(summary).toContain(
++			"<model-warning>Warning: the subagent started on mock/m2 but its model changed to mock/m1.</model-warning>",
++		);
++	});
++});
+diff --git a/packages/coding-agent/test/task/task-spawn.test.ts b/packages/coding-agent/test/task/task-spawn.test.ts
+index 95a0fe26da..52ec0eb694 100644
+--- a/packages/coding-agent/test/task/task-spawn.test.ts
++++ b/packages/coding-agent/test/task/task-spawn.test.ts
+@@ -32,6 +32,7 @@ import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
+ import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
+ import { cfgTaskAgentModelOverrides, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
+ import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ const taskAgent: AgentDefinition = {
+ 	name: "task",
+@@ -44,7 +45,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
+ 	return {
+ 		cwd: "/tmp",
+ 		hasUI: false,
+-		settings: Settings.isolated(options.settings ?? {}),
++		settings: Settings.isolated({ ...pinnedTaskModels(options.settings), ...(options.settings ?? {}) }),
+ 		getSessionFile: () => null,
+ 		getSessionSpawns: () => "*",
+ 		asyncJobManager: options.manager,
+@@ -278,7 +279,7 @@ describe("task spawn routing", () => {
+ 		expect(signals[0]).toBeInstanceOf(AbortSignal);
+ 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
+ 		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe(
+-			"Automatic model selection unavailable; using existing model resolution. Extension replaced the model: pool 1",
++			'Automatic model selection failed; using the task.agentModelOverrides entry for "task" (openai/gpt-4.1-mini). Extension replaced the model: pool 1',
+ 		);
+ 	});
+ 
+@@ -979,7 +980,7 @@ describe("task spawn routing", () => {
+ 		});
+ 
+ 		const manager = createManager();
+-		const settings = Settings.isolated({ "task.maxConcurrency": 4 });
++		const settings = Settings.isolated({ ...pinnedTaskModels(), "task.maxConcurrency": 4 });
+ 		const tool = await TaskTool.create({
+ 			cwd: "/tmp",
+ 			hasUI: false,
+@@ -1030,7 +1031,7 @@ describe("task spawn routing", () => {
+ 		});
+ 
+ 		const manager = createManager();
+-		const settings = Settings.isolated({ "task.maxConcurrency": 4 });
++		const settings = Settings.isolated({ ...pinnedTaskModels(), "task.maxConcurrency": 4 });
+ 		const tool = await TaskTool.create({
+ 			cwd: "/tmp",
+ 			hasUI: false,
+diff --git a/packages/coding-agent/test/task/task-widget-inputs.test.ts b/packages/coding-agent/test/task/task-widget-inputs.test.ts
+index abc139cc26..fc115e5f88 100644
+--- a/packages/coding-agent/test/task/task-widget-inputs.test.ts
++++ b/packages/coding-agent/test/task/task-widget-inputs.test.ts
+@@ -16,6 +16,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+ import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
++import { pinnedTaskModels } from "../helpers/task-model-pin";
+ 
+ beforeEach(() => {
+ 	AgentRegistry.resetGlobalForTests();
+@@ -100,7 +101,7 @@ describe("task job widget inputs", () => {
+ 		const session = {
+ 			cwd: "/tmp",
+ 			hasUI: false,
+-			settings: Settings.isolated({ "async.enabled": true, "task.batch": true }),
++			settings: Settings.isolated({ ...pinnedTaskModels(), "async.enabled": true, "task.batch": true }),
+ 			getSessionFile: () => null,
+ 			getSessionSpawns: () => "*",
+ 			getAgentId: () => "Main",
+diff --git a/packages/coding-agent/test/task/workpool.test.ts b/packages/coding-agent/test/task/workpool.test.ts
+index 7796d7bc0f..f36399c266 100644
+--- a/packages/coding-agent/test/task/workpool.test.ts
++++ b/packages/coding-agent/test/task/workpool.test.ts
+@@ -26,6 +26,7 @@ const POLICY = {
+ 	agentName: "scout",
+ 	agent: AGENT,
+ 	effectiveAgent: AGENT,
++	modelOrigin: "agent",
+ 	structured: true,
+ 	schema: { schema: undefined, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
+ 	planMode: false,
+diff --git a/packages/coding-agent/test/vibe/spawn-model-role.test.ts b/packages/coding-agent/test/vibe/spawn-model-role.test.ts
+index 10c30bd330..e8acd36d7a 100644
+--- a/packages/coding-agent/test/vibe/spawn-model-role.test.ts
++++ b/packages/coding-agent/test/vibe/spawn-model-role.test.ts
+@@ -128,7 +128,11 @@ describe("vibe worker spawn options", () => {
+ 	});
+ 
+ 	it("keeps only [A-Za-z0-9_-] from a custom worker name", async () => {
+-		const options = await spawnAndCaptureOptions("good", Settings.isolated(), "../My Worker!");
++		const options = await spawnAndCaptureOptions(
++			"good",
++			Settings.isolated({ "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } }),
++			"../My Worker!",
++		);
+ 
+ 		expect(options.id).toBe("MyWorker");
+ 	});
+@@ -136,7 +140,11 @@ describe("vibe worker spawn options", () => {
+ 	it("falls back to a generated name when nothing in the custom name survives", async () => {
+ 		vi.spyOn(nameGenerator, "generateTaskName").mockReturnValue("GeneratedWorker");
+ 
+-		const options = await spawnAndCaptureOptions("good", Settings.isolated(), "!!!");
++		const options = await spawnAndCaptureOptions(
++			"good",
++			Settings.isolated({ "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } }),
++			"!!!",
++		);
+ 
+ 		expect(options.id).toBe("GeneratedWorker");
+ 	});
+diff --git a/packages/tui/src/tools/task.ts b/packages/tui/src/tools/task.ts
+index ae941aff12..71dbf703ae 100644
+--- a/packages/tui/src/tools/task.ts
++++ b/packages/tui/src/tools/task.ts
+@@ -706,6 +706,22 @@ function renderRouteLine(route: string | undefined, continuePrefix: string, maxW
+ 	];
+ }
+ 
++function renderModelWarningLine(
++	warning: string | undefined,
++	continuePrefix: string,
++	maxWidth: number,
++	theme: Theme,
++): string[] {
++	if (!warning) return [];
++	return [
++		truncateTaskRow(
++			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg("warning", replaceTabs(sanitizeText(warning)))}`,
++			maxWidth,
++			"",
++		),
++	];
++}
++
+ /** A tool call's own intent, else its argument, with home paths shortened as the subagent HUD does. */
+ function toolCallDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
+ 	return intent ? shortenEmbeddedPaths(intent) : shortenToolArgumentPaths(args ?? "", argsKey);
+@@ -765,6 +781,7 @@ function renderAgentProgress(
+ 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
+ 	}
+ 	lines.push(...renderRouteLine(progress.resolvedModelRoute, continuePrefix, maxWidth, theme));
++	lines.push(...renderModelWarningLine(progress.resolvedModelWarning, continuePrefix, maxWidth, theme));
+ 
+ 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
+ 
+@@ -1133,6 +1150,7 @@ function renderAgentResult(
+ 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
+ 	}
+ 	lines.push(...renderRouteLine(result.resolvedModelRoute, continuePrefix, maxWidth, theme));
++	lines.push(...renderModelWarningLine(result.resolvedModelWarning, continuePrefix, maxWidth, theme));
+ 
+ 	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
+ 
+@@ -1950,6 +1968,12 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
+ 		[
+ 			assignment,
+ 			progress.resolvedModelRoute ? noteText(progress.resolvedModelRoute, "dim") : undefined,
++			progress.resolvedModelWarning
++				? text([span(plainText(progress.resolvedModelWarning), "warning")], {
++						wrap: "word",
++						role: "omp.tool.error",
++					})
++				: undefined,
+ 			!running && progress.retryFailure
+ 				? text(
+ 						[
+@@ -2009,6 +2033,7 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
+ 		[
+ 			assignment,
+ 			result.resolvedModelRoute ? noteText(result.resolvedModelRoute, "dim") : undefined,
++			result.resolvedModelWarning ? errorLine(result.resolvedModelWarning, "warning") : undefined,
+ 			aborted && result.abortReason ? errorLine(result.abortReason) : undefined,
+ 			warning ? errorLine(warning, "warning") : undefined,
+ 			result.error ? errorLine(result.error) : undefined,
+@@ -2436,6 +2461,8 @@ export interface AgentProgress {
+ 	resolvedModelIsFallback?: boolean;
+ 	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
+ 	resolvedModelRoute?: string;
++	/** Warning the user must see: automatic model selection failed, or the child left the model it started on. */
++	resolvedModelWarning?: string;
+ 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
+ 	advisor?: boolean;
+ 	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */
+@@ -2531,6 +2558,8 @@ export interface SingleResult {
+ 	resolvedModelIsFallback?: boolean;
+ 	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
+ 	resolvedModelRoute?: string;
++	/** Mirrors {@link AgentProgress.resolvedModelWarning} onto the settled result. */
++	resolvedModelWarning?: string;
+ 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
+ 	advisor?: boolean;
+ 	error?: string;
