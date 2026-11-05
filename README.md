@@ -28,7 +28,6 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0015-status-line-usage-window`|`usage_bar` shows weekly usage by default. `statusLine.usageWindow` picks weekly, 5-hour or the worst window.|
 |`0016-status-line-weekly-only`|In weekly mode `usage_bar` shows only the 7-day window, or no bar if the provider has none.|
 |`0017-task-never-inherit-parent-model`|Subagents never use the parent's model or switch models. One alias is picked without the judge. A failed choice stops, with no fallback.|
-|`0018-no-billable-automatic-model`|Automatic choices never use a model that bills real money: startup model, tiers, aliases, judge, helpers. Naming a model yourself still works.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
