@@ -67,3 +67,10 @@ case ":$PATH:" in
     *":$(dirname "$target"):"*) ;;
     *) log "$(dirname "$target") is not on your PATH" ;;
 esac
+
+# An older omp earlier in PATH, such as a package at /usr/bin/omp, would still run instead of this one.
+first="$(command -v omp || true)"
+if [ -n "$first" ] && [ "$(readlink -f "$first")" != "$(readlink -f "$target")" ]; then
+    log "warning: $first comes first in PATH and runs instead of $target"
+    log "remove it, or put $(dirname "$target") first in PATH"
+fi
