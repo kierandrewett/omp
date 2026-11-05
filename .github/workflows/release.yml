@@ -1,15 +1,14 @@
 name: Release
 
-# A tag that starts with v builds omp for amd64 and arm64, packs each build with pkgsmith, and publishes a GitHub release
-# that holds the binaries, every package and SHA256SUMS.txt. There are two builds per architecture: glibc, which makes
-# the rpm, deb, Arch and tar packages, and musl, which makes the apk for Alpine. `omp update` reads the raw glibc
-# binaries and the checksum file of the latest release, so those stay in every release next to the packages.
+# A tag that starts with v builds omp for amd64 and arm64 and publishes a GitHub release that holds the two raw binaries
+# (omp-linux-x64 and omp-linux-arm64) and SHA256SUMS.txt. Nothing else: no distro packages. `omp update` reads the
+# binaries and the checksum file of the latest release.
 #
 # The tag must equal the release this checkout describes: the pinned upstream tag plus the `revision` file, for example
 # v18.14.2-fork.2 (see scripts/release-info.sh). Raise `revision` first, commit, then push the tag.
 #
-# Run it by hand from the Actions tab for a dry run. A dry run builds everything, checks the packages in containers and
-# uploads the files as workflow artifacts. It never creates a release or a tag, even when it runs on a tag.
+# Run it by hand from the Actions tab for a dry run. A dry run builds everything and uploads the files as workflow
+# artifacts. It never creates a release or a tag, even when it runs on a tag.
 
 on:
   push:
@@ -60,27 +59,17 @@ jobs:
               echo "::notice::Dry run for $FORK_TAG. Nothing is published."
           fi
 
-  # The glibc addons for both architectures are built here, on x64, with Bazel's hermetic toolchains. That is how
-  # upstream builds them, and it keeps the glibc floor low enough for older distros. A Cargo build on a runner would
-  # link to the runner's newer glibc. The arm64 addon is a cross build.
-  # One runner per addon. A Bazel build of one addon takes 15 to 23 minutes, and the old jobs built three addons one after
-  # the other (about 55 minutes). Every addon is its own job, so the slowest one decides the wait. The musl addons come
-  # from upstream's linux-musl Bazel targets, and x64 musl has a baseline and a modern addon (the modern one comes from
-  # patches/0009). A musl addon keeps the file name of its glibc twin, so each addon has its own artifact, and the package
-  # job merges only the artifacts of its own libc. scripts/build.sh checks that each addon links to its libc.
+  # The addons for both architectures are built here, on x64, with Bazel's hermetic toolchains. That is how upstream
+  # builds them, and it keeps the glibc floor low enough for older distros. A Cargo build on a runner would link to the
+  # runner's newer glibc. The arm64 addon is a cross build. One runner per addon: a Bazel build of one addon takes 15 to
+  # 23 minutes, so every addon is its own job and the slowest one decides the wait.
   natives:
-    name: natives ${{ matrix.libc }} ${{ matrix.target }}
+    name: natives ${{ matrix.target }}
     needs: info
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - { libc: glibc, target: linux-x64-baseline }
-          - { libc: glibc, target: linux-x64-modern }
-          - { libc: glibc, target: linux-arm64 }
-          - { libc: musl, target: linux-musl-x64-baseline }
-          - { libc: musl, target: linux-musl-x64-modern }
-          - { libc: musl, target: linux-musl-arm64 }
+        target: [linux-x64-baseline, linux-x64-modern, linux-arm64]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -92,7 +81,6 @@ jobs:
           bun-version: 1.4.4
       - name: Build the addon
         env:
-          LIBC: ${{ matrix.libc }}
           NATIVES: bazel
           NATIVES_TARGETS: ${{ matrix.target }}
           NATIVES_ONLY: ${{ github.workspace }}/natives
@@ -102,25 +90,22 @@ jobs:
           scripts/build.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: natives-${{ matrix.libc }}-${{ matrix.target }}
+          name: natives-${{ matrix.target }}
           path: natives/*.node
           if-no-files-found: error
           retention-days: 1
 
-  # Each architecture and C library builds, packs and checks its own binary on a runner of that architecture, so the
-  # arm64 packages run on arm64 before they are published. The musl packages are installed in Alpine, on both
-  # architectures. The raw musl binaries are not released: only the glibc binaries are, because `omp update` reads those.
-  package:
-    name: package ${{ matrix.libc }} ${{ matrix.arch }}
+  # Each architecture builds and checks its own binary on a runner of that architecture, so the arm64 binary runs on
+  # arm64 before it is published.
+  build:
+    name: build ${{ matrix.arch }}
     needs: [info, natives]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: amd64, libc: glibc, runner: ubuntu-24.04, binary: omp-linux-x64 }
-          - { arch: arm64, libc: glibc, runner: ubuntu-24.04-arm, binary: omp-linux-arm64 }
-          - { arch: amd64, libc: musl, runner: ubuntu-24.04, binary: omp-linux-musl-x64 }
-          - { arch: arm64, libc: musl, runner: ubuntu-24.04-arm, binary: omp-linux-musl-arm64 }
+          - { arch: amd64, runner: ubuntu-24.04, binary: omp-linux-x64, natives: "natives-linux-x64-*" }
+          - { arch: arm64, runner: ubuntu-24.04-arm, binary: omp-linux-arm64, natives: "natives-linux-arm64" }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
@@ -130,53 +115,34 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.4
-      # Only this libc's addons: a musl addon and a glibc addon share a file name.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: natives-${{ matrix.libc }}-*
+          pattern: ${{ matrix.natives }}
           merge-multiple: true
           path: natives
       - name: Build omp
         env:
-          LIBC: ${{ matrix.libc }}
           NATIVES: prebuilt
           NATIVES_DIR: ${{ github.workspace }}/natives
         run: scripts/build.sh
-      - name: Install omp into the prefix
+      - name: Run the binary
         env:
-          LIBC: ${{ matrix.libc }}
-        run: scripts/install-prefix.sh
-      # pkgsmith is built from the commit pinned in scripts/pkgsmith-commit. The runner image has Rust, but update it
-      # so a stale image cannot fail the build.
-      - name: Write the packages
-        run: |
-          set -euo pipefail
-          rustup update stable --no-self-update
-          scripts/package.sh plan
-          scripts/package.sh build
-      - name: Install each package in a container of its distro
-        run: scripts/smoke-packages.sh
-      - name: Collect the files
-        env:
-          LIBC: ${{ matrix.libc }}
           BINARY: ${{ matrix.binary }}
         run: |
           set -euo pipefail
-          mkdir upload
-          if [ "$LIBC" = glibc ]; then cp "dist/$BINARY" upload/; fi
-          cp dist/packages/* upload/
-          ls -l upload
+          "dist/$BINARY" --version
+          "dist/$BINARY" --smoke-test
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: files-${{ matrix.arch }}-${{ matrix.libc }}
-          path: upload/*
+          name: files-${{ matrix.arch }}
+          path: dist/${{ matrix.binary }}
           if-no-files-found: error
           retention-days: 7
 
-  # Checksums for every file of the release. This runs on a dry run too, so the file that would be published is the
-  # file that was checked.
+  # Checksums for the two binaries. This runs on a dry run too, so the file that would be published is the file that was
+  # checked.
   collect:
-    needs: [info, package]
+    needs: [info, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -193,11 +159,7 @@ jobs:
           cd release
           # omp update looks for the line "<hash>  omp-linux-<arch>", so both raw binaries must be listed.
           for binary in omp-linux-x64 omp-linux-arm64; do test -s "$binary"; done
-          # Each release holds the five formats for both architectures: two files of each kind.
-          for pattern in '*.rpm' '*.deb' '*.pkg.tar.zst' '*.apk' '*.tar.xz'; do
-              count="$(find . -maxdepth 1 -name "$pattern" | wc -l)"
-              test "$count" -eq 2 || { echo "::error::expected 2 files that match $pattern, found $count"; exit 1; }
-          done
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 2
           sha256sum -- * > SHA256SUMS.txt
           sha256sum --check SHA256SUMS.txt
           {
@@ -227,7 +189,7 @@ jobs:
         with:
           name: release-files
           path: release
-      - name: Publish the release with every file
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -242,5 +204,5 @@ jobs:
           sha256sum --check SHA256SUMS.txt
           # A draft first, so nobody sees a release with a missing file.
           gh release create "$FORK_TAG" ./* --draft --title "$FORK_TAG" \
-              --notes "Patched build of can1357/oh-my-pi $UPSTREAM_TAG for amd64 and arm64: the raw glibc binaries (omp update reads these), and rpm, deb, Arch, apk and tar packages. The apk is a musl build for Alpine; the other packages are glibc builds. Checksums are in SHA256SUMS.txt. Patches and build scripts: $GITHUB_SHA."
+              --notes "Patched build of can1357/oh-my-pi $UPSTREAM_TAG for amd64 and arm64: the raw glibc binaries and SHA256SUMS.txt. Install with scripts/install.sh, or run omp update. Patches and build scripts: $GITHUB_SHA."
           gh release edit "$FORK_TAG" --draft=false --latest

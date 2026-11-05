@@ -2,8 +2,8 @@
 # Print the release this checkout would publish, as key=value lines:
 #   upstream_tag=v18.14.2
 #   fork_tag=v18.14.2-fork.2
-#   version=18.14.2     (the package version)
-#   revision=2          (the package release)
+#   version=18.14.2     (the upstream version)
+#   revision=2          (the fork revision)
 # The fork tag is the pinned upstream tag plus scripts' `revision` file. Used by CI and by build.sh.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

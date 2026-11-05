@@ -1,45 +1,14 @@
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 63dd4c7f53..e2ee0ee020 100644
+index 63dd4c7f53..9125998b2e 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
-@@ -1193,6 +1193,62 @@ async function unlinkIfExists(filePath: string): Promise<void> {
+@@ -1193,6 +1193,29 @@ async function unlinkIfExists(filePath: string): Promise<void> {
  	}
  }
  
-+/** The fork installer. It installs the distro package and asks for sudo when it needs it. */
++/** The fork installer. It puts the release binary in ~/.local/bin. */
 +const FORK_INSTALL_COMMAND =
 +	"curl -fsSL https://raw.githubusercontent.com/kierandrewett/omp/main/scripts/install.sh | bash";
-+
-+/**
-+ * Name of the system package that owns `filePath`, or undefined when no package database claims it.
-+ *
-+ * Reads the database of each tool found on PATH. A package owns its files, so a plain file replace
-+ * is refused by the directory permissions, and would leave the database out of step with the disk.
-+ */
-+async function packageOwnerOf(filePath: string): Promise<string | undefined> {
-+	const probes: { tool: string; args: string[]; parse: (stdout: string) => string | undefined }[] = [
-+		{ tool: "rpm", args: ["-qf", "--qf", "%{NAME}", "--", filePath], parse: out => out.trim() || undefined },
-+		{ tool: "dpkg", args: ["-S", "--", filePath], parse: out => out.split(":")[0]?.trim() || undefined },
-+		{ tool: "pacman", args: ["-Qqo", "--", filePath], parse: out => out.trim() || undefined },
-+		{
-+			tool: "apk",
-+			args: ["info", "-W", filePath],
-+			parse: out => out.split(" is owned by ")[1]?.trim() || undefined,
-+		},
-+	];
-+	for (const probe of probes) {
-+		if ($which(probe.tool) === undefined) continue;
-+		try {
-+			const result = await $`${probe.tool} ${probe.args}`.quiet().nothrow();
-+			if (result.exitCode !== 0) continue;
-+			const owner = probe.parse(result.stdout.toString());
-+			if (owner) return owner;
-+		} catch {
-+			// The tool failed to start. Try the next database.
-+		}
-+	}
-+	return undefined;
-+}
 +
 +/**
 + * Stop before the download when this user cannot create files next to the binary.
@@ -55,17 +24,15 @@ index 63dd4c7f53..e2ee0ee020 100644
 +	} catch (err) {
 +		if (isEnoent(err)) return;
 +	}
-+	const owner = await packageOwnerOf(targetPath);
-+	const ownedBy = owner ? ` It belongs to the ${owner} package.` : "";
 +	throw new Error(
-+		`${dir} is not writable by this user, so ${APP_NAME} cannot replace ${targetPath}.${ownedBy} Update it with the installer, which asks for sudo when it needs it: ${FORK_INSTALL_COMMAND}`,
++		`${dir} is not writable by this user, so ${APP_NAME} cannot replace ${targetPath}. Run the update as a user who can write there, or install ${APP_NAME} in a folder you own: ${FORK_INSTALL_COMMAND}`,
 +	);
 +}
 +
  /**
   * Remove a backup binary without letting the removal abort a completed update.
   *
-@@ -1921,6 +1977,7 @@ export async function updateViaBinaryAt(
+@@ -1921,6 +1944,7 @@ export async function updateViaBinaryAt(
  	} = {},
  ): Promise<void> {
  	if (options.validateExistingTarget) await validateExistingUpdateTarget(targetPath);

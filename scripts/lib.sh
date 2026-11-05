@@ -26,7 +26,7 @@ pinned_commit() {
     git -C "$root" ls-files --stage upstream | awk 'NR == 1 { print $2 }'
 }
 
-# The architecture the build and the packages are for: x64 or arm64. This machine's, unless TARGET_ARCH says otherwise.
+# The architecture the build is for: x64 or arm64. This machine's, unless TARGET_ARCH says otherwise.
 target_arch() {
     case "${TARGET_ARCH:-$(uname -m)}" in
         x86_64 | amd64 | x64) printf 'x64\n' ;;
@@ -35,68 +35,14 @@ target_arch() {
     esac
 }
 
-# The C library the build and the packages are for: glibc or musl. glibc unless LIBC says otherwise. musl is what Alpine
-# runs, so a musl build is the one that gets an apk (see pkgsmith.star).
-target_libc() {
-    case "${LIBC:-glibc}" in
-        glibc | musl) printf '%s\n' "${LIBC:-glibc}" ;;
-        *) die "unsupported LIBC '$LIBC'; use glibc or musl" ;;
-    esac
-}
-
-# The name upstream gives the binary of the architecture ($1: x64 or arm64) and the C library ($2): omp-linux-x64 for
-# glibc and omp-linux-musl-x64 for musl. The glibc names are the ones `omp update` reads, so they do not change.
+# The name of the binary for the architecture ($1: x64 or arm64). These are the names `omp update` reads.
 binary_name() {
-    if [ "$2" = musl ]; then printf 'omp-linux-musl-%s\n' "$1"; else printf 'omp-linux-%s\n' "$1"; fi
+    printf 'omp-linux-%s\n' "$1"
 }
 
-# The C library an ELF program was built for, read from its program interpreter: glibc or musl. A static program
-# has no interpreter, so its library cannot be told and this stops instead of guessing.
-elf_libc() {
-    local interpreter
-    interpreter="$(readelf -l "$1" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')"
-    case "$interpreter" in
-        *ld-musl*) printf 'musl\n' ;;
-        *ld-linux*) printf 'glibc\n' ;;
-        *) die "cannot tell the C library of $1 (program interpreter '${interpreter:-none}')" ;;
-    esac
-}
-
-# The C library of this machine, read from its shell: Alpine's /bin/sh is a musl program.
-host_libc() {
-    elf_libc "$(readlink -f /bin/sh)"
-}
-
-# Whether a binary for architecture $1 (x64 or arm64) and C library $2 runs on this machine.
+# Whether a binary for architecture $1 (x64 or arm64) runs on this machine.
 runs_here() {
-    [ "$1" = "$(TARGET_ARCH='' target_arch)" ] && [ "$2" = "$(host_libc)" ]
-}
-
-# The C library an addon (a shared library) links to, from the libraries it needs: glibc, musl, or unknown when it names
-# neither. Upstream's musl addons keep the file names of the glibc ones, so the name cannot tell them apart.
-addon_libc() {
-    local needed
-    needed="$(readelf -d "$1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')"
-    # A musl shared library names the C library libc.so (musl's loader provides it), or libc.musl-<arch>.so.1 in some
-    # builds. Upstream's Bazel-built musl addons list libc.so, checked on the addons of the fork.4 release run.
-    if grep -Eq '^(libc\.so|libc\.musl-.*)$' <<<"$needed"; then
-        printf 'musl\n'
-    elif grep -qx 'libc\.so\.6' <<<"$needed"; then
-        printf 'glibc\n'
-    else
-        printf 'unknown\n'
-    fi
-}
-
-# The architecture an ELF program was built for, in the names of the packages: amd64 or arm64.
-elf_arch() {
-    local machine
-    machine="$(readelf -h "$1" 2>/dev/null | sed -n 's/^ *Machine: *//p')"
-    case "$machine" in
-        *X86-64*) printf 'amd64\n' ;;
-        *AArch64*) printf 'arm64\n' ;;
-        *) die "cannot tell the architecture of $1 (machine '${machine:-unknown}')" ;;
-    esac
+    [ "$1" = "$(TARGET_ARCH='' target_arch)" ]
 }
 
 # Where the upstream submodule is cloned from.
