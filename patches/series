@@ -15,3 +15,4 @@
 0015-status-line-usage-window.patch
 0016-status-line-weekly-only.patch
 0017-task-never-inherit-parent-model.patch
+0018-update-stops-on-unwritable-binary-dir.patch
