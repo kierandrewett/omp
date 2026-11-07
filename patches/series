@@ -18,3 +18,4 @@
 0018-update-stops-on-unwritable-binary-dir.patch
 0019-index-active-session-branches-without-message-bodies.patch
 0020-extension-remote-dialog-transport.patch
+0021-feat-collab-add-opt-in-saved-session-listing.patch

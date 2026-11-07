@@ -1,0 +1,139 @@
+diff --git a/docs/collab.md b/docs/collab.md
+index bfba77d8c8..3748c6dc99 100644
+--- a/docs/collab.md
++++ b/docs/collab.md
+@@ -137,6 +137,16 @@ Guests with a full link can:
+ - use [Agent Hub](./agent-hub.md) against the host's subagents: live table and progress, chat (steers the host's subagent), kill, revive, and transcript viewing (fetched from the host on demand).
+ - answer host interactive `select` and `editor` requests. The host broadcasts each pending request only to writable guests; the first submitted or cancelled response settles it and dismisses the other presentations.
+ 
++When the host starts with `OMP_COLLAB_SAVED_SESSIONS=1`, a full-control guest can
++also request a list of saved session IDs, titles, working directories, and
++timestamps across the host's projects. This grants access beyond the shared room.
++
++Enable it only when every holder of the full-control link may see that metadata.
++View-only links cannot use this request. The default is disabled.
++
++The list uses offset pagination and can change between requests if sessions
++change. This request does not provide saved message history.
++
+ Guests with a view-only link can read everything live — back-transcript, streaming text, tool cards, subagent transcripts — but the host rejects prompting, interrupting, and agent control from them.
+ 
+ Advisor records are not guest-visible subagents: they are excluded from roster snapshots and transcript fetches, and advisor chat/kill/revive commands are rejected.
+diff --git a/packages/coding-agent/src/collab/host.ts b/packages/coding-agent/src/collab/host.ts
+index 322a302fb0..95251cf741 100644
+--- a/packages/coding-agent/src/collab/host.ts
++++ b/packages/coding-agent/src/collab/host.ts
+@@ -27,6 +27,7 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+ import type { AgentSessionEvent } from "../session/agent-session";
+ import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
+ import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
++import { SessionManager } from "../session/session-manager";
+ import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
+ import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
+ import { collabDisplayName } from "./display-name";
+@@ -761,11 +762,57 @@ export class CollabHost {
+ 			case "fetch-transcript":
+ 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
+ 				break;
++			case "list-saved-sessions":
++				void this.#handleListSavedSessions(frame.reqId, frame.offset, fromPeer);
++				break;
+ 			default:
+ 				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
+ 		}
+ 	}
+ 
++	/**
++	 * History access is opt-in and requires a control link. Existing view links
++	 * must never acquire access to sessions outside their room.
++	 */
++	async #handleListSavedSessions(reqId: number, offset: number, fromPeer: number): Promise<void> {
++		const peer = this.#peers.get(fromPeer);
++		if (!Number.isSafeInteger(reqId) || reqId < 0) return;
++		if (process.env.OMP_COLLAB_SAVED_SESSIONS !== "1" || !peer?.canWrite) {
++			this.#send({ t: "saved-sessions", reqId, sessions: [], error: "unavailable" }, fromPeer);
++			return;
++		}
++		if (!Number.isSafeInteger(offset) || offset < 0) {
++			this.#send({ t: "saved-sessions", reqId, sessions: [], error: "invalid_request" }, fromPeer);
++			return;
++		}
++		try {
++			const all = await SessionManager.listAll();
++			if (!this.#guestTrafficAllowed() || this.#peers.get(fromPeer) !== peer) return;
++			const page = all.slice(offset, offset + 16);
++			const sessions = page.map(session => ({
++				id: session.id,
++				cwd: session.cwd,
++				...(session.title ? { title: session.title } : {}),
++				created: session.created.getTime(),
++				modified: session.modified.getTime(),
++			}));
++			if (Buffer.byteLength(JSON.stringify(sessions), "utf8") > 512 * 1024) {
++				this.#send({ t: "saved-sessions", reqId, sessions: [], error: "unavailable" }, fromPeer);
++				return;
++			}
++			this.#send({
++				t: "saved-sessions",
++				reqId,
++				sessions,
++				...(offset + page.length < all.length ? { nextOffset: offset + page.length } : {}),
++			}, fromPeer);
++		} catch {
++			if (this.#peers.get(fromPeer) === peer) {
++				this.#send({ t: "saved-sessions", reqId, sessions: [], error: "unavailable" }, fromPeer);
++			}
++		}
++	}
++
+ 	/** Timing-safe write-token check; peers without a valid token are read-only. */
+ 	#verifyWriteToken(token: string | undefined): boolean {
+ 		const expected = this.#writeToken;
+diff --git a/packages/coding-agent/src/collab/protocol.ts b/packages/coding-agent/src/collab/protocol.ts
+index d0cdbcae32..ebe6cc9736 100644
+--- a/packages/coding-agent/src/collab/protocol.ts
++++ b/packages/coding-agent/src/collab/protocol.ts
+@@ -12,6 +12,7 @@ import type {
+ 	BusChannel,
+ 	CollabUiRequest,
+ 	GuestFrame,
++	HostFrame,
+ 	ParsedCollabLink,
+ 	Participant,
+ 	AgentSnapshot as WireAgentSnapshot,
+@@ -92,6 +93,7 @@ export type CollabFrame =
+ 	| { t: "ui-request-end"; reqId: number }
+ 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
+ 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
++	| Extract<HostFrame, { t: "saved-sessions" }>
+ 	| { t: "bye"; reason: string }
+ 	| { t: "error"; message: string };
+ 
+diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
+index 06e97c9cb8..9de1b6b6b0 100644
+--- a/packages/wire/src/index.ts
++++ b/packages/wire/src/index.ts
+@@ -342,7 +342,8 @@ export type GuestFrame =
+ 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
+ 	| { t: "abort" }
+ 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
+-	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number };
++	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
++	| { t: "list-saved-sessions"; reqId: number; offset: number };
+ 
+ /** EventBus channels mirrored to guests (task subagent traffic only). */
+ export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
+@@ -381,6 +382,13 @@ export type HostFrame =
+ 	| { t: "ui-request-end"; reqId: number }
+ 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
+ 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
++	| {
++			t: "saved-sessions";
++			reqId: number;
++			sessions: { id: string; cwd: string; title?: string; created: number; modified: number }[];
++			nextOffset?: number;
++			error?: "unavailable" | "invalid_request";
++	  }
+ 	| { t: "bye"; reason: string }
+ 	| { t: "error"; message: string };
+ 

@@ -31,6 +31,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0018-update-stops-on-unwritable-binary-dir`|`omp update` stops before the download when it cannot write next to the binary, and names the installer script.|
 |`0019-index-active-session-branches-without-message-bodies`|Indexes a saved session's active branch without retaining message bodies, using omp's branch replay rules.|
 |`0020-extension-remote-dialog-transport`|Lets an extension mirror interactive dialogs and return explicit answers without requiring Collab.|
+|`0021-feat-collab-add-opt-in-saved-session-listing`|Adds opt-in saved-session metadata listing for Collab control guests; view guests remain restricted to the shared session.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
