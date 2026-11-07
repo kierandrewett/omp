@@ -1,0 +1,83 @@
+diff --git a/packages/coding-agent/src/session/session-entries.ts b/packages/coding-agent/src/session/session-entries.ts
+index 033eaa87fb..92b8175ea0 100644
+--- a/packages/coding-agent/src/session/session-entries.ts
++++ b/packages/coding-agent/src/session/session-entries.ts
+@@ -364,12 +364,12 @@ export type SessionEntry =
+ 	| ResetBoundaryEntry;
+ 
+ /** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
+-export function sessionEntryLeafId(entry: SessionEntry): string | null {
++export function sessionEntryLeafId(entry: Pick<SessionEntry, "id" | "activeLeafId">): string | null {
+ 	return entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
+ }
+ 
+ /** Newest entry that selects itself on replay; skips late-usage markers. */
+-export function lastSelfSelectedLeafId(entries: readonly SessionEntry[]): string | null {
++export function lastSelfSelectedLeafId(entries: readonly Pick<SessionEntry, "id" | "activeLeafId">[]): string | null {
+ 	for (let index = entries.length - 1; index >= 0; index--) {
+ 		const entry = entries[index];
+ 		if (sessionEntryLeafId(entry) === entry.id) return entry.id;
+@@ -381,7 +381,7 @@ export function lastSelfSelectedLeafId(entries: readonly SessionEntry[]): string
+  * Active leaf after replaying entries in file order; an empty or cleared session has no leaf.
+  * A captured leaf that no longer exists (rollback, rewrite) falls back to the newest self-selecting entry.
+  */
+-export function resolveSessionLeafId(entries: readonly SessionEntry[]): string | null {
++export function resolveSessionLeafId(entries: readonly Pick<SessionEntry, "id" | "activeLeafId">[]): string | null {
+ 	const last = entries.at(-1);
+ 	if (!last) return null;
+ 	const leafId = sessionEntryLeafId(last);
+diff --git a/packages/coding-agent/src/session/session-loader.ts b/packages/coding-agent/src/session/session-loader.ts
+index d3d913df03..2158852d85 100644
+--- a/packages/coding-agent/src/session/session-loader.ts
++++ b/packages/coding-agent/src/session/session-loader.ts
+@@ -24,7 +24,13 @@ import {
+ 	resolveImageDataUrlSync,
+ } from "./blob-store";
+ import { buildSessionContext } from "./session-context";
+-import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
++import {
++	resolveSessionLeafId,
++	type FileEntry,
++	type RawFileEntry,
++	type SessionEntry,
++	type SessionHeader,
++} from "./session-entries";
+ import { migrateToCurrentVersion } from "./session-migrations";
+ import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
+ import { FileSessionStorage, type SessionStorage } from "./session-storage";
+@@ -618,6 +624,35 @@ export async function visitEntriesFromFile(
+ 	}
+ }
+ 
++/**
++ * Index the active branch without retaining message bodies. The result uses the
++ * same replay and parent-walk rules as SessionManager.getBranch().
++ */
++export async function indexSessionBranchFromFile(
++	filePath: string,
++	storage: SessionStorage = new FileSessionStorage(),
++): Promise<string[]> {
++	const entries: Pick<SessionEntry, "id" | "parentId" | "activeLeafId">[] = [];
++	const byId = new Map<string, Pick<SessionEntry, "id" | "parentId" | "activeLeafId">>();
++	await visitEntriesFromFile(filePath, entry => {
++		if (entry.type === "session") return;
++		const item = { id: entry.id, parentId: entry.parentId, activeLeafId: entry.activeLeafId };
++		entries.push(item);
++		byId.set(item.id, item);
++	});
++	const branch: string[] = [];
++	const seen = new Set<string>();
++	const leafId = resolveSessionLeafId(entries);
++	let cursor = leafId ? byId.get(leafId) : undefined;
++	while (cursor && !seen.has(cursor.id)) {
++		seen.add(cursor.id);
++		branch.push(cursor.id);
++		cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
++	}
++	branch.reverse();
++	return branch;
++}
++
+ function hasImageUrl(value: unknown): value is { image_url: string } {
+ 	return typeof value === "object" && value !== null && "image_url" in value && typeof value.image_url === "string";
+ }

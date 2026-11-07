@@ -15,7 +15,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0002-fork-updater`|`omp update` reads the fork's GitHub releases and checks `SHA256SUMS.txt`.|
 |`0003-mcp-form-elicitation`|Answer MCP `elicitation/create` with a dialog. No answer means cancel, never accept.|
 |`0004-task-model-role-prompting`|The task tool lists your roles as `@role`. Agents pass the role when you name a model, and use `ask` when they cannot tell.|
-|`0005-task-model-price-tiers`|`model` can be `$` to `$$$$`. Tiers are quarters of the price across all loaded chat models. Usage from `stats.db` breaks ties, weighted exact model over family over provider. `$$$$` is very rare.|
+|`0005-task-model-price-tiers`|`model` can be `$` to `$$$$`. Tiers split loaded chat model prices into quarters. `stats.db` usage breaks ties: exact model over family over provider. `$$$$` is very rare.|
 |`0006-subagent-shelf-usage`|Each row in the pinned subagent shelf shows that subagent's total tokens and API cost.|
 |`0007-task-model-switch`|Change a running subagent's model mid-run: `write proc://<id>/model` for the main agent (role, tier or exact ID), and `/switch` inside the subagent view for you.|
 |`0008-background-tasks-shelf`|A `Background tasks` shelf above `Subagents` lists running backgrounded bash commands, eval cells and services, with id, command and elapsed time. `display.pinnedJobs` sets it to `collapsed`, `full` or `off`.|
@@ -29,6 +29,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0016-status-line-weekly-only`|In weekly mode `usage_bar` shows only the 7-day window, or no bar if the provider has none.|
 |`0017-task-never-inherit-parent-model`|Subagents never use the parent's model or switch models. One alias is picked without the judge. A failed choice stops, with no fallback.|
 |`0018-update-stops-on-unwritable-binary-dir`|`omp update` stops before the download when it cannot write next to the binary, and names the installer script.|
+|`0019-index-active-session-branches-without-message-bodies`|Indexes a saved session's active branch without retaining message bodies, using omp's branch replay rules.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
