@@ -30,6 +30,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0017-task-never-inherit-parent-model`|Subagents never use the parent's model or switch models. One alias is picked without the judge. A failed choice stops, with no fallback.|
 |`0018-update-stops-on-unwritable-binary-dir`|`omp update` stops before the download when it cannot write next to the binary, and names the installer script.|
 |`0019-index-active-session-branches-without-message-bodies`|Indexes a saved session's active branch without retaining message bodies, using omp's branch replay rules.|
+|`0020-extension-remote-dialog-transport`|Lets an extension mirror interactive dialogs and return explicit answers without requiring Collab.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.

@@ -1,0 +1,224 @@
+diff --git a/docs/extensions.md b/docs/extensions.md
+index 463417dd74..76f6394922 100644
+--- a/docs/extensions.md
++++ b/docs/extensions.md
+@@ -938,6 +938,22 @@ Supported:
+ - `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
+ - `getLinkClicksAvailable()`: whether picking a [claimed link](#extension-link-schemes), by its hint tag or a click, raises `link_activate` right now
+ 
++`ctx.ui.registerRemoteUi` is available in the interactive TUI. It registers one
++extension-owned transport for selector, editor, approval and ask dialogs. The
++returned disposer unregisters the transport; call it on `session_shutdown` and
++when reloading the extension. A second registration throws.
++
++The handler receives a select or editor request and an abort signal. Return
++`{ kind: "answered", value }` only for an explicit remote action. An undefined
++value means explicit cancellation. Return `{ kind: "unavailable" }` when the
++transport cannot answer. An error or invalid selection is also unavailable, so
++the local dialog remains open.
++
++The first answer from the local dialog, the registered transport or Collab wins.
++Stop remote work when the signal aborts. The transport must authenticate its
++clients and protect requests and answers: an approval can allow a tool to run.
++Secret input dialogs are not mirrored by this API.
++
+ Current no-op methods in this controller:
+ 
+ - `setFooter`
+diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
+index a5515b9a54..15a7f4b346 100644
+--- a/packages/coding-agent/src/extensibility/extensions/types.ts
++++ b/packages/coding-agent/src/extensibility/extensions/types.ts
+@@ -30,6 +30,7 @@ export {
+ import type { type as ArkType } from "@oh-my-pi/omptype";
+ import type * as TypeBox from "@oh-my-pi/omptype/typebox";
+ import type * as zod from "@oh-my-pi/omptype/zod";
++import type { CollabUiRequestDraft } from "@oh-my-pi/pi-wire";
+ import type {
+ 	AgentMessage,
+ 	AgentToolResult,
+@@ -304,6 +305,15 @@ export type ExtensionApprovalAnswer =
+ 	| "deny"
+ 	| { grant: ExtensionApprovalGrant["scope"]; always: boolean };
+ 
++/** A remote dialog transport must distinguish an explicit cancellation from a lost connection. */
++export type ExtensionRemoteUiResult = { kind: "answered"; value: string | undefined } | { kind: "unavailable" };
++
++/** The signal aborts when another participant answers or the session closes the dialog. */
++export type ExtensionRemoteUiHandler = (
++	request: CollabUiRequestDraft,
++	signal: AbortSignal,
++) => Promise<ExtensionRemoteUiResult>;
++
+ /**
+  * UI context for extensions to request interactive UI.
+  * Each mode (interactive, RPC, print) provides its own implementation.
+@@ -318,6 +328,8 @@ export interface ExtensionUIContext {
+ 	timeoutStartsOnPresentation?: boolean;
+ 	/** True when pasteToEditor updates a local or remote composer; absent means unsupported. */
+ 	supportsEditor?: boolean;
++	/** Mirror interactive dialogs to one extension-owned transport. Returns a disposer. */
++	registerRemoteUi?(handler: ExtensionRemoteUiHandler): () => void;
+ 	/** Show a selector and return the selected label, even when an option also includes a description. */
+ 	select(
+ 		title: string,
+diff --git a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+index 76c5b60e9a..f347d5c6b7 100644
+--- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+@@ -16,6 +16,8 @@ import type {
+ 	ExtensionContextActions,
+ 	ExtensionCustomOptions,
+ 	ExtensionError,
++	ExtensionRemoteUiHandler,
++	ExtensionRemoteUiResult,
+ 	ExtensionUIContext,
+ 	ExtensionUIDialogOptions,
+ 	ExtensionUISelectItem,
+@@ -111,6 +113,7 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
+ 
+ export class ExtensionUiController {
+ 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
++	#remoteUiRegistration: { handler: ExtensionRemoteUiHandler; abort: AbortController } | undefined;
+ 	#composerShapeDisposers: Array<() => void> = [];
+ 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
+ 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
+@@ -182,6 +185,15 @@ export class ExtensionUiController {
+ 		const uiContext: ExtensionUIContext = {
+ 			timeoutStartsOnPresentation: true,
+ 			supportsEditor: true,
++			registerRemoteUi: handler => {
++				if (this.#remoteUiRegistration) throw new Error("A remote UI transport is already registered");
++				const registration = { handler, abort: new AbortController() };
++				this.#remoteUiRegistration = registration;
++				return () => {
++					registration.abort.abort();
++					if (this.#remoteUiRegistration === registration) this.#remoteUiRegistration = undefined;
++				};
++			},
+ 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
+ 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
+ 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
+@@ -807,8 +819,11 @@ export class ExtensionUiController {
+ 		// strings/arrays here instead of throwing inside `sanitizeCarriageReturns`
+ 		// on the guest path or taking down the local render.
+ 		const normalized = normalizeDialogQuestions(questions);
+-		const host = this.ctx.collabHost;
+-		if (!host) return this.#showLocalAskDialog(normalized, dialogOptions);
++		if (!this.ctx.collabHost && !this.#remoteUiRegistration)
++			return this.#showLocalAskDialog(normalized, dialogOptions);
++		const host: Pick<CollabHost, "requestGuestUi"> = {
++			requestGuestUi: (request, signal) => this.#requestRemoteUi(request, signal),
++		};
+ 		const localAbort = new AbortController();
+ 		const remoteAbort = new AbortController();
+ 		const parentSignal = dialogOptions?.signal;
+@@ -959,6 +974,64 @@ export class ExtensionUiController {
+ 		});
+ 	}
+ 
++	/** Race registered remote transports; transport loss never answers a dialog. */
++	#requestRemoteUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<ExtensionRemoteUiResult> | null {
++		if (signal?.aborted) return null;
++		const abort = new AbortController();
++		const remoteSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
++		const requests: Array<Promise<ExtensionRemoteUiResult>> = [];
++		const collab = this.ctx.collabHost?.requestGuestUi(request, remoteSignal, { retainOnReconnect: true });
++		if (collab) requests.push(collab);
++		const registration = this.#remoteUiRegistration;
++		if (registration) {
++			const handlerSignal = AbortSignal.any([remoteSignal, registration.abort.signal]);
++			requests.push(
++				new Promise(resolve => {
++					let settled = false;
++					const settle = (result: ExtensionRemoteUiResult) => {
++						if (settled) return;
++						settled = true;
++						handlerSignal.removeEventListener("abort", unavailable);
++						resolve(result);
++					};
++					const unavailable = () => settle({ kind: "unavailable" });
++					if (handlerSignal.aborted) return unavailable();
++					handlerSignal.addEventListener("abort", unavailable, { once: true });
++					Promise.resolve()
++						.then(() => {
++							if (handlerSignal.aborted) return { kind: "unavailable" as const };
++							return registration.handler(request, handlerSignal);
++						})
++						.then(result => {
++							if (
++								!handlerSignal.aborted &&
++								result?.kind === "answered" &&
++								(typeof result.value === "string" || result.value === undefined) &&
++								(request.kind !== "select" ||
++									result.value === undefined ||
++									request.options.some(
++										option => (typeof option === "string" ? option : option.label) === result.value,
++									))
++							)
++								settle(result);
++							else unavailable();
++						}, unavailable);
++				}),
++			);
++		}
++		if (requests.length === 0) return null;
++		return Promise.any(
++			requests.map(promise =>
++				promise.then(result => {
++					if (result.kind === "answered") return result;
++					throw new Error("Remote UI transport unavailable");
++				}),
++			),
++		)
++			.catch(() => ({ kind: "unavailable" as const }))
++			.finally(() => abort.abort());
++	}
++
+ 	/**
+ 	 * Race the local hook dialog against a mirrored guest ask. First *answer*
+ 	 * wins and cancels the other side. A remote `unavailable` settlement
+@@ -971,14 +1044,12 @@ export class ExtensionUiController {
+ 		signal: AbortSignal | undefined,
+ 		local: (signal: AbortSignal | undefined) => Promise<string | undefined>,
+ 	): Promise<string | undefined> {
+-		const host = this.ctx.collabHost;
+-		if (!host) return local(signal);
++		if (!this.ctx.collabHost && !this.#remoteUiRegistration) return local(signal);
+ 		const localAbort = new AbortController();
+ 		const remoteAbort = new AbortController();
+-		const remote = host.requestGuestUi(
++		const remote = this.#requestRemoteUi(
+ 			request,
+ 			signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
+-			{ retainOnReconnect: true },
+ 		);
+ 		if (!remote) return local(signal);
+ 		const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
+@@ -994,7 +1065,7 @@ export class ExtensionUiController {
+ 	}
+ 
+ 	async #runGuestAskDialog(
+-		host: CollabHost,
++		host: Pick<CollabHost, "requestGuestUi">,
+ 		questions: ExtensionAskDialogQuestion[],
+ 		signal: AbortSignal,
+ 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
+@@ -1009,7 +1080,7 @@ export class ExtensionUiController {
+ 	}
+ 
+ 	async #runGuestAskQuestion(
+-		host: CollabHost,
++		host: Pick<CollabHost, "requestGuestUi">,
+ 		question: ExtensionAskDialogQuestion,
+ 		signal: AbortSignal,
+ 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
+@@ -1136,7 +1207,7 @@ export class ExtensionUiController {
+ 	}
+ 
+ 	async #requestGuestUiString(
+-		host: CollabHost,
++		host: Pick<CollabHost, "requestGuestUi">,
+ 		request: CollabUiRequestDraft,
+ 		signal: AbortSignal,
+ 	): Promise<GuestUiResult> {
