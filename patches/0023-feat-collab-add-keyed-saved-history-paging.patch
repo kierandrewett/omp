@@ -215,11 +215,14 @@ index ebe6cc9736..5eb8fa2854 100644
  
 diff --git a/packages/coding-agent/src/collab/saved-history.ts b/packages/coding-agent/src/collab/saved-history.ts
 new file mode 100644
-index 0000000000..5e650c3a87
+index 0000000000..72c10c6521
 --- /dev/null
 +++ b/packages/coding-agent/src/collab/saved-history.ts
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,266 @@
 +import { createHash } from "node:crypto";
++import { closeSync, mkdtempSync, openSync, readSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
 +import type { SavedHistoryErrorCode } from "@oh-my-pi/pi-wire";
 +import { indexSessionBranchFromFile, visitEntriesFromFile } from "../session/session-loader";
 +import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "../session/session-storage";
@@ -228,10 +231,13 @@ index 0000000000..5e650c3a87
 +export const SAVED_HISTORY_PAGE_BYTES = 256 * 1024;
 +
 +/**
-+ * Layouts (branch ids with byte lengths) kept for recently read sessions. They hold
-+ * ids and integers only, never message bodies, and are keyed by file revision.
++ * Snapshots kept for recently read sessions. Each holds one session's active branch in an
++ * unlinked private file, so a page read is a positioned read, not a pass over the session file.
++ * The file vanishes when its descriptor closes, including at process exit.
 + */
-+const LAYOUT_CACHE_LIMIT = 2;
++const SNAPSHOT_CACHE_LIMIT = 2;
++/** A branch larger than this is refused rather than copied to disk. */
++const MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024;
 +
 +const storage: SessionStorage = new FileSessionStorage();
 +
@@ -255,21 +261,28 @@ index 0000000000..5e650c3a87
 +	nextOffset?: number;
 +}
 +
++/** One entry's serialized line inside the snapshot file, placed in branch order by `start`. */
 +interface Segment {
-+	id: string;
-+	start: number;
++	/** Position of the line in the private file. */
++	fileStart: number;
 +	length: number;
++	/** Offset of the line in the branch stream sent to guests. */
++	start: number;
 +}
 +
-+interface SavedHistoryLayout {
++interface Snapshot {
 +	revision: string;
 +	total: number;
-+	/** Active-branch entries in branch order; segments are contiguous. */
++	/** Active-branch entries in branch order; `start` values are contiguous. */
 +	segments: Segment[];
-+	byId: Map<string, Segment>;
++	fd: number;
++	refs: number;
++	retired: boolean;
++	closed: boolean;
 +}
 +
-+const layoutCache = new Map<string, SavedHistoryLayout>();
++const snapshots = new Map<string, Snapshot>();
++const building = new Map<string, Promise<Snapshot>>();
 +
 +/** Revision of a session file as seen by stat: any append or rewrite changes size or mtime. */
 +function revisionOf(stat: SessionStorageStat): string {
@@ -280,7 +293,7 @@ index 0000000000..5e650c3a87
 + * Read one page of the active branch of a session file as newline-delimited JSON.
 + * The bytes are the canonical branch order with the session header omitted. A
 + * supplied `expectedRevision` must match the current file, and the file must not
-+ * change while the page is built; otherwise the read fails with `changed`.
++ * change while the snapshot is built; otherwise the read fails with `changed`.
 + */
 +export async function readSavedHistoryPage(
 +	filePath: string,
@@ -291,94 +304,186 @@ index 0000000000..5e650c3a87
 +	const revision = revisionOf(storage.statSync(filePath));
 +	if (expectedRevision !== undefined && expectedRevision !== revision) throw new SavedHistoryError("changed");
 +
-+	const cached = layoutCache.get(filePath);
-+	const layout = cached?.revision === revision ? cached : await rememberLayout(filePath, revision);
-+	if (offset > layout.total) throw new SavedHistoryError("invalid_request");
-+
-+	const end = Math.min(layout.total, offset + SAVED_HISTORY_PAGE_BYTES);
-+	const bytes = end === offset ? Buffer.alloc(0) : await readWindow(filePath, layout, offset, end);
-+	if (revisionOf(storage.statSync(filePath)) !== revision) throw new SavedHistoryError("changed");
-+	return { revision, offset, bytes, ...(end < layout.total ? { nextOffset: end } : {}) };
++	const snapshot = await acquire(filePath, revision);
++	try {
++		if (offset > snapshot.total) throw new SavedHistoryError("invalid_request");
++		const end = Math.min(snapshot.total, offset + SAVED_HISTORY_PAGE_BYTES);
++		const bytes = end === offset ? Buffer.alloc(0) : readWindow(snapshot, offset, end);
++		if (revisionOf(storage.statSync(filePath)) !== revision) throw new SavedHistoryError("changed");
++		return { revision, offset, bytes, ...(end < snapshot.total ? { nextOffset: end } : {}) };
++	} finally {
++		release(snapshot);
++	}
 +}
 +
-+async function rememberLayout(filePath: string, revision: string): Promise<SavedHistoryLayout> {
-+	const layout = await buildLayout(filePath, revision);
-+	layoutCache.delete(filePath);
-+	layoutCache.set(filePath, layout);
-+	while (layoutCache.size > LAYOUT_CACHE_LIMIT) {
-+		const oldest = layoutCache.keys().next().value;
-+		if (oldest === undefined) break;
-+		layoutCache.delete(oldest);
++/** Hold a snapshot for this revision, building it once for concurrent readers. */
++async function acquire(filePath: string, revision: string): Promise<Snapshot> {
++	for (;;) {
++		let snapshot = snapshots.get(filePath);
++		if (snapshot && snapshot.revision !== revision) {
++			snapshots.delete(filePath);
++			retire(snapshot);
++			snapshot = undefined;
++		}
++		if (!snapshot) {
++			const key = `${filePath}\0${revision}`;
++			let pending = building.get(key);
++			if (!pending) {
++				pending = buildSnapshot(filePath, revision)
++					.then(built => {
++						const existing = snapshots.get(filePath);
++						if (existing) retire(existing);
++						snapshots.set(filePath, built);
++						return built;
++					})
++					.finally(() => building.delete(key));
++				building.set(key, pending);
++			}
++			snapshot = await pending;
++			if (snapshot.closed || snapshot.retired) continue;
++		}
++		snapshot.refs++;
++		snapshots.delete(filePath);
++		snapshots.set(filePath, snapshot);
++		prune();
++		return snapshot;
 +	}
-+	return layout;
 +}
 +
-+/** Pass 1 and 2: the branch order and each entry's serialized byte length. */
-+async function buildLayout(filePath: string, revision: string): Promise<SavedHistoryLayout> {
-+	const branch = await indexSessionBranchFromFile(filePath, storage);
-+	const onBranch = new Set(branch);
-+	const lengths = new Map<string, number>();
-+	await visitEntriesFromFile(
-+		filePath,
-+		entry => {
-+			if (entry.type === "session" || !onBranch.has(entry.id)) return;
-+			// Duplicate ids make the branch ambiguous; refuse rather than guess which entry is canonical.
-+			if (lengths.has(entry.id)) throw new SavedHistoryError("unavailable");
-+			lengths.set(entry.id, Buffer.byteLength(JSON.stringify(entry), "utf8") + 1);
-+		},
-+		storage,
-+	);
++function release(snapshot: Snapshot): void {
++	snapshot.refs--;
++	if (snapshot.retired && snapshot.refs === 0) close(snapshot);
++	prune();
++}
 +
-+	const segments: Segment[] = [];
-+	const byId = new Map<string, Segment>();
-+	let total = 0;
-+	for (const id of branch) {
-+		const length = lengths.get(id);
-+		if (length === undefined) throw new SavedHistoryError("changed");
-+		const segment = { id, start: total, length };
-+		segments.push(segment);
-+		byId.set(id, segment);
-+		total += length;
++function close(snapshot: Snapshot): void {
++	if (snapshot.closed) return;
++	snapshot.closed = true;
++	closeSync(snapshot.fd);
++}
++
++function retire(snapshot: Snapshot): void {
++	snapshot.retired = true;
++	if (snapshot.refs === 0) close(snapshot);
++}
++
++function prune(): void {
++	for (const [key, snapshot] of snapshots) {
++		if (snapshots.size <= SNAPSHOT_CACHE_LIMIT) break;
++		if (snapshot.refs > 0) continue;
++		snapshots.delete(key);
++		retire(snapshot);
 +	}
-+	if (revisionOf(storage.statSync(filePath)) !== revision) throw new SavedHistoryError("changed");
-+	return { revision, total, segments, byId };
++}
++
++/** An open, immediately unlinked file cannot outlive this process. */
++function openPrivateFile(): number {
++	const dir = mkdtempSync(join(tmpdir(), "omp-history-"));
++	const path = join(dir, "branch");
++	let fd: number | undefined;
++	try {
++		fd = openSync(path, "wx+", 0o600);
++		unlinkSync(path);
++		rmdirSync(dir);
++		return fd;
++	} catch (error) {
++		if (fd !== undefined) closeSync(fd);
++		try {
++			unlinkSync(path);
++		} catch {
++			// No file was created.
++		}
++		try {
++			rmdirSync(dir);
++		} catch {
++			// No directory remains.
++		}
++		throw error;
++	}
++}
++
++function writeAll(fd: number, bytes: Buffer, position: number): void {
++	let done = 0;
++	while (done < bytes.length) {
++		const written = writeSync(fd, bytes, done, bytes.length - done, position + done);
++		if (written === 0) throw new SavedHistoryError("unavailable");
++		done += written;
++	}
 +}
 +
 +/**
-+ * Pass 3: serialize only the branch entries that overlap [offset, end) and keep
-+ * just the overlapping bytes. The caller holds at most one page of output.
++ * One streaming pass over the session file. Each active-branch entry is serialized once into an
++ * unlinked private file, in file order. The branch order comes from the active-branch index.
 + */
-+async function readWindow(filePath: string, layout: SavedHistoryLayout, offset: number, end: number): Promise<Buffer> {
-+	const pieces = new Map<string, Buffer>();
-+	await visitEntriesFromFile(
-+		filePath,
-+		entry => {
-+			if (entry.type === "session") return;
-+			const segment = layout.byId.get(entry.id);
-+			if (!segment) return;
-+			const segmentEnd = segment.start + segment.length;
-+			if (segmentEnd <= offset || segment.start >= end) return;
-+			if (pieces.has(entry.id)) throw new SavedHistoryError("changed");
-+			const body = Buffer.from(`${JSON.stringify(entry)}\n`, "utf8");
-+			if (body.byteLength !== segment.length) throw new SavedHistoryError("changed");
-+			const from = Math.max(offset, segment.start) - segment.start;
-+			const to = Math.min(end, segmentEnd) - segment.start;
-+			pieces.set(entry.id, Buffer.from(body.subarray(from, to)));
-+		},
-+		storage,
-+	);
-+
-+	const parts: Buffer[] = [];
-+	for (const segment of layout.segments) {
-+		if (segment.start >= end) break;
-+		if (segment.start + segment.length <= offset) continue;
-+		const piece = pieces.get(segment.id);
-+		if (!piece) throw new SavedHistoryError("changed");
-+		parts.push(piece);
++async function buildSnapshot(filePath: string, revision: string): Promise<Snapshot> {
++	const branch = await indexSessionBranchFromFile(filePath, storage);
++	const onBranch = new Set(branch);
++	const fd = openPrivateFile();
++	try {
++		const placed = new Map<string, { fileStart: number; length: number }>();
++		let written = 0;
++		await visitEntriesFromFile(
++			filePath,
++			entry => {
++				if (entry.type === "session" || !onBranch.has(entry.id)) return;
++				// Duplicate ids make the branch ambiguous; refuse rather than guess which entry is canonical.
++				if (placed.has(entry.id)) throw new SavedHistoryError("unavailable");
++				const bytes = Buffer.from(`${JSON.stringify(entry)}\n`, "utf8");
++				if (written + bytes.length > MAX_SNAPSHOT_BYTES) throw new SavedHistoryError("unavailable");
++				writeAll(fd, bytes, written);
++				placed.set(entry.id, { fileStart: written, length: bytes.length });
++				written += bytes.length;
++			},
++			storage,
++		);
++		const segments: Segment[] = [];
++		let total = 0;
++		for (const id of branch) {
++			const item = placed.get(id);
++			if (!item) throw new SavedHistoryError("changed");
++			segments.push({ fileStart: item.fileStart, length: item.length, start: total });
++			total += item.length;
++		}
++		if (revisionOf(storage.statSync(filePath)) !== revision) throw new SavedHistoryError("changed");
++		return { revision, total, segments, fd, refs: 0, retired: false, closed: false };
++	} catch (error) {
++		closeSync(fd);
++		throw error;
 +	}
-+	const bytes = Buffer.concat(parts);
-+	if (bytes.byteLength !== end - offset) throw new SavedHistoryError("changed");
-+	return bytes;
++}
++
++/** First segment whose end lies after `offset`. */
++function segmentAt(segments: readonly Segment[], offset: number): number {
++	let low = 0;
++	let high = segments.length;
++	while (low < high) {
++		const mid = (low + high) >>> 1;
++		const segment = segments[mid]!;
++		if (segment.start + segment.length <= offset) low = mid + 1;
++		else high = mid;
++	}
++	return low;
++}
++
++/** Copy `[offset, end)` of the branch stream out of the snapshot file. */
++function readWindow(snapshot: Snapshot, offset: number, end: number): Buffer {
++	if (snapshot.closed) throw new SavedHistoryError("changed");
++	const out = Buffer.alloc(end - offset);
++	let filled = 0;
++	for (let index = segmentAt(snapshot.segments, offset); index < snapshot.segments.length && filled < out.length; index++) {
++		const segment = snapshot.segments[index]!;
++		const from = Math.max(offset, segment.start) - segment.start;
++		const to = Math.min(end, segment.start + segment.length) - segment.start;
++		let copied = 0;
++		while (copied < to - from) {
++			const count = readSync(snapshot.fd, out, filled + copied, to - from - copied, segment.fileStart + from + copied);
++			if (count === 0) throw new SavedHistoryError("changed");
++			copied += count;
++		}
++		filled += copied;
++	}
++	if (filled !== out.length) throw new SavedHistoryError("changed");
++	return out;
 +}
 diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
 index 853b9423a5..1d2ac04f16 100644
