@@ -19,3 +19,4 @@
 0019-index-active-session-branches-without-message-bodies.patch
 0020-extension-remote-dialog-transport.patch
 0021-feat-collab-add-opt-in-saved-session-listing.patch
+0022-fix-collab-require-separate-saved-history-key.patch
