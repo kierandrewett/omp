@@ -34,6 +34,8 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0021-feat-collab-add-opt-in-saved-session-listing`|Adds opt-in saved-session metadata listing for Collab control guests; view guests remain restricted to the shared session.|
 |`0022-fix-collab-require-separate-saved-history-key`|Requires a separate owner-only key file in addition to a control link for saved-session metadata.|
 |`0023-feat-collab-add-keyed-saved-history-paging`|Adds paged saved-conversation reads over Collab: active branch only, size-bounded, change-checked and gated by the history key file.|
+|`0024-fix-collab-snapshot-growing-session-prefixes`|Copies and verifies complete-line session prefixes so history pages remain consistent during growth.|
+|`0025-feat-collab-acknowledge-guest-control-actions`|Adds correlated acceptance results for guest prompts, interrupts and dialog responses.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.

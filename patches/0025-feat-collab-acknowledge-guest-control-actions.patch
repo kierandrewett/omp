@@ -1,0 +1,361 @@
+diff --git a/docs/collab.md b/docs/collab.md
+index df752e0e62..30787686e8 100644
+--- a/docs/collab.md
++++ b/docs/collab.md
+@@ -153,18 +153,25 @@ so replacing or removing it changes access for the next request.
+ The list uses offset pagination and can change between requests if sessions
+ change.
+ 
+-`read-saved-history` has the same gating (control link plus history key, checked on
+-every request). It takes a listed session id, never a path, and returns one page of
+-that session's active branch as newline-delimited JSON, in branch order, without the
+-session header. Each page carries at most 256 KiB of raw bytes as unpadded base64url
+-in `bytes`. Concatenate decoded bytes across pages and continue from `nextOffset`
+-until a reply has `done: true`. The first reply snapshots the active branch; send its
+-`revision` with every later request and the host serves the pages from that snapshot, even
+-while the session keeps growing. A page can split a JSON line, so decode before parsing.
+-Errors are `unavailable`, `invalid_request`, `not_found`, `ambiguous` (duplicate session id),
+-or `changed` (the snapshot was dropped, or the session changed while the snapshot was built).
+-On `changed`, restart from offset 0 without a revision. Replies never include file paths.
+-The host keeps up to four snapshots in unlinked private files, at most 1 GiB in total.
++`read-saved-history` requires a control link and the history key on every request.
++It takes a listed session id, never a path. It returns the active branch as
++newline-delimited JSON in branch order, without the session header.
++
++Each page carries at most 256 KiB of raw bytes as unpadded base64url in `bytes`.
++Concatenate decoded pages and continue from `nextOffset` until `done` is true.
++A page can split a JSON line, so decode before parsing.
++
++The first reply snapshots the complete-line prefix. Send its `revision` with every
++later request. Later pages use the same snapshot, even while the session grows.
++
++The host can return `unavailable`, `invalid_request`, `not_found`, or `ambiguous`
++for a duplicate session id. It returns `changed` when a prefix changes during a
++copy or the snapshot cannot be rebuilt. Restart a changed read at offset zero,
++without a revision. Replies never include file paths.
++
++The host uses unlinked private files and retains up to eight idle snapshots, with a
++1 GiB total limit. A closed snapshot can be rebuilt while its original prefix remains.
++The prefix copy requires a working `/dev/fd` on the host.
+ 
+ Guests with a view-only link can read everything live — back-transcript, streaming text, tool cards, subagent transcripts — but the host rejects prompting, interrupting, and agent control from them.
+ 
+@@ -229,4 +236,11 @@ Hub topology — the host is authoritative, guests never peer:
+ 
+ Guest→host: `hello`, `prompt`, `abort`, `agent-cmd` (hub chat/kill/revive), `fetch-transcript` (incremental subagent-transcript reads answered by targeted `transcript` frames), `list-saved-sessions` and `read-saved-history` (history-key gated, answered by `saved-sessions` and `saved-history` frames), and `ui-response`. The replica loads through the regular `/resume` machinery, so theming, ctrl+o, and transcript behavior are native by construction; the guest process never chdirs to host paths.
+ 
++Guests may include an integer `actionId` in prompt, abort, or UI response frames.
++The host sends a targeted `control-result` with the same identifier and an `accepted`
++boolean.
++
++A missing result means the outcome is unknown; do not retry automatically.
++For a prompt, acceptance means admission, not completion of the agent run.
++
+ Transcript fetches are capped at 4 MiB per reply and end on complete JSONL lines. Guests continue from `newSize`; a single entry exceeding the cap produces a terminal transcript error instead of an endless empty-read retry.
+diff --git a/packages/coding-agent/src/collab/host.ts b/packages/coding-agent/src/collab/host.ts
+index 2748110ef2..cf51d80c80 100644
+--- a/packages/coding-agent/src/collab/host.ts
++++ b/packages/coding-agent/src/collab/host.ts
+@@ -154,7 +154,8 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
+ interface PendingCollabUiRequest {
+ 	request: CollabUiRequest;
+ 	promise: Promise<CollabGuestUiResult>;
+-	settle(result: CollabGuestUiResult): void;
++	/** Resolves the request once; returns false when it had already settled. */
++	settle(result: CollabGuestUiResult): boolean;
+ 	responsePending?: boolean;
+ 	retainOnReconnect?: boolean;
+ }
+@@ -377,15 +378,16 @@ export class CollabHost {
+ 		const fullRequest: CollabUiRequest = { ...request, reqId };
+ 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
+ 		let settled = false;
+-		const settle = (result: CollabGuestUiResult): void => {
+-			if (settled) return;
++		const settle = (result: CollabGuestUiResult): boolean => {
++			if (settled) return false;
+ 			settled = true;
+ 			signal?.removeEventListener("abort", onAbort);
+ 			this.#pendingUi.delete(reqId);
+ 			this.#sendWritablePeers({ t: "ui-request-end", reqId });
+ 			resolve(result);
++			return true;
+ 		};
+-		const onAbort = (): void => settle({ kind: "unavailable" });
++		const onAbort = (): void => { settle({ kind: "unavailable" }); };
+ 		signal?.addEventListener("abort", onAbort, { once: true });
+ 		this.#pendingUi.set(reqId, {
+ 			request: fullRequest,
+@@ -747,7 +749,7 @@ export class CollabHost {
+ 		// An old-room answer may wait for rollback, but cannot settle against
+ 		// another session. The response handler owns that bounded deferral.
+ 		if (frame.t === "ui-response") {
+-			this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
++			this.#handleUiResponse(frame.reqId, frame.value, frame.actionId, fromPeer);
+ 			return;
+ 		}
+ 		// Inbound frames act on the mirrored session (join snapshots, prompts,
+@@ -759,12 +761,12 @@ export class CollabHost {
+ 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
+ 				break;
+ 			case "prompt":
+-				if (this.#rejectWhileStarting("prompting", fromPeer)) break;
+-				this.#handlePrompt(frame.text, frame.images, fromPeer);
++				if (this.#rejectWhileStarting("prompting", fromPeer, frame.actionId)) break;
++				this.#handlePrompt(frame.text, frame.images, frame.actionId, fromPeer);
+ 				break;
+ 			case "abort":
+-				if (this.#rejectWhileStarting("interrupting", fromPeer)) break;
+-				this.#handleAbort(fromPeer);
++				if (this.#rejectWhileStarting("interrupting", fromPeer, frame.actionId)) break;
++				this.#handleAbort(frame.actionId, fromPeer);
+ 				break;
+ 			case "agent-cmd":
+ 				if (this.#rejectWhileStarting("agent control", fromPeer)) break;
+@@ -951,9 +953,19 @@ export class CollabHost {
+ 		return bytes.byteLength === expected.byteLength && timingSafeEqual(bytes, expected);
+ 	}
+ 
+-	/** Reject a mutating frame from a read-only peer with a targeted error. */
+-	#rejectReadOnly(action: string, fromPeer: number): void {
++	/**
++	 * Verdict for a guest control frame that carried `actionId`. Frames without one
++	 * (legacy clients) get no reply, so their wire behaviour is unchanged.
++	 */
++	#ack(actionId: number | undefined, accepted: boolean, fromPeer: number): void {
++		if (actionId === undefined || !Number.isSafeInteger(actionId)) return;
++		this.#send({ t: "control-result", actionId, accepted }, fromPeer);
++	}
++
++	/** Reject a mutating frame from a read-only peer with a targeted error and a refusal verdict. */
++	#rejectReadOnly(action: string, fromPeer: number, actionId?: number): void {
+ 		this.#send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
++		this.#ack(actionId, false, fromPeer);
+ 	}
+ 
+ 	/**
+@@ -961,12 +973,13 @@ export class CollabHost {
+ 	 * auto-started room is live before the session's startup hooks finish):
+ 	 * refuse with a targeted error instead of running an agent turn beside them.
+ 	 */
+-	#rejectWhileStarting(action: string, fromPeer: number): boolean {
++	#rejectWhileStarting(action: string, fromPeer: number, actionId?: number): boolean {
+ 		if (this.#guestActionsReady()) return false;
+ 		const ready = this.#ctx.session.isSessionTransitioning
+ 			? "the session transition completes"
+ 			: "the host finishes starting up";
+ 		this.#send({ t: "error", message: `${action} is unavailable until ${ready}` }, fromPeer);
++		this.#ack(actionId, false, fromPeer);
+ 		return true;
+ 	}
+ 
+@@ -1124,33 +1137,47 @@ export class CollabHost {
+ 		}
+ 	}
+ 
+-	#handleUiResponse(reqId: number, value: CollabUiResponseValue, fromPeer: number): void {
++	#handleUiResponse(
++		reqId: number,
++		value: CollabUiResponseValue,
++		actionId: number | undefined,
++		fromPeer: number,
++	): void {
+ 		const suspended = !this.#guestTrafficAllowed();
+-		if (suspended && (this.ending || !this.#ctx.session.isSessionTransitioning)) return;
++		if (suspended && (this.ending || !this.#ctx.session.isSessionTransitioning)) {
++			this.#ack(actionId, false, fromPeer);
++			return;
++		}
+ 		const peer = this.#peers.get(fromPeer);
+ 		if (!peer?.canWrite) {
+-			this.#rejectReadOnly("responding to ask", fromPeer);
++			this.#rejectReadOnly("responding to ask", fromPeer, actionId);
+ 			return;
+ 		}
+ 		const pending = this.#pendingUi.get(reqId);
+ 		if (pending) {
+-			if (pending.responsePending) return;
++			// Another answer from this peer already waits on the request; this one is not applied.
++			if (pending.responsePending) {
++				this.#ack(actionId, false, fromPeer);
++				return;
++			}
+ 			if (suspended) {
+-				void this.#settleUiAfterTransition(pending, value, fromPeer);
++				void this.#settleUiAfterTransition(pending, value, actionId, fromPeer);
+ 				return;
+ 			}
+-			pending.settle({ kind: "answered", value });
++			this.#ack(actionId, pending.settle({ kind: "answered", value }), fromPeer);
+ 			return;
+ 		}
+ 		// The request already settled (or never existed for this peer). A writer that
+ 		// reconnected after the broadcast `ui-request-end` resends its answer and would
+ 		// otherwise wait forever, so acknowledge it directly.
+ 		this.#send({ t: "ui-request-end", reqId }, fromPeer);
++		this.#ack(actionId, false, fromPeer);
+ 	}
+ 
+ 	async #settleUiAfterTransition(
+ 		pending: PendingCollabUiRequest,
+ 		value: CollabUiResponseValue,
++		actionId: number | undefined,
+ 		fromPeer: number,
+ 	): Promise<void> {
+ 		// At most one answer per existing request; stop/local cancellation wakes
+@@ -1167,21 +1194,37 @@ export class CollabHost {
+ 				!this.#sessionStillCurrent() &&
+ 				this.#ctx.session.isSessionTransitioning
+ 			);
+-			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
+-			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) pending.settle({ kind: "answered", value });
+-			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
++			// Room or session changed: no verdict can reach the guest, so it stays unknown.
++			if (!this.#guestTrafficAllowed()) return;
++			// Another peer or a local cancellation settled the request first: not applied.
++			if (this.#pendingUi.get(reqId) !== pending) {
++				this.#ack(actionId, false, fromPeer);
++				return;
++			}
++			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) {
++				this.#ack(actionId, pending.settle({ kind: "answered", value }), fromPeer);
++			} else {
++				this.#sendWritablePeers({ t: "ui-request", request: pending.request });
++				this.#ack(actionId, false, fromPeer);
++			}
+ 		} catch (error) {
+ 			logger.warn("Collab UI response could not await session transition", { error: String(error) });
+ 			pending.settle({ kind: "unavailable" });
++			this.#ack(actionId, false, fromPeer);
+ 		} finally {
+ 			pending.responsePending = false;
+ 		}
+ 	}
+ 
+-	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
++	#handlePrompt(
++		text: string,
++		images: ImageContent[] | undefined,
++		actionId: number | undefined,
++		fromPeer: number,
++	): void {
+ 		const peer = this.#peers.get(fromPeer);
+ 		if (!peer?.canWrite) {
+-			this.#rejectReadOnly("prompting", fromPeer);
++			this.#rejectReadOnly("prompting", fromPeer, actionId);
+ 			return;
+ 		}
+ 		const name = peer.name;
+@@ -1193,6 +1236,9 @@ export class CollabHost {
+ 			this.#ctx.ui.requestRender();
+ 			this.#scheduleStateBroadcast();
+ 		}
++		// Admission (the prompt is queued or dispatching) is the acknowledged point; a
++		// later refusal after admission is not reported as `accepted: false`.
++		let admitted = false;
+ 		this.#ctx.session
+ 			.promptCustomMessage(
+ 				{
+@@ -1202,12 +1248,23 @@ export class CollabHost {
+ 					details,
+ 					attribution: "user",
+ 				},
+-				{ streamingBehavior: "steer", queueChipText: text },
++				{
++					streamingBehavior: "steer",
++					queueChipText: text,
++					onPromptAdmitted: () => {
++						admitted = true;
++						this.#ack(actionId, true, fromPeer);
++					},
++				},
+ 			)
+ 			.then(dispatched => {
+-				if (dispatched === false) return this.#notifyPromptDropped(fromPeer);
++				if (dispatched === false) {
++					if (!admitted) this.#ack(actionId, false, fromPeer);
++					return this.#notifyPromptDropped(fromPeer);
++				}
+ 			})
+ 			.catch(err => {
++				// A rejection before admission has no proven outcome, so it stays unknown.
+ 				logger.warn("collab guest prompt failed", { error: String(err) });
+ 				this.#send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+ 			});
+@@ -1230,15 +1287,19 @@ export class CollabHost {
+ 		);
+ 	}
+ 
+-	#handleAbort(fromPeer: number): void {
++	#handleAbort(actionId: number | undefined, fromPeer: number): void {
+ 		const peer = this.#peers.get(fromPeer);
+ 		if (!peer?.canWrite) {
+-			this.#rejectReadOnly("interrupting", fromPeer);
++			this.#rejectReadOnly("interrupting", fromPeer, actionId);
+ 			return;
+ 		}
+ 		const name = peer.name;
+-		void this.#ctx.session
+-			.abort({ reason: USER_INTERRUPT_LABEL })
++		const interrupted = this.#ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
++		// abort() applies its state changes (generation bump, retry abort, queue pull)
++		// before its first await, so the interrupt is in effect once the call returns.
++		// The promise only tracks the unwind, which is not awaited for the verdict.
++		this.#ack(actionId, true, fromPeer);
++		void interrupted
+ 			.then(() => {
+ 				if (!this.#guestTrafficAllowed()) return;
+ 				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
+diff --git a/packages/coding-agent/src/collab/protocol.ts b/packages/coding-agent/src/collab/protocol.ts
+index 5eb8fa2854..3e4d723c3c 100644
+--- a/packages/coding-agent/src/collab/protocol.ts
++++ b/packages/coding-agent/src/collab/protocol.ts
+@@ -55,7 +55,7 @@ export type { CollabSessionState };
+ export type CollabFrame =
+ 	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
+ 	| Exclude<GuestFrame, { t: "prompt" }>
+-	| { t: "prompt"; text: string; images?: ImageContent[] }
++	| { t: "prompt"; text: string; images?: ImageContent[]; actionId?: number }
+ 	// host -> guest
+ 	| {
+ 			t: "welcome";
+@@ -91,6 +91,7 @@ export type CollabFrame =
+ 	| { t: "agents"; agents: AgentSnapshot[] }
+ 	| { t: "ui-request"; request: CollabUiRequest }
+ 	| { t: "ui-request-end"; reqId: number }
++	| Extract<HostFrame, { t: "control-result" }>
+ 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
+ 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+ 	| Extract<HostFrame, { t: "saved-sessions" }>
+diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
+index 1d2ac04f16..cd9d7856b2 100644
+--- a/packages/wire/src/index.ts
++++ b/packages/wire/src/index.ts
+@@ -338,9 +338,9 @@ export type GuestFrame =
+ 			 */
+ 			writeToken?: string;
+ 	  }
+-	| { t: "prompt"; text: string; images?: ImageContent[] }
+-	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
+-	| { t: "abort" }
++	| { t: "prompt"; text: string; images?: ImageContent[]; actionId?: number }
++	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue; actionId?: number }
++	| { t: "abort"; actionId?: number }
+ 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
+ 	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
+ 	| { t: "list-saved-sessions"; reqId: number; offset: number; historyKey: string }
+@@ -381,6 +381,14 @@ export type HostFrame =
+ 	| { t: "agents"; agents: AgentSnapshot[] }
+ 	| { t: "ui-request"; request: CollabUiRequest }
+ 	| { t: "ui-request-end"; reqId: number }
++	/**
++	 * Targeted verdict for a guest control frame that carried `actionId`
++	 * (prompt, abort, ui-response). `accepted: true` means the host admitted
++	 * the action; `accepted: false` means the host definitely did not apply it.
++	 * No result (guest sees it as unknown) means the outcome is not known. Frames
++	 * without `actionId` never receive this frame.
++	 */
++	| { t: "control-result"; actionId: number; accepted: boolean }
+ 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
+ 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+ 	| {

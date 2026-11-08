@@ -1,0 +1,515 @@
+diff --git a/packages/coding-agent/src/collab/saved-history.ts b/packages/coding-agent/src/collab/saved-history.ts
+index 98b250097e..bb64904e2a 100644
+--- a/packages/coding-agent/src/collab/saved-history.ts
++++ b/packages/coding-agent/src/collab/saved-history.ts
+@@ -1,5 +1,15 @@
+ import { createHash } from "node:crypto";
+-import { closeSync, mkdtempSync, openSync, readSync, rmdirSync, statSync, unlinkSync, writeSync } from "node:fs";
++import {
++	closeSync,
++	fstatSync,
++	mkdtempSync,
++	openSync,
++	readSync,
++	rmdirSync,
++	statSync,
++	unlinkSync,
++	writeSync,
++} from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import type { SavedHistoryErrorCode } from "@oh-my-pi/pi-wire";
+@@ -10,17 +20,31 @@ import { FileSessionStorage, type SessionStorage } from "../session/session-stor
+ export const SAVED_HISTORY_PAGE_BYTES = 256 * 1024;
+ 
+ /**
+- * Snapshots kept for recently read sessions. Each holds one session's active branch in an
+- * unlinked private file, so a page read is a positioned read, not a pass over the session file.
+- * The file vanishes when its descriptor closes, including at process exit.
++ * Snapshots kept open at once. Above this, the least recently used idle snapshot is closed. Each
++ * snapshot holds one open descriptor.
+  */
+-const SNAPSHOT_CACHE_LIMIT = 4;
+-/** A branch larger than this is refused rather than copied to disk. */
++const SNAPSHOT_CACHE_LIMIT = 8;
++/**
++ * An idle snapshot is closed after this long without use. Closing never fails a page sequence: a
++ * later page for the same revision rebuilds the snapshot from the file while its prefix still has
++ * the bytes that revision names.
++ */
++const SNAPSHOT_IDLE_MS = 5 * 60 * 1000;
++/**
++ * Prefix lengths of recent revisions, so a closed snapshot can be rebuilt. Each entry is one
++ * number; the least recently used revision is forgotten first.
++ */
++const REVISION_INDEX_LIMIT = 4096;
++/** A complete-line prefix, or its branch, larger than this is refused rather than copied to disk. */
+ const MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024;
+-/** Total bytes kept across idle snapshots; the least recently used go first. */
++/** Total branch bytes kept across idle snapshots; the least recently used go first. */
+ const MAX_CACHED_BYTES = 1024 * 1024 * 1024;
+-/** A session that keeps changing while its snapshot is built is reported as changed after this many tries. */
++/** Snapshot builds running at once. Each build holds at most two copies of a prefix on disk. */
++const MAX_CONCURRENT_BUILDS = 2;
++/** Fresh-snapshot attempts for a first page when the file changes under the copy. */
+ const BUILD_ATTEMPTS = 3;
++/** Chunk size for copying and hashing a prefix, and for scanning back for its last newline. */
++const IO_CHUNK_BYTES = 1024 * 1024;
+ 
+ const storage: SessionStorage = new FileSessionStorage();
+ 
+@@ -36,6 +60,7 @@ export class SavedHistoryError extends Error {
+ }
+ 
+ export interface SavedHistoryPage {
++	/** Content identity of the snapshot that served the page: a SHA-256 of the prefix it was built from. */
+ 	revision: string;
+ 	offset: number;
+ 	/** Exactly `min(SAVED_HISTORY_PAGE_BYTES, total - offset)` bytes of NDJSON, split at byte boundaries. */
+@@ -54,7 +79,7 @@ interface Segment {
+ }
+ 
+ interface Snapshot {
+-	/** Identity of the session file when the snapshot was taken. Pages never mix revisions. */
++	/** Content identity of the prefix the snapshot was built from. Pages never mix revisions. */
+ 	revision: string;
+ 	total: number;
+ 	/** Active-branch entries in branch order; `start` values are contiguous. */
+@@ -62,28 +87,42 @@ interface Snapshot {
+ 	fd: number;
+ 	/** Size of the private file, counted against the cache limit. */
+ 	bytes: number;
++	/** Reads currently using the snapshot. A snapshot with readers is never closed. */
+ 	refs: number;
+-	retired: boolean;
+-	closed: boolean;
++	/** Last time a read acquired or released the snapshot. */
++	lastUsed: number;
+ }
+ 
++/** Open snapshots keyed by file path and revision, least recently used first. */
+ const snapshots = new Map<string, Snapshot>();
+-const building = new Map<string, Promise<Snapshot>>();
++/** Prefix length of recent revisions, keyed like `snapshots`, least recently used first. */
++const revisionLengths = new Map<string, number>();
++/** Builds waiting for a slot, in arrival order. A finishing build hands its slot to the next waiter. */
++const buildWaiters: Array<() => void> = [];
++let buildsRunning = 0;
+ 
+-/** Revision of a session file: inode, size and nanosecond modify and change times. A rewrite or append changes it. */
+-function currentRevision(filePath: string): string {
+-	const stat = statSync(filePath, { bigint: true });
+-	return createHash("sha256").update(`${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`).digest("hex");
++/** An unlinked private file. `path` names it through `/dev/fd` so the loader can open it by path. */
++interface TempCopy {
++	fd: number;
++	path: string;
++}
++
++/** A copy of a file's first `length` bytes whose digest was verified, identified by its revision. */
++interface PrefixCopy extends TempCopy {
++	length: number;
++	revision: string;
+ }
+ 
+ /**
+  * Read one page of the active branch of a session file as newline-delimited JSON.
+  * The bytes are the canonical branch order with the session header omitted.
+  *
+- * The first request (no `expectedRevision`) snapshots the branch as the file is now. Later pages
+- * carry that revision and are served from the same snapshot even while the session keeps
+- * growing, so a running session can be read to the end. A request whose snapshot is gone fails
+- * with `changed`, and the guest starts again from offset 0.
++ * With no expected revision, the branch is taken from the file's complete lines (up to its last
++ * newline) as they are when the request arrives. Later pages carry that revision and are served
++ * from the snapshot of exactly those bytes, so a running session can be read to the end. If the
++ * snapshot was closed in between, it is rebuilt from the file as long as the file's prefix still
++ * has that revision's bytes; otherwise the request fails with `changed` and the guest starts again
++ * from offset 0.
+  */
+ export async function readSavedHistoryPage(
+ 	filePath: string,
+@@ -91,7 +130,10 @@ export async function readSavedHistoryPage(
+ 	expectedRevision: string | undefined,
+ ): Promise<SavedHistoryPage> {
+ 	if (!Number.isSafeInteger(offset) || offset < 0) throw new SavedHistoryError("invalid_request");
+-	const snapshot = expectedRevision === undefined ? await acquireCurrent(filePath) : acquireHeld(filePath, expectedRevision);
++	const snapshot =
++		expectedRevision === undefined
++			? await acquireCurrent(filePath)
++			: await acquireRevision(filePath, expectedRevision);
+ 	try {
+ 		if (offset > snapshot.total) throw new SavedHistoryError("invalid_request");
+ 		const end = Math.min(snapshot.total, offset + SAVED_HISTORY_PAGE_BYTES);
+@@ -102,84 +144,146 @@ export async function readSavedHistoryPage(
+ 	}
+ }
+ 
+-/** A cached snapshot with exactly this revision, held for one read. */
+-function acquireHeld(filePath: string, revision: string): Snapshot {
+-	const snapshot = snapshots.get(filePath);
+-	if (!snapshot || snapshot.revision !== revision || snapshot.closed || snapshot.retired) {
+-		throw new SavedHistoryError("changed");
++function cacheKey(filePath: string, revision: string): string {
++	return `${filePath}\0${revision}`;
++}
++
++/**
++ * Hold the snapshot with this revision. A closed snapshot is rebuilt from the file when the file's
++ * first `length` bytes still hash to the revision; a prefix that changed is refused with `changed`.
++ */
++async function acquireRevision(filePath: string, revision: string): Promise<Snapshot> {
++	const key = cacheKey(filePath, revision);
++	const cached = snapshots.get(key);
++	const length = revisionLengths.get(key);
++	if (length !== undefined) rememberLength(key, length);
++	if (cached) return hold(key, cached);
++	if (length === undefined) throw new SavedHistoryError("changed");
++	return materialize(filePath, length, revision);
++}
++
++/**
++ * Hold the snapshot of the file's complete-line prefix as it is now. A prefix that was already
++ * snapshotted is reused, found by content, so concurrent readers and repeated reads share one
++ * build. A copy that changes while it is made is retried a bounded number of times.
++ */
++async function acquireCurrent(filePath: string): Promise<Snapshot> {
++	for (let attempt = 1; ; attempt++) {
++		try {
++			return await materialize(filePath, undefined, undefined);
++		} catch (error) {
++			const changed = error instanceof SavedHistoryError && error.code === "changed";
++			if (!changed || attempt >= BUILD_ATTEMPTS) throw error;
++		}
+ 	}
+-	return hold(filePath, snapshot);
+ }
+ 
+-function hold(filePath: string, snapshot: Snapshot): Snapshot {
++function hold(key: string, snapshot: Snapshot): Snapshot {
+ 	snapshot.refs++;
+-	snapshots.delete(filePath);
+-	snapshots.set(filePath, snapshot);
++	snapshot.lastUsed = Date.now();
++	// Re-insert so the map's order stays least recently used first.
++	snapshots.delete(key);
++	snapshots.set(key, snapshot);
+ 	prune();
+ 	return snapshot;
+ }
+ 
+-/** Hold a snapshot of the file as it is now, building it once for concurrent readers. */
+-async function acquireCurrent(filePath: string): Promise<Snapshot> {
+-	for (let attempt = 1; ; attempt++) {
+-		const revision = currentRevision(filePath);
+-		const existing = snapshots.get(filePath);
+-		if (existing && existing.revision === revision && !existing.closed && !existing.retired) {
+-			return hold(filePath, existing);
+-		}
+-		const key = `${filePath}\0${revision}`;
+-		let pending = building.get(key);
+-		if (!pending) {
+-			pending = buildSnapshot(filePath, revision)
+-				.then(built => {
+-					const previous = snapshots.get(filePath);
+-					if (previous) retire(previous);
+-					snapshots.set(filePath, built);
+-					return built;
+-				})
+-				.finally(() => building.delete(key));
+-			building.set(key, pending);
+-		}
++/**
++ * Copy a prefix of the file and hold its snapshot. `length` is the prefix to copy, or the
++ * complete-line prefix of the file when undefined. When `expectedRevision` is given, the copy must
++ * hash to exactly that revision.
++ */
++async function materialize(
++	filePath: string,
++	length: number | undefined,
++	expectedRevision: string | undefined,
++): Promise<Snapshot> {
++	await acquireBuildSlot();
++	try {
++		const copy = await copyPrefix(filePath, length);
+ 		try {
+-			const built = await pending;
+-			if (!built.closed && !built.retired) return hold(filePath, built);
+-		} catch (error) {
+-			// The session grew while the snapshot was built: look again with the new revision.
+-			if (!(error instanceof SavedHistoryError) || error.code !== "changed" || attempt >= BUILD_ATTEMPTS) throw error;
++			if (expectedRevision !== undefined && copy.revision !== expectedRevision) {
++				throw new SavedHistoryError("changed");
++			}
++			const key = cacheKey(filePath, copy.revision);
++			rememberLength(key, copy.length);
++			const cached = snapshots.get(key);
++			if (cached) return hold(key, cached);
++			const built = await buildSnapshot(copy.path, copy.revision);
++			// Another build of the same prefix may have finished while this one ran.
++			const raced = snapshots.get(key);
++			if (raced) {
++				closeSync(built.fd);
++				return hold(key, raced);
++			}
++			snapshots.set(key, built);
++			return hold(key, built);
++		} finally {
++			removeTempCopy(copy);
+ 		}
++	} finally {
++		releaseBuildSlot();
+ 	}
+ }
+ 
++async function acquireBuildSlot(): Promise<void> {
++	if (buildsRunning < MAX_CONCURRENT_BUILDS) {
++		buildsRunning++;
++		return;
++	}
++	// The releasing build passes its slot to the waiter, so the count never exceeds the limit.
++	const { promise, resolve } = Promise.withResolvers<void>();
++	buildWaiters.push(resolve);
++	await promise;
++}
++
++function releaseBuildSlot(): void {
++	const next = buildWaiters.shift();
++	if (next) next();
++	else buildsRunning--;
++}
++
++function rememberLength(key: string, length: number): void {
++	revisionLengths.delete(key);
++	revisionLengths.set(key, length);
++	const oldest = revisionLengths.keys().next();
++	if (!oldest.done && revisionLengths.size > REVISION_INDEX_LIMIT) revisionLengths.delete(oldest.value);
++}
++
+ function release(snapshot: Snapshot): void {
+ 	snapshot.refs--;
+-	if (snapshot.retired && snapshot.refs === 0) close(snapshot);
++	snapshot.lastUsed = Date.now();
+ 	prune();
+ }
+ 
+ function close(snapshot: Snapshot): void {
+-	if (snapshot.closed) return;
+-	snapshot.closed = true;
+ 	closeSync(snapshot.fd);
+ }
+ 
+-function retire(snapshot: Snapshot): void {
+-	snapshot.retired = true;
+-	if (snapshot.refs === 0) close(snapshot);
+-}
+-
++/**
++ * Close idle snapshots that are past their idle window, over the count limit, or over the byte
++ * limit. Snapshots with readers are never closed, and the byte limit counts every open snapshot.
++ */
+ function prune(): void {
++	const now = Date.now();
+ 	let bytes = 0;
+ 	for (const snapshot of snapshots.values()) bytes += snapshot.bytes;
+ 	for (const [key, snapshot] of snapshots) {
+-		if (snapshots.size <= SNAPSHOT_CACHE_LIMIT && bytes <= MAX_CACHED_BYTES) break;
++		const expired = now - snapshot.lastUsed >= SNAPSHOT_IDLE_MS;
++		const tooMany = snapshots.size > SNAPSHOT_CACHE_LIMIT;
++		const tooBig = bytes > MAX_CACHED_BYTES;
++		if (!expired && !tooMany && !tooBig) continue;
+ 		if (snapshot.refs > 0) continue;
+ 		snapshots.delete(key);
+ 		bytes -= snapshot.bytes;
+-		retire(snapshot);
++		close(snapshot);
+ 	}
+ }
+ 
+-/** An open, immediately unlinked file cannot outlive this process. */
++/**
++ * Open a read-write file that is unlinked before any byte is written, so it cannot outlive this
++ * process and no named copy of the conversation ever exists on disk.
++ */
+ function openPrivateFile(): number {
+ 	const dir = mkdtempSync(join(tmpdir(), "omp-history-"));
+ 	const path = join(dir, "branch");
+@@ -205,6 +309,28 @@ function openPrivateFile(): number {
+ 	}
+ }
+ 
++/**
++ * Create the unlinked copy and name it `/dev/fd/<fd>`. The name is accepted only when it resolves to
++ * this exact file, so a platform without a working `/dev/fd` fails closed before any byte is written.
++ */
++function createTempCopy(): TempCopy {
++	const fd = openPrivateFile();
++	const path = `/dev/fd/${fd}`;
++	try {
++		const own = fstatSync(fd);
++		const named = statSync(path, { throwIfNoEntry: false });
++		if (!named || named.dev !== own.dev || named.ino !== own.ino) throw new SavedHistoryError("unavailable");
++		return { fd, path };
++	} catch (error) {
++		closeSync(fd);
++		throw error;
++	}
++}
++
++function removeTempCopy(copy: TempCopy): void {
++	closeSync(copy.fd);
++}
++
+ function writeAll(fd: number, bytes: Buffer, position: number): void {
+ 	let done = 0;
+ 	while (done < bytes.length) {
+@@ -214,19 +340,99 @@ function writeAll(fd: number, bytes: Buffer, position: number): void {
+ 	}
+ }
+ 
++/** Fill `buffer[0, length)` from `position`. A short file means it changed under the read. */
++function readExact(fd: number, buffer: Buffer, length: number, position: number): void {
++	let done = 0;
++	while (done < length) {
++		const count = readSync(fd, buffer, done, length - done, position + done);
++		if (count === 0) throw new SavedHistoryError("changed");
++		done += count;
++	}
++}
++
++/**
++ * Byte length of the file up to and including its last newline, or 0 when it has none. A trailing
++ * partial line, which a writer may still be appending, is left out. Scans backward in bounded chunks.
++ */
++async function completeLinesLength(fd: number, size: number): Promise<number> {
++	const chunk = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, size));
++	for (let end = size; end > 0; ) {
++		const start = Math.max(0, end - chunk.length);
++		readExact(fd, chunk, end - start, start);
++		const index = chunk.subarray(0, end - start).lastIndexOf(0x0a);
++		if (index !== -1) return start + index + 1;
++		end = start;
++		await Bun.sleep(0);
++	}
++	return 0;
++}
++
+ /**
+- * One streaming pass over the session file. Each active-branch entry is serialized once into an
+- * unlinked private file, in file order. The branch order comes from the active-branch index.
++ * SHA-256 of `[0, length)` read through `source`. When `copy` is given, the same bytes are written
++ * there, so the copy is exactly the bytes that were hashed.
+  */
+-async function buildSnapshot(filePath: string, revision: string): Promise<Snapshot> {
+-	const branch = await indexSessionBranchFromFile(filePath, storage);
++async function digestPrefix(source: number, length: number, copy?: number): Promise<string> {
++	const hash = createHash("sha256");
++	const chunk = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, length));
++	for (let offset = 0; offset < length; ) {
++		const count = Math.min(chunk.length, length - offset);
++		readExact(source, chunk, count, offset);
++		const bytes = chunk.subarray(0, count);
++		hash.update(bytes);
++		if (copy !== undefined) writeAll(copy, bytes, offset);
++		offset += count;
++		await Bun.sleep(0);
++	}
++	return hash.digest("hex");
++}
++
++/**
++ * Copy the first `length` bytes of the file (or its complete-line prefix when `length` is
++ * undefined) into a private file, and prove the copy matches them.
++ *
++ * The copy is written by one pass over the file, then the prefix is read again and must hash to the
++ * same digest. That catches a rewrite of bytes in the prefix that landed during the copy, including
++ * an in-place rewrite that a size or timestamp check would miss. Growth past the prefix is ignored.
++ * Every later step reads only the copy.
++ */
++async function copyPrefix(filePath: string, length: number | undefined): Promise<PrefixCopy> {
++	const source = openSync(filePath, "r");
++	let copy: TempCopy | undefined;
++	try {
++		const size = fstatSync(source).size;
++		const prefix = length ?? (await completeLinesLength(source, size));
++		if (prefix > size) throw new SavedHistoryError("changed");
++		if (prefix > MAX_SNAPSHOT_BYTES) throw new SavedHistoryError("unavailable");
++		copy = createTempCopy();
++		const digest = await digestPrefix(source, prefix, copy.fd);
++		if ((await digestPrefix(source, prefix)) !== digest) throw new SavedHistoryError("changed");
++		return { ...copy, length: prefix, revision: revisionOf(prefix, digest) };
++	} catch (error) {
++		if (copy) removeTempCopy(copy);
++		throw error;
++	} finally {
++		closeSync(source);
++	}
++}
++
++/** Content identity of a prefix: its length and digest. Equal revisions name equal bytes. */
++function revisionOf(length: number, digest: string): string {
++	return createHash("sha256").update(`${length}:${digest}`).digest("hex");
++}
++
++/**
++ * Build the active-branch snapshot of a private prefix copy. The branch index and the entry pass
++ * read the same immutable copy, so they agree by construction.
++ */
++async function buildSnapshot(prefixPath: string, revision: string): Promise<Snapshot> {
++	const branch = await indexSessionBranchFromFile(prefixPath, storage);
+ 	const onBranch = new Set(branch);
+ 	const fd = openPrivateFile();
+ 	try {
+ 		const placed = new Map<string, { fileStart: number; length: number }>();
+ 		let written = 0;
+ 		await visitEntriesFromFile(
+-			filePath,
++			prefixPath,
+ 			entry => {
+ 				if (entry.type === "session" || !onBranch.has(entry.id)) return;
+ 				// Duplicate ids make the branch ambiguous; refuse rather than guess which entry is canonical.
+@@ -243,12 +449,12 @@ async function buildSnapshot(filePath: string, revision: string): Promise<Snapsh
+ 		let total = 0;
+ 		for (const id of branch) {
+ 			const item = placed.get(id);
+-			if (!item) throw new SavedHistoryError("changed");
++			// Both passes read the same copy, so every branch id has an entry.
++			if (!item) throw new SavedHistoryError("unavailable");
+ 			segments.push({ fileStart: item.fileStart, length: item.length, start: total });
+ 			total += item.length;
+ 		}
+-		if (currentRevision(filePath) !== revision) throw new SavedHistoryError("changed");
+-		return { revision, total, segments, fd, bytes: written, refs: 0, retired: false, closed: false };
++		return { revision, total, segments, fd, bytes: written, refs: 0, lastUsed: Date.now() };
+ 	} catch (error) {
+ 		closeSync(fd);
+ 		throw error;
+@@ -270,21 +476,17 @@ function segmentAt(segments: readonly Segment[], offset: number): number {
+ 
+ /** Copy `[offset, end)` of the branch stream out of the snapshot file. */
+ function readWindow(snapshot: Snapshot, offset: number, end: number): Buffer {
+-	if (snapshot.closed) throw new SavedHistoryError("changed");
+ 	const out = Buffer.alloc(end - offset);
++	const { segments } = snapshot;
+ 	let filled = 0;
+-	for (let index = segmentAt(snapshot.segments, offset); index < snapshot.segments.length && filled < out.length; index++) {
+-		const segment = snapshot.segments[index]!;
++	for (let index = segmentAt(segments, offset); index < segments.length && filled < out.length; index++) {
++		const segment = segments[index]!;
+ 		const from = Math.max(offset, segment.start) - segment.start;
+ 		const to = Math.min(end, segment.start + segment.length) - segment.start;
+-		let copied = 0;
+-		while (copied < to - from) {
+-			const count = readSync(snapshot.fd, out, filled + copied, to - from - copied, segment.fileStart + from + copied);
+-			if (count === 0) throw new SavedHistoryError("changed");
+-			copied += count;
+-		}
+-		filled += copied;
++		// The snapshot file is private and was written in full, so a short read is an internal fault.
++		readExact(snapshot.fd, out.subarray(filled, filled + (to - from)), to - from, segment.fileStart + from);
++		filled += to - from;
+ 	}
+-	if (filled !== out.length) throw new SavedHistoryError("changed");
++	if (filled !== out.length) throw new SavedHistoryError("unavailable");
+ 	return out;
+ }
