@@ -1,0 +1,413 @@
+diff --git a/docs/collab.md b/docs/collab.md
+index c78290df89..bfda90074c 100644
+--- a/docs/collab.md
++++ b/docs/collab.md
+@@ -151,7 +151,18 @@ Keep the key separate from Collab links. The host reads the file for each reques
+ so replacing or removing it changes access for the next request.
+ 
+ The list uses offset pagination and can change between requests if sessions
+-change. This request does not provide saved message history.
++change.
++
++`read-saved-history` has the same gating (control link plus history key, checked on
++every request). It takes a listed session id, never a path, and returns one page of
++that session's active branch as newline-delimited JSON, in branch order, without the
++session header. Each page carries at most 256 KiB of raw bytes as unpadded base64url
++in `bytes`. Concatenate decoded bytes across pages and continue from `nextOffset`
++until a reply has `done: true`. Send the `revision` from the first reply with every
++later request; a page can split a JSON line, so decode before parsing. Errors are
++`unavailable`, `invalid_request`, `not_found`, `ambiguous` (duplicate session id), or
++`changed` (the session moved during the read, or the revision no longer matches). On
++`changed`, restart from offset 0 without a revision. Replies never include file paths.
+ 
+ Guests with a view-only link can read everything live — back-transcript, streaming text, tool cards, subagent transcripts — but the host rejects prompting, interrupting, and agent control from them.
+ 
+@@ -214,6 +225,6 @@ Hub topology — the host is authoritative, guests never peer:
+ 6. `agents` frames — agent-registry snapshots feeding a guest-local registry, so the Agent Hub table renders host subagents.
+ 7. `ui-request` / `ui-request-end` frames — host select/editor prompts presented to full-control guests and dismissed everywhere once settled. Guests answer with `ui-response`.
+ 
+-Guest→host: `hello`, `prompt`, `abort`, `agent-cmd` (hub chat/kill/revive), `fetch-transcript` (incremental subagent-transcript reads answered by targeted `transcript` frames), and `ui-response`. The replica loads through the regular `/resume` machinery, so theming, ctrl+o, and transcript behavior are native by construction; the guest process never chdirs to host paths.
++Guest→host: `hello`, `prompt`, `abort`, `agent-cmd` (hub chat/kill/revive), `fetch-transcript` (incremental subagent-transcript reads answered by targeted `transcript` frames), `list-saved-sessions` and `read-saved-history` (history-key gated, answered by `saved-sessions` and `saved-history` frames), and `ui-response`. The replica loads through the regular `/resume` machinery, so theming, ctrl+o, and transcript behavior are native by construction; the guest process never chdirs to host paths.
+ 
+ Transcript fetches are capped at 4 MiB per reply and end on complete JSONL lines. Guests continue from `newSize`; a single entry exceeding the cap produces a terminal transcript error instead of an endless empty-read retry.
+diff --git a/packages/coding-agent/src/collab/host.ts b/packages/coding-agent/src/collab/host.ts
+index b0eb938a98..ee4382f63f 100644
+--- a/packages/coding-agent/src/collab/host.ts
++++ b/packages/coding-agent/src/collab/host.ts
+@@ -20,6 +20,7 @@ import type {
+ 	CollabUiRequest,
+ 	CollabUiRequestDraft,
+ 	CollabUiResponseValue,
++	SavedHistoryErrorCode,
+ 	AgentEvent as WireAgentEvent,
+ 	SessionEntry as WireSessionEntry,
+ } from "@oh-my-pi/pi-wire";
+@@ -33,6 +34,7 @@ import { SessionManager } from "../session/session-manager";
+ import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
+ import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
+ import { collabDisplayName } from "./display-name";
++import { readSavedHistoryPage, SavedHistoryError } from "./saved-history";
+ import {
+ 	type AgentSnapshot,
+ 	COLLAB_PROMPT_MESSAGE_TYPE,
+@@ -136,6 +138,11 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
+  */
+ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
+ const MAX_PENDING_UI_REQUESTS = 64;
++const SAVED_HISTORY_SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
++const SAVED_HISTORY_REVISION_RE = /^[0-9a-f]{64}$/;
++const SAVED_SESSIONS_PAGE = 64;
++const SAVED_CATALOGUE_TTL_MS = 5_000;
++let savedCatalogueCache: { at: number; sessions: ReturnType<typeof SessionManager.listAll> } | undefined;
+ /**
+  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
+  * response (an `undefined` value is a genuine guest cancel); `unavailable`
+@@ -235,6 +242,8 @@ export class CollabHost {
+ 	 * still owed a resync error.
+ 	 */
+ 	#peers = new Map<number, { name: string; canWrite: boolean }>();
++	/** Saved-history pages cost a full file pass; one request per peer at a time. */
++	#savedHistoryBusy = new WeakSet<object>();
+ 	/**
+ 	 * Never reset, including across a room recreation: ids must not be reissued, or
+ 	 * a late `ui-response` carrying an old id would settle an unrelated new request.
+@@ -767,6 +776,16 @@ export class CollabHost {
+ 			case "list-saved-sessions":
+ 				void this.#handleListSavedSessions(frame.reqId, frame.offset, frame.historyKey, fromPeer);
+ 				break;
++			case "read-saved-history":
++				void this.#handleReadSavedHistory(
++					frame.reqId,
++					frame.sessionId,
++					frame.offset,
++					frame.revision,
++					frame.historyKey,
++					fromPeer,
++				);
++				break;
+ 			default:
+ 				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
+ 		}
+@@ -787,13 +806,13 @@ export class CollabHost {
+ 			return;
+ 		}
+ 		try {
+-			const all = await SessionManager.listAll();
++			const all = await this.#savedCatalogue();
+ 			if (!this.#guestTrafficAllowed() || this.#peers.get(fromPeer) !== peer) return;
+-			const page = all.slice(offset, offset + 16);
++			const page = all.slice(offset, offset + SAVED_SESSIONS_PAGE);
+ 			const sessions = page.map(session => ({
+ 				id: session.id,
+-				cwd: session.cwd,
+-				...(session.title ? { title: session.title } : {}),
++				cwd: session.cwd.slice(0, 1024),
++				...(session.title ? { title: session.title.slice(0, 256) } : {}),
+ 				created: session.created.getTime(),
+ 				modified: session.modified.getTime(),
+ 			}));
+@@ -814,6 +833,94 @@ export class CollabHost {
+ 		}
+ 	}
+ 
++	/**
++	 * One catalogue scan serves every page of a listing: scanning all saved sessions per page
++	 * would read thousands of files per request. Entries stay stable for a few seconds.
++	 */
++	#savedCatalogue(): ReturnType<typeof SessionManager.listAll> {
++		const cached = savedCatalogueCache;
++		if (cached && Date.now() - cached.at < SAVED_CATALOGUE_TTL_MS) return cached.sessions;
++		const sessions = SessionManager.listAll();
++		const entry = { at: Date.now(), sessions };
++		savedCatalogueCache = entry;
++		sessions.catch(() => {
++			if (savedCatalogueCache === entry) savedCatalogueCache = undefined;
++		});
++		return sessions;
++	}
++
++	/**
++	 * Serve one page of a listed session's active branch. The history key is checked per request,
++	 * the session is resolved only through SessionManager.listAll, and the path never leaves the host.
++	 */
++	async #handleReadSavedHistory(
++		reqId: number,
++		sessionId: string,
++		offset: number,
++		revision: string | undefined,
++		historyKey: string,
++		fromPeer: number,
++	): Promise<void> {
++		const peer = this.#peers.get(fromPeer);
++		if (!peer || !Number.isSafeInteger(reqId) || reqId < 0) return;
++		const fail = (error: SavedHistoryErrorCode) => this.#send({ t: "saved-history", reqId, error }, fromPeer);
++		const allowed = peer.canWrite && (await this.#verifyHistoryKey(historyKey));
++		if (!this.#guestTrafficAllowed() || this.#peers.get(fromPeer) !== peer) return;
++		if (!allowed) {
++			fail("unavailable");
++			return;
++		}
++		if (
++			typeof sessionId !== "string" ||
++			!SAVED_HISTORY_SESSION_ID_RE.test(sessionId) ||
++			!Number.isSafeInteger(offset) ||
++			offset < 0 ||
++			(revision !== undefined && (typeof revision !== "string" || !SAVED_HISTORY_REVISION_RE.test(revision)))
++		) {
++			fail("invalid_request");
++			return;
++		}
++		if (this.#savedHistoryBusy.has(peer)) {
++			fail("unavailable");
++			return;
++		}
++		this.#savedHistoryBusy.add(peer);
++		try {
++			const matches = (await this.#savedCatalogue()).filter(session => session.id === sessionId);
++			if (!this.#guestTrafficAllowed() || this.#peers.get(fromPeer) !== peer) return;
++			const [match, duplicate] = matches;
++			if (!match) {
++				fail("not_found");
++				return;
++			}
++			if (duplicate) {
++				fail("ambiguous");
++				return;
++			}
++			const page = await readSavedHistoryPage(match.path, offset, revision);
++			if (!this.#guestTrafficAllowed() || this.#peers.get(fromPeer) !== peer) return;
++			const body = {
++				t: "saved-history" as const,
++				reqId,
++				revision: page.revision,
++				offset: page.offset,
++				bytes: page.bytes.toString("base64url"),
++			};
++			this.#send(
++				page.nextOffset === undefined
++					? { ...body, done: true }
++					: { ...body, done: false, nextOffset: page.nextOffset },
++				fromPeer,
++			);
++		} catch (err) {
++			const code = err instanceof SavedHistoryError ? err.code : "unavailable";
++			logger.debug("collab saved history read failed", { reqId, code, error: String(err) });
++			if (this.#peers.get(fromPeer) === peer) fail(code);
++		} finally {
++			this.#savedHistoryBusy.delete(peer);
++		}
++	}
++
+ 	/** Read the operator-provided key without following symlinks or accepting shared files. */
+ 	async #verifyHistoryKey(value: string): Promise<boolean> {
+ 		const path = process.env.OMP_COLLAB_HISTORY_KEY_FILE;
+diff --git a/packages/coding-agent/src/collab/protocol.ts b/packages/coding-agent/src/collab/protocol.ts
+index ebe6cc9736..5eb8fa2854 100644
+--- a/packages/coding-agent/src/collab/protocol.ts
++++ b/packages/coding-agent/src/collab/protocol.ts
+@@ -94,6 +94,7 @@ export type CollabFrame =
+ 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
+ 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+ 	| Extract<HostFrame, { t: "saved-sessions" }>
++	| Extract<HostFrame, { t: "saved-history" }>
+ 	| { t: "bye"; reason: string }
+ 	| { t: "error"; message: string };
+ 
+diff --git a/packages/coding-agent/src/collab/saved-history.ts b/packages/coding-agent/src/collab/saved-history.ts
+new file mode 100644
+index 0000000000..5e650c3a87
+--- /dev/null
++++ b/packages/coding-agent/src/collab/saved-history.ts
+@@ -0,0 +1,161 @@
++import { createHash } from "node:crypto";
++import type { SavedHistoryErrorCode } from "@oh-my-pi/pi-wire";
++import { indexSessionBranchFromFile, visitEntriesFromFile } from "../session/session-loader";
++import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "../session/session-storage";
++
++/** Raw bytes per `saved-history` reply; base64url adds about a third on the wire. */
++export const SAVED_HISTORY_PAGE_BYTES = 256 * 1024;
++
++/**
++ * Layouts (branch ids with byte lengths) kept for recently read sessions. They hold
++ * ids and integers only, never message bodies, and are keyed by file revision.
++ */
++const LAYOUT_CACHE_LIMIT = 2;
++
++const storage: SessionStorage = new FileSessionStorage();
++
++/** A failure whose code is safe to send to guests. Messages never carry paths. */
++export class SavedHistoryError extends Error {
++	readonly code: SavedHistoryErrorCode;
++
++	constructor(code: SavedHistoryErrorCode) {
++		super(code);
++		this.name = "SavedHistoryError";
++		this.code = code;
++	}
++}
++
++export interface SavedHistoryPage {
++	revision: string;
++	offset: number;
++	/** Exactly `min(SAVED_HISTORY_PAGE_BYTES, total - offset)` bytes of NDJSON, split at byte boundaries. */
++	bytes: Buffer;
++	/** Offset of the next page; absent when this page reaches the end of the branch. */
++	nextOffset?: number;
++}
++
++interface Segment {
++	id: string;
++	start: number;
++	length: number;
++}
++
++interface SavedHistoryLayout {
++	revision: string;
++	total: number;
++	/** Active-branch entries in branch order; segments are contiguous. */
++	segments: Segment[];
++	byId: Map<string, Segment>;
++}
++
++const layoutCache = new Map<string, SavedHistoryLayout>();
++
++/** Revision of a session file as seen by stat: any append or rewrite changes size or mtime. */
++function revisionOf(stat: SessionStorageStat): string {
++	return createHash("sha256").update(`${stat.size}:${stat.mtimeMs}`).digest("hex");
++}
++
++/**
++ * Read one page of the active branch of a session file as newline-delimited JSON.
++ * The bytes are the canonical branch order with the session header omitted. A
++ * supplied `expectedRevision` must match the current file, and the file must not
++ * change while the page is built; otherwise the read fails with `changed`.
++ */
++export async function readSavedHistoryPage(
++	filePath: string,
++	offset: number,
++	expectedRevision: string | undefined,
++): Promise<SavedHistoryPage> {
++	if (!Number.isSafeInteger(offset) || offset < 0) throw new SavedHistoryError("invalid_request");
++	const revision = revisionOf(storage.statSync(filePath));
++	if (expectedRevision !== undefined && expectedRevision !== revision) throw new SavedHistoryError("changed");
++
++	const cached = layoutCache.get(filePath);
++	const layout = cached?.revision === revision ? cached : await rememberLayout(filePath, revision);
++	if (offset > layout.total) throw new SavedHistoryError("invalid_request");
++
++	const end = Math.min(layout.total, offset + SAVED_HISTORY_PAGE_BYTES);
++	const bytes = end === offset ? Buffer.alloc(0) : await readWindow(filePath, layout, offset, end);
++	if (revisionOf(storage.statSync(filePath)) !== revision) throw new SavedHistoryError("changed");
++	return { revision, offset, bytes, ...(end < layout.total ? { nextOffset: end } : {}) };
++}
++
++async function rememberLayout(filePath: string, revision: string): Promise<SavedHistoryLayout> {
++	const layout = await buildLayout(filePath, revision);
++	layoutCache.delete(filePath);
++	layoutCache.set(filePath, layout);
++	while (layoutCache.size > LAYOUT_CACHE_LIMIT) {
++		const oldest = layoutCache.keys().next().value;
++		if (oldest === undefined) break;
++		layoutCache.delete(oldest);
++	}
++	return layout;
++}
++
++/** Pass 1 and 2: the branch order and each entry's serialized byte length. */
++async function buildLayout(filePath: string, revision: string): Promise<SavedHistoryLayout> {
++	const branch = await indexSessionBranchFromFile(filePath, storage);
++	const onBranch = new Set(branch);
++	const lengths = new Map<string, number>();
++	await visitEntriesFromFile(
++		filePath,
++		entry => {
++			if (entry.type === "session" || !onBranch.has(entry.id)) return;
++			// Duplicate ids make the branch ambiguous; refuse rather than guess which entry is canonical.
++			if (lengths.has(entry.id)) throw new SavedHistoryError("unavailable");
++			lengths.set(entry.id, Buffer.byteLength(JSON.stringify(entry), "utf8") + 1);
++		},
++		storage,
++	);
++
++	const segments: Segment[] = [];
++	const byId = new Map<string, Segment>();
++	let total = 0;
++	for (const id of branch) {
++		const length = lengths.get(id);
++		if (length === undefined) throw new SavedHistoryError("changed");
++		const segment = { id, start: total, length };
++		segments.push(segment);
++		byId.set(id, segment);
++		total += length;
++	}
++	if (revisionOf(storage.statSync(filePath)) !== revision) throw new SavedHistoryError("changed");
++	return { revision, total, segments, byId };
++}
++
++/**
++ * Pass 3: serialize only the branch entries that overlap [offset, end) and keep
++ * just the overlapping bytes. The caller holds at most one page of output.
++ */
++async function readWindow(filePath: string, layout: SavedHistoryLayout, offset: number, end: number): Promise<Buffer> {
++	const pieces = new Map<string, Buffer>();
++	await visitEntriesFromFile(
++		filePath,
++		entry => {
++			if (entry.type === "session") return;
++			const segment = layout.byId.get(entry.id);
++			if (!segment) return;
++			const segmentEnd = segment.start + segment.length;
++			if (segmentEnd <= offset || segment.start >= end) return;
++			if (pieces.has(entry.id)) throw new SavedHistoryError("changed");
++			const body = Buffer.from(`${JSON.stringify(entry)}\n`, "utf8");
++			if (body.byteLength !== segment.length) throw new SavedHistoryError("changed");
++			const from = Math.max(offset, segment.start) - segment.start;
++			const to = Math.min(end, segmentEnd) - segment.start;
++			pieces.set(entry.id, Buffer.from(body.subarray(from, to)));
++		},
++		storage,
++	);
++
++	const parts: Buffer[] = [];
++	for (const segment of layout.segments) {
++		if (segment.start >= end) break;
++		if (segment.start + segment.length <= offset) continue;
++		const piece = pieces.get(segment.id);
++		if (!piece) throw new SavedHistoryError("changed");
++		parts.push(piece);
++	}
++	const bytes = Buffer.concat(parts);
++	if (bytes.byteLength !== end - offset) throw new SavedHistoryError("changed");
++	return bytes;
++}
+diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
+index 853b9423a5..1d2ac04f16 100644
+--- a/packages/wire/src/index.ts
++++ b/packages/wire/src/index.ts
+@@ -343,7 +343,8 @@ export type GuestFrame =
+ 	| { t: "abort" }
+ 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
+ 	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
+-	| { t: "list-saved-sessions"; reqId: number; offset: number; historyKey: string };
++	| { t: "list-saved-sessions"; reqId: number; offset: number; historyKey: string }
++	| { t: "read-saved-history"; reqId: number; sessionId: string; offset: number; revision?: string; historyKey: string };
+ 
+ /** EventBus channels mirrored to guests (task subagent traffic only). */
+ export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
+@@ -389,9 +390,16 @@ export type HostFrame =
+ 			nextOffset?: number;
+ 			error?: "unavailable" | "invalid_request";
+ 	  }
++	/** Reply to read-saved-history. `revision` must be echoed on the next page; `bytes` is base64url. */
++	| { t: "saved-history"; reqId: number; error: SavedHistoryErrorCode }
++	| { t: "saved-history"; reqId: number; revision: string; offset: number; bytes: string; done: true }
++	| { t: "saved-history"; reqId: number; revision: string; offset: number; bytes: string; done: false; nextOffset: number }
+ 	| { t: "bye"; reason: string }
+ 	| { t: "error"; message: string };
+ 
++/** Reasons a saved-history read fails. Never carries a path. */
++export type SavedHistoryErrorCode = "unavailable" | "invalid_request" | "not_found" | "ambiguous" | "changed";
++
+ export type WireFrame = GuestFrame | HostFrame;
+ 
+ /**
