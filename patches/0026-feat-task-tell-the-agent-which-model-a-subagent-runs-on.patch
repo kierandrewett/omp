@@ -1,0 +1,136 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 1854ed904e..7a0a09ab56 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -4,6 +4,7 @@
+ 
+ ### Added
+ 
++- When a background subagent resolves its model, the spawning agent now gets a hidden message naming it, such as ``Subagent `fable` started on `provider/model` (thinking level low).`` It is sent again if the subagent moves to another model. Before this the agent had only the name it gave the worker and could take it for a different model.
+ - Added the `retry.accountMode` setting (`sequential` by default, or `balanced`). With `sequential`, Anthropic accounts are used one at a time: every session and subagent follows the account that served last until it is blocked or spent, then moves to the next.
+ - New `usage_bar` status-line segment, in the `default` preset right after the context percent: a five-cell progress bar, the percent used and the window tag (`━━━━━ 100% 7d`) for the active account. New `statusLine.usageWindow` setting (`weekly` by default, `session`, `worst`) chooses the 7 Day window, the 5 Hour window or the more used one. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` uses the more used of the shared and the model's 7 Day row, tagged `7d fable`; a provider without a 7 Day window draws no bar in `weekly` mode, and `session` falls back to its shortest window under its own tag. It renders nothing when the provider reports no usage windows, or when several accounts have no resolved one.
+ - When a provider holds two or more stored OAuth accounts, the status line names the session's account in the model: `Anthropic (B) > Sonnet 5.5`, and the footer's raw model id reads `anthropic-b/claude-sonnet-5-5`. The letter is the account's position in `omp usage accounts` order (A first) and follows an account change mid-session. Single-account providers look as before.
+diff --git a/packages/coding-agent/src/prompts/tools/task-subagent-model.md b/packages/coding-agent/src/prompts/tools/task-subagent-model.md
+new file mode 100644
+index 0000000000..9a7619c070
+--- /dev/null
++++ b/packages/coding-agent/src/prompts/tools/task-subagent-model.md
+@@ -0,0 +1 @@
++Subagent `{{agentId}}` {{#if changed}}now runs{{else}}started{{/if}} on `{{model}}`{{#if thinking}} (thinking level {{thinking}}){{/if}}.{{#if fallback}} This is a retry fallback, not the model it started on.{{/if}}
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 09a88b79eb..48a735d7e8 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -64,6 +64,7 @@ import { registerSubagentModelSwitcher } from "../internal-urls/proc-protocol";
+ import { getPerCallModelAdvertisement } from "./model-approval";
+ import { switchSubagentModelAsCaller } from "./model-switch";
+ import { type TieredModelAdvertisement, tierAdvertisedRoles } from "./model-economy";
++import { renderSubagentModelNotice, SUBAGENT_MODEL_NOTICE_TYPE } from "./subagent-model-notice";
+ import { generateTaskName } from "./name-generator";
+ import { AgentOutputManager } from "./output-manager";
+ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
+@@ -1542,6 +1543,39 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		});
+ 	}
+ 
++	/**
++	 * Tell the spawning agent which model a background subagent runs on and what it costs. The
++	 * message is hidden and joins the conversation before the agent's next provider call. A session
++	 * with no steer channel (print, RPC) skips it; a failure to build it never stops the subagent.
++	 */
++	#announceSubagentModel(options: {
++		agentId: string;
++		identity: string;
++		progress: AgentProgress;
++		changed: boolean;
++	}): void {
++		const { agentId, identity, progress, changed } = options;
++		if (!this.session.steer) return;
++		try {
++			this.session.steer({
++				customType: SUBAGENT_MODEL_NOTICE_TYPE,
++				content: renderSubagentModelNotice({
++					agentId,
++					identity,
++					thinkingLevel: progress.resolvedThinkingLevel,
++					fallback: progress.resolvedModelIsFallback,
++					changed,
++				}),
++				details: { agentId, model: identity },
++			});
++		} catch (error) {
++			logger.warn("Could not tell the agent which model a subagent runs on", {
++				agentId,
++				error: error instanceof Error ? error.message : String(error),
++			});
++		}
++	}
++
+ 	/**
+ 	 * Register one background job that runs a single spawn to completion and
+ 	 * delivers its yield text. The job body mirrors the sync path; `buildDetails`
+@@ -1598,6 +1632,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			agentId,
+ 			async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
+ 				const startedAt = Date.now();
++				let announcedModel: string | undefined;
+ 				const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
+ 					const nextProgress = update.details?.progress?.[0];
+ 					if (nextProgress) {
+@@ -1636,6 +1671,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 						progress.recentOutput = nextProgress.recentOutput.slice();
+ 						progress.retryState = nextProgress.retryState;
+ 						progress.retryFailure = nextProgress.retryFailure;
++						// The parent agent only reads tool results and queued messages, not progress rows,
++						// so name the model it got the first time the child resolves one, and again if it moves.
++						const identity = progress.resolvedModelIdentity;
++						if (identity && identity !== announcedModel) {
++							this.#announceSubagentModel({
++								agentId,
++								identity,
++								progress,
++								changed: announcedModel !== undefined,
++							});
++							announcedModel = identity;
++						}
+ 					}
+ 					const updateText =
+ 						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
+diff --git a/packages/coding-agent/src/task/subagent-model-notice.ts b/packages/coding-agent/src/task/subagent-model-notice.ts
+new file mode 100644
+index 0000000000..cb88a904a0
+--- /dev/null
++++ b/packages/coding-agent/src/task/subagent-model-notice.ts
+@@ -0,0 +1,32 @@
++import { prompt } from "@oh-my-pi/pi-utils";
++import subagentModelTemplate from "../prompts/tools/task-subagent-model.md" with { type: "text" };
++
++/** `customType` of the hidden message that tells the spawning agent which model a subagent runs on. */
++export const SUBAGENT_MODEL_NOTICE_TYPE = "subagent-model";
++
++export interface SubagentModelNoticeInput {
++	agentId: string;
++	/** `provider/id`, with an `@upstream` pin when one applies. */
++	identity: string;
++	thinkingLevel?: string;
++	/** True when the model is a retry fallback and not the one the child started on. */
++	fallback?: boolean;
++	/** True when the child moved to this model after an earlier notice named another. */
++	changed: boolean;
++}
++
++/**
++ * The message that tells the spawning agent which model its subagent resolved to. The name an agent
++ * gives a worker says nothing about the model, so the agent reads it here.
++ */
++export function renderSubagentModelNotice(input: SubagentModelNoticeInput): string {
++	return prompt
++		.render(subagentModelTemplate, {
++			agentId: input.agentId,
++			model: input.identity,
++			thinking: input.thinkingLevel,
++			fallback: input.fallback === true,
++			changed: input.changed,
++		})
++		.trim();
++}

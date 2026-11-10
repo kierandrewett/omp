@@ -23,3 +23,4 @@
 0023-feat-collab-add-keyed-saved-history-paging.patch
 0024-fix-collab-snapshot-growing-session-prefixes.patch
 0025-feat-collab-acknowledge-guest-control-actions.patch
+0026-feat-task-tell-the-agent-which-model-a-subagent-runs-on.patch
