@@ -24,3 +24,4 @@
 0024-fix-collab-snapshot-growing-session-prefixes.patch
 0025-feat-collab-acknowledge-guest-control-actions.patch
 0026-feat-task-tell-the-agent-which-model-a-subagent-runs-on.patch
+0027-fix-task-stop-spawn-when-automatic-model-selection-fails.patch

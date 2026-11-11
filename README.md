@@ -37,6 +37,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0024-fix-collab-snapshot-growing-session-prefixes`|Copies and verifies complete-line session prefixes so history pages remain consistent during growth.|
 |`0025-feat-collab-acknowledge-guest-control-actions`|Adds correlated acceptance results for guest prompts, interrupts and dialog responses.|
 |`0026-feat-task-tell-the-agent-which-model-a-subagent-runs-on`|Tells the spawning agent which model a background subagent runs on, in one hidden message, and again if it changes.|
+|`0027-fix-task-stop-spawn-when-automatic-model-selection-fails`|A failed automatic model choice stops the spawn. The agent definition's model and `task.agentModelOverrides` no longer stand in.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
