@@ -1,0 +1,276 @@
+diff --git a/docs/settings.md b/docs/settings.md
+index f1bf8466cd..eb9a49b712 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -918,7 +918,7 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
+ 
+ The `usage_bar` segment draws a five-cell progress bar, the percent used and the window it shows (`━━━━━ 100% 7d`, or `=====` glyphs with the ASCII symbol set) for the active account of the active provider, warning-coloured from 50% and error-coloured from 80%. `statusLine.usageWindow` chooses the window: `weekly` (default) draws the 7 Day window, `session` the 5 Hour window, `worst` whichever is more used. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` draws the more used of the shared 7 Day row and that model's row, tagged `7d fable`, the way credential ranking scopes a model's weekly limit. A provider that reports no 7 Day window draws no bar in `weekly` mode; another window is never shown in its place. `session` draws the 5 Hour window, and when a provider has none it draws its shortest reported window under that window's own tag (`1d`, `7d`, `mo`), so read the tag. The bar reads the same cached usage reports as the `usage` segment, refreshed no more often than every five minutes, picks the report of the session's own account (nothing is drawn while a provider with several accounts has no resolved account), and renders nothing when the provider reports no such window. It sits right after `context_pct` in the `default` preset; add `usage_bar` to `statusLine.leftSegments` or `statusLine.rightSegments` with `statusLine.preset: custom` to use it in a custom line.
+ 
+-When a provider holds two or more stored OAuth accounts, the `model` segment names the session's account by its stored position, the order `omp usage accounts` prints (A is the first): `Anthropic (B) > Sonnet 5.5`, and the footer shows the raw id as `anthropic-b/claude-sonnet-5-5`. A provider with one account is unchanged, and model ids themselves are never rewritten.
++When a provider holds two or more stored OAuth accounts, the `model` segment names the session's account by the start of its email: the part before the `@`, cut to ten characters (`anthropic2`, or `drewett.ki…` for `drewett.kieran`). It reads `Anthropic (drewett.ki…) > Sonnet 5.5`, and the footer shows the raw id as `anthropic-drewett.ki…/claude-sonnet-5-5`. If two accounts would show the same text, the tag grows to the full local part, then the full email, then adds the account's position in `omp usage accounts` order (`kieran#2`). A provider with one account is unchanged, and model ids themselves are never rewritten.
+ 
+ The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
+ 
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 9de6ab2ad3..b6e315312b 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -7,7 +7,7 @@
+ - When a background subagent resolves its model, the spawning agent now gets a hidden message naming it, such as ``Subagent `fable` started on `provider/model` (thinking level low).`` It is sent again if the subagent moves to another model. Before this the agent had only the name it gave the worker and could take it for a different model.
+ - Added the `retry.accountMode` setting (`sequential` by default, or `balanced`). With `sequential`, Anthropic accounts are used one at a time: every session and subagent follows the account that served last until it is blocked or spent, then moves to the next.
+ - New `usage_bar` status-line segment, in the `default` preset right after the context percent: a five-cell progress bar, the percent used and the window tag (`━━━━━ 100% 7d`) for the active account. New `statusLine.usageWindow` setting (`weekly` by default, `session`, `worst`) chooses the 7 Day window, the 5 Hour window or the more used one. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` uses the more used of the shared and the model's 7 Day row, tagged `7d fable`; a provider without a 7 Day window draws no bar in `weekly` mode, and `session` falls back to its shortest window under its own tag. It renders nothing when the provider reports no usage windows, or when several accounts have no resolved one.
+-- When a provider holds two or more stored OAuth accounts, the status line names the session's account in the model: `Anthropic (B) > Sonnet 5.5`, and the footer's raw model id reads `anthropic-b/claude-sonnet-5-5`. The letter is the account's position in `omp usage accounts` order (A first) and follows an account change mid-session. Single-account providers look as before.
++- When a provider holds two or more stored OAuth accounts, the status line names the session's account in the model by a short form of its email: `Anthropic (drewett.ki…) > Sonnet 5.5`, and the footer's raw model id reads `anthropic-drewett.ki…/claude-sonnet-5-5`. The tag is the part before the `@`, cut to ten characters. It grows when two accounts would show the same text, and follows an account change mid-session. Single-account providers look as before.
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge. When the judge fails, times out, is unsure or is unavailable, no model is chosen and the reason is reported; there is no fallback role. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
+@@ -22,7 +22,7 @@
+ 
+ ### Changed
+ 
+-- A subagent never takes the parent's model, the session model or the `default` role, and it runs on exactly one model for its whole life. Every spawn without a per-call, host or seance model, from the task tool or from eval `agent()`/`workpool()`, goes through automatic model selection. One usable role alias is chosen without the judge (`only one configured alias`); two or more go to the judge, and a judge that fails, times out or is not confident chooses nothing (there is no fallback role). When selection cannot choose, a `task.agentModelOverrides` entry or the agent's own `model` is used with a visible warning (a notice, a warning line on the subagent row and a `<model-warning>` in the result); with neither, the spawn fails before the child starts and the error tells the parent agent to stop and report to you instead of changing settings.
++- A subagent never takes the parent's model, the session model or the `default` role, and it runs on exactly one model for its whole life. Every spawn without a per-call, host or seance model, from the task tool or from eval `agent()`/`workpool()`, goes through automatic model selection. One usable role alias is chosen without the judge (`only one configured alias`); two or more go to the judge, and a judge that fails, times out or is not confident chooses nothing (there is no fallback role). When selection cannot choose, the spawn fails before the child starts and the error tells the parent agent to stop and report to you instead of changing settings. Neither a `task.agentModelOverrides` entry nor the agent's own `model` takes over.
+ - A subagent no longer falls back to the parent's model when its own model has no working credentials, and it no longer inherits the `default` or a role fallback chain. Only a chain you wrote in `retry.fallbackChains` under the exact `provider/model-id` it runs on can move it, and using it raises the same warning. A task result whose child ended on another model than it started on says so in a `<model-warning>`.
+ - `task.prewalk`, `task.agentPrewalk` and an agent's `prewalk` frontmatter no longer apply to subagents: a subagent never hands off to another model. Session-level prewalk is unchanged.
+ - `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
+diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+index 47308e04e0..d36070b87e 100644
+--- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
++++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+@@ -109,7 +109,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+ 				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },
+ 				{
+ 					label: "second of two accounts",
+-					context: { modelAccount: { label: "Anthropic (B)", rawProvider: "anthropic-b" } },
++					context: { modelAccount: { label: "Anthropic (drewett.ki…)", rawProvider: "anthropic-drewett.ki…" } },
+ 				},
+ 			];
+ 		case "mode":
+diff --git a/packages/coding-agent/src/modes/model-account-label.ts b/packages/coding-agent/src/modes/model-account-label.ts
+index b435a85194..567e3018d8 100644
+--- a/packages/coding-agent/src/modes/model-account-label.ts
++++ b/packages/coding-agent/src/modes/model-account-label.ts
+@@ -2,32 +2,63 @@ import type { OAuthAccountSummary } from "@oh-my-pi/pi-ai";
+ import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
+ import type { StatusModelAccount } from "@oh-my-pi/pi-tui/status-line/host";
+ 
+-/** Letter of the account at 0-based `index` in the credential pool: A, B, ... Z, AA, AB, ... */
+-export function accountLetter(index: number): string {
+-	let letter = "";
+-	for (let rest = index + 1; rest > 0; rest = Math.floor((rest - 1) / 26)) {
+-		letter = String.fromCharCode(65 + ((rest - 1) % 26)) + letter;
++/** Longest account tag shown before the ellipsis. `anthropic2` fits whole; `drewett.kieran` becomes `drewett.ki…`. */
++const TAG_MAX_LENGTH = 10;
++
++type TaggedAccount = Pick<OAuthAccountSummary, "active" | "email" | "accountId" | "projectId">;
++
++function accountIdentifier(account: TaggedAccount, index: number): string {
++	return account.email ?? account.accountId ?? account.projectId ?? `account ${index + 1}`;
++}
++
++function withoutDomain(identifier: string): string {
++	const at = identifier.indexOf("@");
++	return at > 0 ? identifier.slice(0, at) : identifier;
++}
++
++function chop(text: string): string {
++	if (text.length <= TAG_MAX_LENGTH) return text;
++	return `${text.slice(0, TAG_MAX_LENGTH).replace(/[._+-]+$/, "")}\u2026`;
++}
++
++/**
++ * Short identifier for the account at `index`: the part of its email before the `@`, chopped to
++ * `TAG_MAX_LENGTH` characters with an ellipsis. Accounts without an email use their account or project id.
++ * When another stored account would show the same text, the tag grows to the whole local part, then to the
++ * whole identifier, and only then adds the account's stored position (`kieran#2`, the same email in two
++ * organisations).
++ */
++export function accountTag(accounts: readonly TaggedAccount[], index: number): string {
++	const identifiers = accounts.map(accountIdentifier);
++	const forms = [
++		(identifier: string) => chop(withoutDomain(identifier)),
++		withoutDomain,
++		(identifier: string) => identifier,
++	];
++	for (const form of forms) {
++		const own = form(identifiers[index]);
++		if (!identifiers.some((identifier, other) => other !== index && form(identifier) === own)) return own;
+ 	}
+-	return letter;
++	return `${chop(withoutDomain(identifiers[index]))}#${index + 1}`;
+ }
+ 
+ /**
+  * Qualifier that tells a provider's stored OAuth accounts apart in model displays:
+- * `Anthropic (B)` before the model name, `anthropic-b` before the raw model id.
++ * `Anthropic (drewett.ki…)` before the model name, `anthropic-drewett.ki…` before the raw model id.
+  *
+  * `accounts` is `authStorage.oauth.accounts(provider, sessionId)`: stored credential-pool
+  * order, the order `omp usage accounts` prints, with the session's sticky account marked
+- * `active`. The letter is the active account's index in that order (A is the first). A
+- * provider with fewer than two stored accounts, or a session that has not resolved one yet,
+- * gets no qualifier, so single-account displays stay as they were.
++ * `active`. The tag names the active account (see `accountTag`). A provider with fewer than two
++ * stored accounts, or a session that has not resolved one yet, gets no qualifier, so
++ * single-account displays stay as they were.
+  */
+ export function resolveModelAccount(
+ 	provider: string,
+-	accounts: readonly Pick<OAuthAccountSummary, "active">[],
++	accounts: readonly TaggedAccount[],
+ ): StatusModelAccount | undefined {
+ 	if (accounts.length < 2) return undefined;
+ 	const index = accounts.findIndex(account => account.active);
+ 	if (index === -1) return undefined;
+-	const letter = accountLetter(index);
+-	return { label: `${formatProviderName(provider)} (${letter})`, rawProvider: `${provider}-${letter.toLowerCase()}` };
++	const tag = accountTag(accounts, index);
++	return { label: `${formatProviderName(provider)} (${tag})`, rawProvider: `${provider}-${tag.toLowerCase()}` };
+ }
+diff --git a/packages/coding-agent/test/model-account-label.test.ts b/packages/coding-agent/test/model-account-label.test.ts
+index c1ae0fed21..69f6a10acb 100644
+--- a/packages/coding-agent/test/model-account-label.test.ts
++++ b/packages/coding-agent/test/model-account-label.test.ts
+@@ -1,11 +1,11 @@
+ /**
+  * A provider with two or more stored OAuth accounts qualifies its model in the status line
+- * (`Anthropic (B) > Sonnet 5.5`, raw `anthropic-b/claude-sonnet-5-5`) so the account a
++ * (`Anthropic (bob) > Sonnet 5.5`, raw `anthropic-bob/claude-sonnet-5-5`) so the account a
+  * session is burning is visible; a single-account provider reads exactly as before.
+  */
+ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+-import { accountLetter, resolveModelAccount } from "@oh-my-pi/pi-coding-agent/modes/model-account-label";
++import { accountTag, resolveModelAccount } from "@oh-my-pi/pi-coding-agent/modes/model-account-label";
+ import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+@@ -106,9 +106,43 @@ function makeStatusLine(authStorage: AuthStorage): StatusLineComponent {
+ 	return component;
+ }
+ 
+-describe("account letters", () => {
+-	it("number accounts in stored order, continuing past Z", () => {
+-		expect([0, 1, 2, 25, 26, 27, 51, 52].map(accountLetter)).toEqual(["A", "B", "C", "Z", "AA", "AB", "AZ", "BA"]);
++describe("accountTag", () => {
++	const account = (email: string | undefined, extra: { accountId?: string; projectId?: string } = {}) => ({
++		active: false,
++		email,
++		...extra,
++	});
++
++	it("shows the part of the email before the @, chopped with an ellipsis when it is long", () => {
++		const accounts = [account("anthropic2@kier.sh"), account("drewett.kieran@gmail.com")];
++		expect(accountTag(accounts, 0)).toBe("anthropic2");
++		expect(accountTag(accounts, 1)).toBe("drewett.ki\u2026");
++	});
++
++	it("drops punctuation left at the cut", () => {
++		expect(accountTag([account("drewett.kieran@x.com"), account("bob@x.com")], 0)).toBe("drewett.ki\u2026");
++		expect(accountTag([account("kieran.drewett@x.com"), account("bob@x.com")], 0)).toBe("kieran.dre\u2026");
++		expect(accountTag([account("abcdefghi.jk@x.com"), account("bob@x.com")], 0)).toBe("abcdefghi\u2026");
++	});
++
++	it("uses the account id, then the project id, when there is no email", () => {
++		expect(accountTag([account(undefined, { accountId: "acct-1" }), account("bob@x.com")], 0)).toBe("acct-1");
++		expect(accountTag([account(undefined, { projectId: "proj-9" }), account("bob@x.com")], 0)).toBe("proj-9");
++	});
++
++	it("grows the tag until no other stored account shows the same text", () => {
++		const longer = [account("drewett.kieran@a.com"), account("drewett.kieran2@a.com")];
++		expect(accountTag(longer, 0)).toBe("drewett.kieran");
++		expect(accountTag(longer, 1)).toBe("drewett.kieran2");
++		const domains = [account("kieran@a.com"), account("kieran@b.com")];
++		expect(accountTag(domains, 0)).toBe("kieran@a.com");
++		expect(accountTag(domains, 1)).toBe("kieran@b.com");
++	});
++
++	it("adds the stored position when two stored accounts share an identifier", () => {
++		const same = [account("kieran@a.com"), account("kieran@a.com")];
++		expect(accountTag(same, 0)).toBe("kieran#1");
++		expect(accountTag(same, 1)).toBe("kieran#2");
+ 	});
+ });
+ 
+@@ -118,7 +152,7 @@ describe("resolveModelAccount", () => {
+ 		try {
+ 			pinAccount(authStorage, "b@example.com");
+ 			expect(resolveModelAccount("anthropic", authStorage.oauth.accounts("anthropic", SESSION_ID))).toEqual({
+-				label: "Anthropic (B)",
++				label: "Anthropic (b)",
+ 				rawProvider: "anthropic-b",
+ 			});
+ 			pinAccount(authStorage, "c@example.com");
+@@ -150,13 +184,13 @@ describe("account-qualified model display", () => {
+ 		try {
+ 			const component = makeStatusLine(authStorage);
+ 			pinAccount(authStorage, "b@example.com");
+-			expect(modelBorder(component)).toContain("Anthropic (B) > Sonnet 5.5");
++			expect(modelBorder(component)).toContain("Anthropic (b) > Sonnet 5.5");
+ 
+ 			// The same component re-renders for the new account instead of serving the cached label.
+ 			pinAccount(authStorage, "a@example.com");
+ 			const border = modelBorder(component);
+-			expect(border).toContain("Anthropic (A) > Sonnet 5.5");
+-			expect(border).not.toContain("(B)");
++			expect(border).toContain("Anthropic (a) > Sonnet 5.5");
++			expect(border).not.toContain("(b)");
+ 		} finally {
+ 			authStorage.close();
+ 		}
+diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
+index 1f392e6682..1a747a697a 100644
+--- a/packages/tui/CHANGELOG.md
++++ b/packages/tui/CHANGELOG.md
+@@ -4,7 +4,7 @@
+ 
+ ### Added
+ 
+-- Added the `usage_bar` status-line segment id and `StatusLineHost.modelAccount` / `FooterHost.modelAccount`, which let a host qualify the model with the session's account (`Anthropic (B) > Sonnet 5.5`, raw `anthropic-b/claude-sonnet-5-5`).
++- Added the `usage_bar` status-line segment id and `StatusLineHost.modelAccount` / `FooterHost.modelAccount`, which let a host qualify the model with the session's account (`Anthropic (drewett.ki…) > Sonnet 5.5`, raw `anthropic-drewett.ki…/claude-sonnet-5-5`).
+ - Added `StatusLineHost.usageWindow`, `SegmentContext.usageWindow` and `STATUS_LINE_USAGE_WINDOW_VALUES` (`weekly`, `session`, `worst`) so a host picks which quota window the `usage_bar` segment draws; `SegmentContext.usage.modelSevenDay` carries the active model's own weekly counter.
+ - The status-line usage readout shows nothing, instead of one merged account, when the active account is unresolved and the provider has several usage reports.
+ 
+diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
+index 8fc37e2855..92608d591a 100644
+--- a/packages/tui/src/status-line/host.ts
++++ b/packages/tui/src/status-line/host.ts
+@@ -15,14 +15,14 @@ export interface StatusAccountIdentity {
+ 
+ /**
+  * How the active model's provider is qualified when the provider holds two or
+- * more stored OAuth accounts, so `Sonnet 5.5` reads `Anthropic (B) > Sonnet 5.5`
+- * and its raw form `anthropic-b/claude-sonnet-5-5`. Display only: the model
++ * more stored OAuth accounts, so `Sonnet 5.5` reads `Anthropic (drewett.ki…) > Sonnet 5.5`
++ * and its raw form `anthropic-drewett.ki…/claude-sonnet-5-5`. Display only: the model
+  * catalog ids never change.
+  */
+ export interface StatusModelAccount {
+-	/** Qualified provider name shown before the model name (`Anthropic (B)`). */
++	/** Qualified provider name shown before the model name (`Anthropic (drewett.ki…)`). */
+ 	label: string;
+-	/** Qualified provider id shown before the model id in raw form (`anthropic-b`). */
++	/** Qualified provider id shown before the model id in raw form (`anthropic-drewett.ki…`). */
+ 	rawProvider: string;
+ }
+ 
+diff --git a/packages/tui/src/status-line/model-label.ts b/packages/tui/src/status-line/model-label.ts
+index 559b1191a2..07efb9b06e 100644
+--- a/packages/tui/src/status-line/model-label.ts
++++ b/packages/tui/src/status-line/model-label.ts
+@@ -3,13 +3,13 @@ import type { StatusModelAccount } from "./host";
+ /** Separator between the account-qualified provider and the model name. */
+ const MODEL_LABEL_SEPARATOR = " > ";
+ 
+-/** `Sonnet 5.5`, or `Anthropic (B) > Sonnet 5.5` when the provider is account-qualified. */
++/** `Sonnet 5.5`, or `Anthropic (drewett.ki…) > Sonnet 5.5` when the provider is account-qualified. */
+ export function qualifiedModelName(name: string, account: StatusModelAccount | undefined): string {
+ 	return account ? `${account.label}${MODEL_LABEL_SEPARATOR}${name}` : name;
+ }
+ 
+ /**
+- * Raw model indicator: `claude-sonnet-5-5`, or `anthropic-b/claude-sonnet-5-5` when the
++ * Raw model indicator: `claude-sonnet-5-5`, or `anthropic-drewett.ki…/claude-sonnet-5-5` when the
+  * provider is account-qualified. Display only; the catalog id is never rewritten.
+  */
+ export function qualifiedModelId(id: string, account: StatusModelAccount | undefined): string {

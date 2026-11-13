@@ -21,7 +21,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0008-background-tasks-shelf`|A `Background tasks` shelf above `Subagents` lists running backgrounded bash commands, eval cells and services, with id, command and elapsed time. `display.pinnedJobs` sets it to `collapsed`, `full` or `off`.|
 |`0009-musl-x64-modern-addon`|Adds a `linux-musl-x64-modern` Bazel target, which upstream lacks, so musl x64 has the same two addon variants as glibc. Releases do not use it.|
 |`0010-anthropic-sequential-accounts`|Anthropic accounts are used one at a time until one is blocked or spent. `retry.accountMode` is `sequential` (default) or `balanced`.|
-|`0011-status-line-usage-bar-and-account-labels`|Adds a `usage_bar` status-line segment to the default preset. The model shows its account, such as `Anthropic (B) > Sonnet 5.5`.|
+|`0011-status-line-usage-bar-and-account-labels`|Adds a `usage_bar` status-line segment to the default preset. The model shows its account, labelled by letter until patch 0028.|
 |`0012-subagent-shelf-and-viewer-fixes`|Colours the subagent counter, shows tokens on the completion line, fixes `.` in a busy subagent, and ends very long 429 waits cleanly.|
 |`0013-mcp-elicitation-ask-dialog`|A server's approval request shows in the same dialog as the `ask` tool. Anything but an explicit Accept is a cancel.|
 |`0014-task-routing-preferences`|Adds `task.routingPreferences`: your own text on which work suits which model, for the automatic subagent choice. Empty by default.|
@@ -38,6 +38,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0025-feat-collab-acknowledge-guest-control-actions`|Adds correlated acceptance results for guest prompts, interrupts and dialog responses.|
 |`0026-feat-task-tell-the-agent-which-model-a-subagent-runs-on`|Tells the spawning agent which model a background subagent runs on, in one hidden message, and again if it changes.|
 |`0027-fix-task-stop-spawn-when-automatic-model-selection-fails`|A failed automatic model choice stops the spawn. The agent definition's model and `task.agentModelOverrides` no longer stand in.|
+|`0028-feat-status-line-name-accounts-by-a-short-form-of-their-email`|The status line names an account by the start of its email (`Anthropic (drewett.ki…) > Sonnet 5.5`), not by a letter.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.

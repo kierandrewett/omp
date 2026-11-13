@@ -25,3 +25,4 @@
 0025-feat-collab-acknowledge-guest-control-actions.patch
 0026-feat-task-tell-the-agent-which-model-a-subagent-runs-on.patch
 0027-fix-task-stop-spawn-when-automatic-model-selection-fails.patch
+0028-feat-status-line-name-accounts-by-a-short-form-of-their-email.patch
