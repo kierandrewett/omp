@@ -1,0 +1,679 @@
+diff --git a/docs/task-agent-discovery.md b/docs/task-agent-discovery.md
+index 4a538c6574..e621388abe 100644
+--- a/docs/task-agent-discovery.md
++++ b/docs/task-agent-discovery.md
+@@ -307,6 +307,8 @@ OVERRIDE for this user: send work to haiku whenever the task says what to do and
+ 
+ Set it with `omp config set task.routingPreferences "<text>"` or in the settings UI under Tasks.
+ 
++Subagents that run together cost more than one: five agents on a `$$$` role cost five times one. When two or more subagents run at the same time, each takes the cheapest configured role that has a known price, and the judge is not asked. The group is the largest of: the items in the task call, one plus this parent's subagents already running, and this parent's spawns that have started and not finished. The three are never added. Separate calls that start together, such as parallel tool calls or a `Promise.all` of eval `agent()` calls, see each other through the last count. A streamed call is only complete when streaming ends, so with two or more roles an early launch waits for that before it picks a role. The routing note says `(cheapest role: 5 subagents start together)`. A role with no known price is never taken as the cheap one, and with no priced role the judge decides. A hard job in a group gets the cheapest role too: run it alone, or name its model with `model`, when it needs a stronger one.
++
+ Automatic selection applies to every spawn that carries no model of any kind (no per-call `model`, no host `model`), whether it comes from the task tool or from an eval `agent()`/`workpool()` call. It takes precedence over `task.agentModelOverrides` and agent frontmatter. With exactly one usable role alias there is nothing to decide, so that alias is chosen without calling the judge and the routing note says `only one configured alias`. With two or more, the judgment has a four-second timeout; classification always runs, and there is no fallback role. If native judgment is unavailable, fails, times out or is insufficiently confident, no model is chosen and the reason is reported. With no usable alias either, a `task.agentModelOverrides` entry or the agent frontmatter `model` is used (it is your own configuration) with a visible warning that names the reason, and without either the spawn fails before the child starts with that reason. The parent's model is never used. Caller cancellation propagates instead of being reported as a failed classification. The result and progress routing note identifies the choice and its reason.
+ 
+ The native judge needs the `judge` role to resolve first (after its own configured fallback chain and the credentialed models) to a model whose API is a native judgment API: TypeSafe (`typesafe/jev-latest` with `TYPESAFE_API_KEY`), OpenRouter Decisions, Workers AI or OpenAI Decisions. A judge role that resolves to an ordinary chat model is not a native judge.
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 6181a0ab8b..16d999a9c4 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -11,6 +11,7 @@
+ - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
+ - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
+ - Task subagents called without `model` now get a configured model role chosen by the native judge. When the judge fails, times out, is unsure or is unavailable, no model is chosen and the reason is reported; there is no fallback role. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
++- When two or more subagents run at the same time without `model`, whether from one task call, separate calls that start together, or subagents already running, every one of them now runs the cheapest configured role that has a known price, and the judge is not asked, because the cost of a group is the price of one agent times its size. The routing note says why, for example `(cheapest role: 5 subagents start together)`. A role with no known price is never taken as cheap. With two or more roles, an early launch of a streamed call now waits until the call has finished streaming so the group size is known.
+ - Added the `task.routingPreferences` setting (empty by default): free-text guidance, in your own words, for which kinds of work the automatic subagent model choice should give to the cheaper model. The judge follows it ahead of its general leanings but never picks a role too weak for hard or risky work. The default routing is unchanged; empty or blank sends the judge exactly what it got before.
+ - Answer MCP form elicitation requests (`elicitation/create`) with the same dialog the `ask` tool uses. An approval with no fields, such as Executor's "may I run this action?", is one Accept/Decline question; a form is one question per field plus a final `Submit this form?`. Dismissing the dialog, choosing to chat instead, a timed-out answer, an unsupported host (no ask dialog) or any error cancels the request and never accepts it. URL mode is refused.
+ - The task tool description now lists your model roles as `@role` and tells agents to pass the role when you name a model or tier such as "haiku", instead of guessing a model version. When the agent cannot tell which model you mean, it asks with the `ask` tool.
+diff --git a/packages/coding-agent/src/task/auto-model.ts b/packages/coding-agent/src/task/auto-model.ts
+index 6cda6a7902..48b78d29f1 100644
+--- a/packages/coding-agent/src/task/auto-model.ts
++++ b/packages/coding-agent/src/task/auto-model.ts
+@@ -6,7 +6,13 @@ import type { Settings } from "../config/settings";
+ import { hasNativeJudge, type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+ import questionFile from "../prompts/judge/task-model.json" with { type: "json" };
+ import type { CostGateApi } from "../session/cost-gate";
+-import { configuredAliasNames, describeConfiguredRoles, formatTier } from "./model-economy";
++import {
++	configuredAliasNames,
++	describeConfiguredRoles,
++	formatTier,
++	pickRoleForTier,
++	type RoleEconomy,
++} from "./model-economy";
+ import { loadModelUsage } from "./model-usage";
+ import { cfgTaskRoutingPreferences } from "./settings";
+ 
+@@ -23,6 +29,11 @@ export interface AutoTaskModelOptions {
+ 	task: string;
+ 	context?: string;
+ 	agent?: string;
++	/**
++	 * Subagents that run at the same time as this one, this one included. Read only when the judge is about to run,
++	 * so a lone alias never waits for it, and before the judge's deadline starts. One adds nothing to the state.
++	 */
++	concurrentSubagents?: () => Promise<number>;
+ 	signal?: AbortSignal;
+ 	sessionId?: string;
+ 	onUsage?: (usage: JudgmentUsage) => void;
+@@ -35,6 +46,8 @@ export interface AutoTaskModelDecision {
+ 	role: `@${string}`;
+ 	/** True when the role is the only configured alias, so there was nothing to decide and the judge did not run. */
+ 	onlyAlias?: boolean;
++	/** Set when the spawn is one of a group, so the cheapest priced role was taken and the judge did not run: the group size. */
++	cheapestOfGroup?: number;
+ }
+ 
+ /** No model was chosen. `failure` says why in plain words. */
+@@ -63,17 +76,19 @@ function availableRoles(options: AutoTaskModelOptions): {
+ 	roles: Map<string, string>;
+ 	tiers: Map<string, string>;
+ 	usage: Map<string, number>;
++	entries: RoleEconomy[];
+ } {
+ 	const roles = new Map<string, string>();
+ 	const tiers = new Map<string, string>();
+ 	const usage = new Map<string, number>();
+-	for (const entry of describeConfiguredRoles(options.settings, options.registry, loadModelUsage())) {
++	const entries = describeConfiguredRoles(options.settings, options.registry, loadModelUsage());
++	for (const entry of entries) {
+ 		roles.set(entry.role, entry.selector);
+ 		if (entry.tier !== undefined) tiers.set(entry.role, formatTier(entry.tier));
+ 		// Whole percent keeps the state short and stable, so the judgment cache still hits.
+ 		usage.set(entry.role, Math.round(entry.usage * 100));
+ 	}
+-	return { roles, tiers, usage };
++	return { roles, tiers, usage, entries };
+ }
+ 
+ function usableAnswer(answer: ChoiceAnswer<string>, roles: readonly string[]): boolean {
+@@ -107,8 +122,9 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+ 	let roles: Map<string, string>;
+ 	let tiers: Map<string, string>;
+ 	let usage: Map<string, number>;
++	let entries: RoleEconomy[];
+ 	try {
+-		({ roles, tiers, usage } = availableRoles(options));
++		({ roles, tiers, usage, entries } = availableRoles(options));
+ 	} catch (error) {
+ 		options.signal?.throwIfAborted();
+ 		return { failure: `the configured model roles could not be read (${describeError(error)})` };
+@@ -127,6 +143,15 @@ export async function classifyAutoTaskModel(options: AutoTaskModelOptions): Prom
+ 	let timeout: AbortSignal | undefined;
+ 	try {
+ 		if (!options.task.trim()) return { failure: "the task text is empty" };
++		// Awaited here, before the judge's deadline, because a streamed call only knows its size once it ends.
++		const concurrentSubagents = (await options.concurrentSubagents?.()) ?? 1;
++		options.signal?.throwIfAborted();
++		// A group costs the price of one agent times its size, so every member takes the cheapest priced role and the
++		// judge is not asked. A role with no known price is never taken as cheap; with no priced role the judge decides.
++		if (concurrentSubagents > 1) {
++			const cheapest = pickRoleForTier(1, entries);
++			if (cheapest) return { role: `@${cheapest.role}`, cheapestOfGroup: Math.floor(concurrentSubagents) };
++		}
+ 		if (!hasNativeJudge(options.settings, options.registry)) {
+ 			return { failure: `no native judge is available. ${JUDGE_HELP}` };
+ 		}
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 7d6a4593fa..3c4d9e389a 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -777,6 +777,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 	};
+ 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
+ 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
++	/**
++	 * How many subagents a streamed call starts, known only when streaming ends. Early launches wait on it so
++	 * automatic model selection prices the whole group. Kept until the launch session closes.
++	 */
++	readonly #speculativeCallSizes = new Map<string, { size: PromiseWithResolvers<number>; settled: boolean }>();
+ 	readonly #launcher: TaskLauncher = {
+ 		spawns: args => {
+ 			const plan = planSpawns(
+@@ -807,6 +812,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					launcher: this.#launcher,
+ 					onClose: () => {
+ 						if (this.#launchSessions.get(id) === session) this.#launchSessions.delete(id);
++						// A discarded call never reaches dispatch: release any early run still waiting for the count.
++						this.#settleSpeculativeCallSize(id, 1, false);
++						this.#speculativeCallSizes.delete(id);
+ 					},
+ 				});
+ 				this.#launchSessions.set(id, session);
+@@ -948,6 +956,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		index: number;
+ 		agentId?: string;
+ 		detached: boolean;
++		/** Subagents the call starts together; a promise while the call still streams. */
++		callSize?: number | Promise<number>;
+ 	}): SpawnRun {
+ 		return new SpawnRun(
+ 			this.#permit,
+@@ -963,6 +973,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					run.timing,
+ 					spawn.detached ? run.onArtifactsRetained : undefined,
+ 					run.tools,
++					spawn.callSize,
+ 				),
+ 			{ agentId: spawn.agentId, detached: spawn.detached },
+ 		);
+@@ -990,7 +1001,35 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
+ 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
+ 		if (signal.aborted) return undefined;
+-		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
++		return this.#launch({
++			toolCallId,
++			params: spawn,
++			index,
++			agentId,
++			detached,
++			callSize: this.#speculativeCallSize(toolCallId),
++		});
++	}
++
++	#speculativeCallSize(toolCallId: string): Promise<number> {
++		let entry = this.#speculativeCallSizes.get(toolCallId);
++		if (!entry) {
++			entry = { size: Promise.withResolvers<number>(), settled: false };
++			this.#speculativeCallSizes.set(toolCallId, entry);
++		}
++		return entry.size.promise;
++	}
++
++	/**
++	 * Settle a streamed call's size once; later calls change nothing. Dispatch settles before every early launch
++	 * has created its entry, so it creates the entry (`create`); a close only releases an entry that exists.
++	 */
++	#settleSpeculativeCallSize(toolCallId: string, size: number, create: boolean): void {
++		if (create) void this.#speculativeCallSize(toolCallId);
++		const entry = this.#speculativeCallSizes.get(toolCallId);
++		if (!entry || entry.settled) return;
++		entry.settled = true;
++		entry.size.resolve(size);
+ 	}
+ 
+ 	#getSpawnSemaphore(): Semaphore {
+@@ -1143,6 +1182,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		// Runs started while the call streamed. An item runs detached iff it
+ 		// becomes a background job here; a run launched under the other mode
+ 		// (settings flipped mid-stream) cannot be re-homed and starts over.
++		if (launchSession) this.#settleSpeculativeCallSize(toolCallId, spawnItems.length, true);
+ 		const adopted = launchSession ? await launchSession.adopt(normalizedSpawnParams) : new Map<number, SpawnRun>();
+ 		for (const [index, run] of adopted) {
+ 			if (run.identity.detached === (manager !== undefined && !itemBlocking[index])) continue;
+@@ -1180,6 +1220,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				params,
+ 				spawnItems.map((item, index) => ({ item, index, run: adopted.get(index) })),
+ 				defaultAgent,
++				spawnItems.length,
+ 				signal,
+ 				onUpdate,
+ 			);
+@@ -1313,6 +1354,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
+ 					agentId: spawn.agentId,
+ 					run: spawn.run,
++					callSize: spawnItems.length,
+ 					progress: spawn.progress,
+ 					ircEnabled,
+ 					buildDetails: buildAsyncDetails,
+@@ -1423,6 +1465,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			toolCallId,
+ 			params,
+ 			defaultAgent,
++			callSize: spawnItems.length,
+ 			signal,
+ 			spawns: syncSpawns.map(spawn => ({
+ 				item: spawn.item,
+@@ -1523,6 +1566,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		agentId: string;
+ 		/** Run already started while the call streamed; the job adopts it instead of launching. */
+ 		run?: SpawnRun;
++		/** Subagents the call starts together. */
++		callSize: number;
+ 		progress: AgentProgress;
+ 		ircEnabled: boolean;
+ 		buildDetails: () => TaskToolDetails;
+@@ -1535,6 +1580,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			spawnParams,
+ 			agentId,
+ 			run,
++			callSize,
+ 			progress,
+ 			ircEnabled,
+ 			buildDetails,
+@@ -1631,6 +1677,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					index: progress.index,
+ 					agentId,
+ 					detached: true,
++					callSize,
+ 				}));
+ 				activeRun.attach({
+ 					signal: runSignal,
+@@ -1778,6 +1825,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		params: TaskParams,
+ 		spawns: SyncSpawnRef[],
+ 		defaultAgent: string,
++		callSize: number,
+ 		signal?: AbortSignal,
+ 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+ 	): Promise<AgentToolResult<TaskToolDetails>> {
+@@ -1791,6 +1839,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					index: spawn.index,
+ 					agentId: spawn.preAllocatedId,
+ 					detached: false,
++					callSize,
+ 				});
+ 			run.attach({ signal, onUpdate });
+ 			return await run.result;
+@@ -1816,6 +1865,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			toolCallId,
+ 			params,
+ 			defaultAgent,
++			callSize,
+ 			signal,
+ 			spawns,
+ 			onItemProgress: onUpdate
+@@ -1852,11 +1902,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		toolCallId: string;
+ 		params: TaskParams;
+ 		defaultAgent: string;
++		callSize: number;
+ 		spawns: SyncSpawnRef[];
+ 		signal?: AbortSignal;
+ 		onItemProgress?: (index: number, progress: AgentProgress) => void;
+ 	}): Promise<(AgentToolResult<TaskToolDetails> | undefined)[]> {
+-		const { toolCallId, params, defaultAgent, spawns, signal, onItemProgress } = args;
++		const { toolCallId, params, defaultAgent, callSize, spawns, signal, onItemProgress } = args;
+ 		const { results } = await mapWithConcurrencyLimitAllSettled(
+ 			spawns,
+ 			spawns.length,
+@@ -1869,6 +1920,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 						index: spawn.index,
+ 						agentId: spawn.preAllocatedId,
+ 						detached: false,
++						callSize,
+ 					});
+ 				run.attach({
+ 					signal: workerSignal,
+@@ -1922,6 +1974,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		launchTiming?: { invokedAt: number; acquiredAt: number },
+ 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
+ 		tools?: TextTap,
++		callSize?: number | Promise<number>,
+ 	): Promise<AgentToolResult<TaskToolDetails>> {
+ 		const startTime = Date.now();
+ 		const assignment = spawnAssignment(params);
+@@ -1951,6 +2004,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				// path did not pre-reserve one. Do not treat it as a HUD description.
+ 				identity: { id: preAllocatedId, label: params.name },
+ 				index: spawnIndex,
++				batchSize: callSize,
+ 				parentToolCallId: toolCallId,
+ 				detached,
+ 				// Detached (async) spawns advertise `agent://<id>` handles in the
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index 6df4bbb203..9656914116 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -175,6 +175,12 @@ export interface StructuredSubagentRequest {
+ 	solutionSpace?: string;
+ 	identity?: StructuredSubagentIdentity;
+ 	index?: number;
++	/**
++	 * How many subagents the spawning call starts together, this one included. A promise settles once a
++	 * streamed call has finished, so the count is complete before a model is chosen. Automatic model
++	 * selection weighs the price of the whole group by it.
++	 */
++	batchSize?: number | Promise<number>;
+ 	parentToolCallId?: string;
+ 	detached?: boolean;
+ 	invokedAt?: number;
+@@ -759,6 +765,41 @@ export async function resolveEffectiveSubagentPolicy(
+ 	};
+ }
+ 
++/** Spawns per parent that have entered {@link runStructuredSubagent} and not yet finished. */
++const spawnsInFlight = new Map<string, number>();
++
++function spawnParentKey(request: StructuredSubagentRequest): string {
++	return `${request.session.getSessionId?.() ?? ""}\0${request.session.getAgentId?.() ?? MAIN_AGENT_ID}`;
++}
++
++/**
++ * Count a spawn from its first synchronous step, so spawns started together all see each other before any
++ * of them has registered a child. Returns the function that ends the count.
++ */
++function enterSpawn(request: StructuredSubagentRequest): () => void {
++	const key = spawnParentKey(request);
++	spawnsInFlight.set(key, (spawnsInFlight.get(key) ?? 0) + 1);
++	return () => {
++		const left = (spawnsInFlight.get(key) ?? 1) - 1;
++		if (left > 0) spawnsInFlight.set(key, left);
++		else spawnsInFlight.delete(key);
++	};
++}
++
++/**
++ * Subagents that run at the same time as this spawn, this one included: the largest of the call's own batch,
++ * one plus this parent's subagents already running, and this parent's spawns in flight. They are never added,
++ * because each count already holds the others' members. The in-flight count is what lets several separate
++ * calls that start together (parallel tool calls, a `Promise.all` of `agent()`) see each other.
++ */
++async function countConcurrentSubagents(request: StructuredSubagentRequest): Promise<number> {
++	const batch = Math.max(1, Math.floor((await request.batchSize) ?? 1));
++	const parentId = request.session.getAgentId?.() ?? MAIN_AGENT_ID;
++	const registry = request.session.agentRegistry ?? AgentRegistry.global();
++	const running = registry.list().filter(ref => ref.status === "running" && ref.parentId === parentId).length;
++	return Math.max(batch, 1 + running, spawnsInFlight.get(spawnParentKey(request)) ?? 0);
++}
++
+ /**
+  * Choose the model of a spawn no caller named a model for. Classify only at dispatch, not during
+  * side-effect-free frontend preflight. A subagent never takes the parent's model, and a failed choice never
+@@ -781,6 +822,7 @@ async function applyAutoTaskModel(
+ 				task: request.assignment,
+ 				context: request.context,
+ 				agent: policy.agentName,
++				concurrentSubagents: () => countConcurrentSubagents(request),
+ 				signal: request.signal,
+ 				sessionId: request.session.getSessionId?.() ?? undefined,
+ 				onUsage: journalJudgmentUsage(request.session.sessionManager),
+@@ -794,7 +836,11 @@ async function applyAutoTaskModel(
+ 	if (autoTaskModelFailed(outcome)) return unusable(outcome.failure);
+ 	const selection = resolveAgentModelSelection({ requestModel: outcome.role, settings: request.session.settings });
+ 	if (selection.patterns.length === 0) return unusable(`the role ${outcome.role} does not resolve to a model`);
+-	const note = outcome.onlyAlias ? " (only one configured alias)" : "";
++	const note = outcome.onlyAlias
++		? " (only one configured alias)"
++		: outcome.cheapestOfGroup
++			? ` (cheapest role: ${outcome.cheapestOfGroup} subagents start together)`
++			: "";
+ 	return {
+ 		...policy,
+ 		modelOverride: selection.patterns,
+@@ -1163,6 +1209,15 @@ function describeSalvagedWork(result: SingleResult): string {
+  * lease or child dispatch; callers keep responsibility for their result text.
+  */
+ export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
++	const leave = enterSpawn(request);
++	try {
++		return await runCountedStructuredSubagent(request);
++	} finally {
++		leave();
++	}
++}
++
++async function runCountedStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+ 	const preflight = await resolveEffectiveSubagentPolicy(request);
+ 	const policy = await applySpawnHook(request, await applyAutoTaskModel(request, preflight));
+ 	const lease = await leaseArtifacts(request.session, request.invocationKind);
+diff --git a/packages/coding-agent/test/task/auto-model.test.ts b/packages/coding-agent/test/task/auto-model.test.ts
+index 3481a61d51..546e397c40 100644
+--- a/packages/coding-agent/test/task/auto-model.test.ts
++++ b/packages/coding-agent/test/task/auto-model.test.ts
+@@ -76,6 +76,76 @@ describe("automatic task model selection", () => {
+ 		expect(JSON.parse(judge.shown().role_tiers)).toEqual({ sonnet: "$$$$" });
+ 	});
+ 
++	it("gives every member of a group the cheapest priced role without asking the judge", async () => {
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		const judge = vi.spyOn(judgmentModule, "resolveJudge");
++		// No native judge at all: a group does not need one.
++		vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(false);
++		const settings = Settings.isolated({ modelRoles: { haiku: "mock/m1", sonnet: "mock/m7" } });
++		const decision = await classifyAutoTaskModel({
++			settings,
++			registry,
++			task: "Review one area of the code and report what is wrong.",
++			concurrentSubagents: async () => 5,
++		});
++		expect(decision).toEqual({ role: "@haiku", cheapestOfGroup: 5 });
++		expect(judge).not.toHaveBeenCalled();
++	});
++
++	it("leaves a lone spawn to the judge", async () => {
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		const settings = Settings.isolated({ modelRoles: { haiku: "mock/m1", sonnet: "mock/m7" } });
++		for (const concurrent of [1, undefined]) {
++			stubJudge("sonnet");
++			const decision = await classifyAutoTaskModel({
++				settings,
++				registry,
++				task: "Plan a database migration.",
++				...(concurrent === undefined ? {} : { concurrentSubagents: async () => concurrent }),
++			});
++			expect(decision).toEqual({ role: "@sonnet" });
++		}
++	});
++
++	it("never takes a role with no known price as the cheap one for a group", async () => {
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		const free = [...LADDER, createMockModel({ id: "free" })];
++		const decision = await classifyAutoTaskModel({
++			settings: Settings.isolated({ modelRoles: { haiku: "mock/free", sonnet: "mock/m7" } }),
++			registry: { getAll: () => free, getAvailable: () => free } as unknown as ModelRegistry,
++			task: "Check one module.",
++			concurrentSubagents: async () => 3,
++		});
++		expect(decision).toEqual({ role: "@sonnet", cheapestOfGroup: 3 });
++	});
++
++	it("falls back to the judge when no role has a known price", async () => {
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		const free = [createMockModel({ id: "free1" }), createMockModel({ id: "free2" })];
++		const judge = stubJudge("haiku");
++		const decision = await classifyAutoTaskModel({
++			settings: Settings.isolated({ modelRoles: { haiku: "mock/free1", sonnet: "mock/free2" } }),
++			registry: { getAll: () => free, getAvailable: () => free } as unknown as ModelRegistry,
++			task: "Check one module.",
++			concurrentSubagents: async () => 3,
++		});
++		expect(decision).toEqual({ role: "@haiku" });
++		expect(judge.shown().task).toBe("Check one module.");
++	});
++
++	it("does not wait for the group size when there is one role to choose", async () => {
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		const size = vi.fn(async () => 4);
++		const decision = await classifyAutoTaskModel({
++			settings: Settings.isolated({ modelRoles: { sonnet: "mock/m7" } }),
++			registry,
++			task: "Check one module.",
++			concurrentSubagents: size,
++		});
++		expect(decision).toEqual({ role: "@sonnet", onlyAlias: true });
++		expect(size).not.toHaveBeenCalled();
++	});
++
+ 	it("shows the judge the user's routing preferences only when the setting has text", async () => {
+ 		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
+ 		const roles = { haiku: "mock/m1", sonnet: "mock/m7" };
+diff --git a/packages/coding-agent/test/task/speculative-launch.test.ts b/packages/coding-agent/test/task/speculative-launch.test.ts
+index 3a13798a2d..fac6724d46 100644
+--- a/packages/coding-agent/test/task/speculative-launch.test.ts
++++ b/packages/coding-agent/test/task/speculative-launch.test.ts
+@@ -19,6 +19,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
+ import { createSpeculativeToolExecutionConfig } from "@oh-my-pi/pi-coding-agent/speculation/host";
+ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
++import * as autoModelModule from "@oh-my-pi/pi-coding-agent/task/auto-model";
+ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+ import { BatchArgsScanner, type TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
+ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+@@ -219,6 +220,65 @@ describe("task speculative launch", () => {
+ 		expect(manager.getJob("Beta")!.status).toBe("completed");
+ 	});
+ 
++	it("prices an early launch by the size of the finished call, not by the items streamed so far", async () => {
++		const sizes: number[] = [];
++		vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockImplementation(
++			async ({ settings, concurrentSubagents }) => {
++				sizes.push((await concurrentSubagents?.()) ?? 1);
++				const [first] = Object.keys(settings.getModelRoles());
++				return { role: `@${first}` };
++			},
++		);
++		const { tool, manager, session } = await openSession();
++		session.update(toolCall, alphaClosed);
++		session.finalize({ toolCall, args });
++		await tool.execute(toolCall.id, args);
++		await spawn("Alpha").started.promise;
++		await spawn("Beta").started.promise;
++		expect(sizes).toEqual([2, 2]);
++		spawn("Alpha").release.resolve();
++		spawn("Beta").release.resolve();
++		await manager.getJob("Alpha")!.promise;
++		await manager.getJob("Beta")!.promise;
++	});
++
++	it("prices every member of an ordinary batch call by the call's size", async () => {
++		const sizes: number[] = [];
++		vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockImplementation(
++			async ({ settings, concurrentSubagents }) => {
++				sizes.push((await concurrentSubagents?.()) ?? 1);
++				const [first] = Object.keys(settings.getModelRoles());
++				return { role: `@${first}` };
++			},
++		);
++		const manager = new AsyncJobManager({ onJobComplete: () => {} });
++		managers.push(manager);
++		const tool = await TaskTool.create(createSession(manager));
++		await tool.execute("tc-plain", args);
++		await spawn("Alpha").started.promise;
++		await spawn("Beta").started.promise;
++		expect(sizes).toEqual([2, 2]);
++		spawn("Alpha").release.resolve();
++		spawn("Beta").release.resolve();
++		await manager.getJob("Alpha")!.promise;
++		await manager.getJob("Beta")!.promise;
++	});
++
++	it("releases an early launch that waits for the call size when the call is discarded", async () => {
++		const entered = Promise.withResolvers<void>();
++		const released = Promise.withResolvers<number>();
++		vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockImplementation(async ({ concurrentSubagents }) => {
++			entered.resolve();
++			released.resolve((await concurrentSubagents?.()) ?? 1);
++			return { failure: "the test stops here" };
++		});
++		const { session } = await openSession();
++		session.update(toolCall, alphaClosed);
++		await entered.promise;
++		session.discard("test discards the call");
++		expect(await released.promise).toBe(1);
++	});
++
+ 	it("adopts an empty model placeholder without changing the submitted arguments", async () => {
+ 		const { tool, manager, session } = await openSession();
+ 		const submitted = {
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index 7efc4d2841..1e21540c97 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -674,6 +674,106 @@ describe("structured subagent primitive", () => {
+ 		},
+ 	);
+ 
++	it("prices a spawn by its batch, or by the siblings already running when that is more", async () => {
++		mockDiscovery();
++		const sizes: number[] = [];
++		vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockImplementation(async ({ concurrentSubagents }) => {
++			sizes.push((await concurrentSubagents?.()) ?? 1);
++			return { role: "@sonnet" };
++		});
++		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => result());
++		const running = (count: number) =>
++			Object.assign(session({ modelRoles: { sonnet: "anthropic/claude-sonnet-4-5" } }), {
++				modelRegistry: {},
++				getAgentId: () => "Parent",
++				agentRegistry: {
++					list: () => [
++						...Array.from({ length: count }, (_, index) => ({
++							id: `Sibling${index}`,
++							status: "running",
++							parentId: "Parent",
++						})),
++						{ id: "Other", status: "running", parentId: "Elsewhere" },
++						{ id: "Done", status: "idle", parentId: "Parent" },
++					],
++				},
++			});
++		const run = async (childSession: ToolSession, batchSize?: number | Promise<number>) => {
++			const settled = await runStructuredSubagent(
++				request({
++					session: childSession,
++					retainArtifacts: true,
++					...(batchSize !== undefined ? { batchSize } : {}),
++				}),
++			);
++			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++		};
++
++		await run(running(0));
++		await run(running(0), 5);
++		await run(running(0), Promise.resolve(4));
++		// A batch member that started early is already counted among the running ones, so the two never add up.
++		await run(running(2), 3);
++		await run(running(5), 3);
++		expect(sizes).toEqual([1, 5, 4, 3, 6]);
++	});
++
++	it("runs every member of a batch on the cheapest priced role and says why, without a judge", async () => {
++		mockDiscovery({ ...AGENT, model: ["openai/agent-own"] });
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		const ladder = [1, 2, 3, 4, 5, 6, 7, 8].map(step =>
++			createMockModel({ id: `m${step}`, cost: { input: step, output: step, cacheRead: 0, cacheWrite: 0 } }),
++		);
++		const childSession = Object.assign(session({ modelRoles: { haiku: "mock/m1", sonnet: "mock/m7" } }), {
++			modelRegistry: { getAll: () => ladder, getAvailable: () => ladder },
++		}) as ToolSession;
++		const dispatched: executorModule.ExecutorOptions[] = [];
++		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
++			dispatched.push(options);
++			return result();
++		});
++		// This test is about the real choice, so undo the file-wide stand-in for it.
++		vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockRestore();
++		const settled = await runStructuredSubagent(
++			request({ session: childSession, retainArtifacts: true, batchSize: 5 }),
++		);
++		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++		expect(dispatched).toHaveLength(1);
++		expect(dispatched[0]).toMatchObject({
++			modelRole: "haiku",
++			modelRoute: "Automatic model selection: @haiku (cheapest role: 5 subagents start together).",
++		});
++	});
++
++	it("sees separate calls that start together, and forgets them once they finish", async () => {
++		mockDiscovery({ ...AGENT, model: ["openai/agent-own"] });
++		vi.spyOn(modelUsageModule, "loadModelUsage").mockReturnValue(modelUsageModule.EMPTY_MODEL_USAGE);
++		const ladder = [1, 2, 3, 4, 5, 6, 7, 8].map(step =>
++			createMockModel({ id: `m${step}`, cost: { input: step, output: step, cacheRead: 0, cacheWrite: 0 } }),
++		);
++		const childSession = Object.assign(session({ modelRoles: { haiku: "mock/m1", sonnet: "mock/m7" } }), {
++			modelRegistry: { getAll: () => ladder, getAvailable: () => ladder },
++		}) as ToolSession;
++		const dispatched: executorModule.ExecutorOptions[] = [];
++		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
++			dispatched.push(options);
++			return result();
++		});
++		vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockRestore();
++		// Four one-item calls, none with a batch size: only starting together tells them apart from a lone spawn.
++		const settled = await Promise.all(
++			Array.from({ length: 4 }, () =>
++				runStructuredSubagent(request({ session: childSession, retainArtifacts: true })),
++			),
++		);
++		for (const one of settled) await fs.rm(one.artifactsDir, { recursive: true, force: true });
++		expect(dispatched.map(options => options.modelRole)).toEqual(["haiku", "haiku", "haiku", "haiku"]);
++		// Once they have finished, the next spawn is alone again and needs the judge, which this session lacks.
++		const alone = await runStructuredSubagent(request({ session: childSession })).catch((cause: unknown) => cause);
++		expect(alone).toBeInstanceOf(StructuredSubagentError);
++		expect((alone as StructuredSubagentError).message).toContain("no native judge is available");
++	});
++
+ 	it("leaves a host-selected model to its caller instead of classifying it", async () => {
+ 		mockDiscovery();
+ 		const childSession = Object.assign(session({ modelRoles: { sonnet: "anthropic/claude-sonnet-4-5" } }), {
