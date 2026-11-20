@@ -1,5 +1,5 @@
 diff --git a/docs/agent-hub.md b/docs/agent-hub.md
-index 48baa7e0e9..0502c732ee 100644
+index 0f5b111a59..17ea8ed2ef 100644
 --- a/docs/agent-hub.md
 +++ b/docs/agent-hub.md
 @@ -74,7 +74,7 @@ For a normal local subagent, `Enter` or click focuses the main TUI on that agent
@@ -12,10 +12,10 @@ index 48baa7e0e9..0502c732ee 100644
  
  Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
 diff --git a/docs/tools/task.md b/docs/tools/task.md
-index 9bc61b9dc3..512ae0785e 100644
+index 26b8b1eb7e..53cacf2162 100644
 --- a/docs/tools/task.md
 +++ b/docs/tools/task.md
-@@ -70,6 +70,12 @@ When per-call selection is enabled for a surface, the task/eval tool description
+@@ -66,6 +66,12 @@ When per-call selection is enabled for a surface, the task/eval tool description
  
  **Price tiers.** A task item's `model` may also be `$`, `$$`, `$$$` or `$$$$` (task calls only; eval calls need an exact selector). The tiers are quarters of the blended price (input plus output per million tokens) across every loaded chat model that has a price, so a tier means the same thing whichever providers you are signed in to. The scale is set by the whole loaded catalogue; only the role choice is limited to roles you configured. A model with no price (free tiers, subscriptions, local models) cannot be placed on a price scale, so it takes no tier and is never picked by one. A tier resolves to the configured role in that tier, or in the nearest tier when there is none (the cheaper side wins a tie), and from there it is approved, dispatched and revived exactly like that role. Within a tier the most used role wins. Usage is the share of the last 90 days of requests in `stats.db` (read-only, from the hourly rollup), weighted by how specific the match is: the exact `provider/model-id` counts 0.6, the same model family 0.3 and the same provider 0.1. With no history the order falls back to the role name. The task description shows each configured role's tier, tells agents to use the cheapest tier that does the work reliably, and calls `$$$$` very rare. The judge that picks a role for a call without `model` is shown the same tiers and usage shares.
  
@@ -28,42 +28,42 @@ index 9bc61b9dc3..512ae0785e 100644
  Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape. Settled results report the requested and actual model; extension routing, auth fallback, and runtime retry fallback can switch the actual model under the existing policies.
  
  Batch calls reject a top-level `agent` rather than silently discarding a specialist selector and spawning the default agent. Put `agent` on each `tasks[]` item when selecting `reviewer`, `scout`, or a custom agent; the agent name is not inferred from the task text.
-@@ -182,7 +188,7 @@ Artifacts and side channels:
+@@ -187,7 +193,7 @@ Artifacts and side channels:
     - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
     - Shares the parent `local://` root and `ArtifactManager` with subagents.
  - Background work / cancellation
--   - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
-+   - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session. `proc://<agentId>/model` changes a running owned subagent's model without cancelling it (see [Changing a running subagent's model](#changing-a-running-subagents-model)).
+-   - `write proc://<jobId>/kill` (empty `content`) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
++   - `write proc://<jobId>/kill` (empty `content`) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A cancelled run stops but its agent stays `idle` and resumable. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session. `proc://<agentId>/model` changes a running owned subagent's model without cancelling it (see [Changing a running subagent's model](#changing-a-running-subagents-model)).
     - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.
  
  ## Limits & Caps
 diff --git a/docs/tools/wait.md b/docs/tools/wait.md
-index d60ae664b8..6f7d50a37e 100644
+index 21132bdeb8..6d767396c4 100644
 --- a/docs/tools/wait.md
 +++ b/docs/tools/wait.md
-@@ -29,6 +29,6 @@
+@@ -30,6 +30,6 @@
  ## Related surfaces
  
  - `read proc://` lists caller-visible jobs and project services; `read proc://<id>` inspects state/output without consuming delivery.
--- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; no `content` needed. Bare `proc://<id>` writes send stdin only to a service, including empty input.
-+- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; no `content` needed. `write proc://<id>/model` (content: `@role`, a price tier `$`..`$$$$` or exact `provider/model-id[:level]`) switches a running owned subagent's model from its next request. Bare `proc://<id>` writes send stdin only to a service, including empty input.
- - `write agent://<id>` sends a peer message; `agent://all` broadcasts to visible live peers. Bare `read history://` discovers registered agent transcripts. The final result of a subagent is delivered to its parent automatically.
+-- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; send empty `content`. Bare `proc://<id>` writes send stdin only to a service, including empty input.
++- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; send empty `content`. `write proc://<id>/model` (content: `@role`, a price tier `$`..`$$$$` or exact `provider/model-id[:level]`) switches a running owned subagent's model from its next request. Bare `proc://<id>` writes send stdin only to a service, including empty input.
+ - `write agent://<id>` sends a peer message; `agent://all` broadcasts to visible live peers from the main agent only. Bare `read history://` discovers registered agent transcripts. The final result of a subagent is delivered to its parent automatically.
  - Start supervised services with `bash` `name` and optional `ready`; inspect and control them through `proc://`.
 diff --git a/docs/tools/write.md b/docs/tools/write.md
-index 45cdc122c7..c363d8a7f6 100644
+index 608d001e88..71ce851761 100644
 --- a/docs/tools/write.md
 +++ b/docs/tools/write.md
 @@ -155,7 +155,7 @@ content: ""
  
- - `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers. This write is read-approved and allowed in plan mode and `deviceOnlyWrite` when messaging is available. `agent://` reads remain output artifacts.
+ - `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers; only the main agent may broadcast, and a subagent's `agent://all` write fails with an error naming direct messages instead. This write is read-approved and allowed in plan mode and `deviceOnlyWrite` when messaging is available. `agent://` reads remain output artifacts.
  - `agent://<id>?progress` marks the message as an acknowledgement or progress note on something that peer asked: it answers nothing and asks nothing, so the peer's `wait` keeps blocking for the real reply, which is any later plain message. It wakes no relay turn. `agent://all?progress` is rejected.
--- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval. Stdin and `/mode` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
-+- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. `proc://<id>/model` requires `content`: a configured `@role`, a price tier `$`..`$$$$` or one exact `provider/model-id[:level]`; it switches a running subagent the caller spawned to that model from its next model request, without aborting its turn, under the same approval as a task `model` (`task.perCallModel`, grants, `task.perCallModelAllow`); a finished, unknown or foreign agent is refused. Proc writes require exec approval. Stdin, `/mode` and `/model` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill`, `/mode` and `/model` are write-only.
+-- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill", content: "" })` cancels a job or owned subagent, or stops a service; `content` is ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval. Stdin and `/mode` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
++- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill", content: "" })` cancels a job or owned subagent, or stops a service; `content` is ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. `proc://<id>/model` requires `content`: a configured `@role`, a price tier `$`..`$$$$` or one exact `provider/model-id[:level]`; it switches a running subagent the caller spawned to that model from its next model request, without aborting its turn, under the same approval as a task `model` (`task.perCallModel`, grants, `task.perCallModelAllow`); a finished, unknown or foreign agent is refused. Proc writes require exec approval. Stdin, `/mode` and `/model` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill`, `/mode` and `/model` are write-only.
  - `out://` shows `content` (Markdown, at most 64 KiB) to the user as a reply without ending the turn: the transcript draws the call as assistant prose that streams with the arguments, not as a tool card, and keeps it visible when tool activity is hidden. The URL path is ignored and the scheme is write-only. The write is read-approved and allowed in plan mode and `deviceOnlyWrite`. It is refused for subagents, and where `out.enabled` is off — by default everywhere but the interactive TUI (terminal or Tern), so print, RPC, and ACP sessions neither see nor accept it unless `out.enabled` is explicitly set. Only sessions where it is on get the system-prompt entry.
  - A registered internal handler with a `write` hook owns its resource semantics (for example, `cfg://`, `agent://`, `proc://`). File-backed schemes (`local://`, `vault://`) have no hook: the router locates the target file (`local://` in the session-local artifact sandbox, `vault://` under the vault root) and the write follows the plain-file path.
- - `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first, then pass one JSON object as `content`. Device schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved. The outer approval gate uses `tools.approval.<device>` before the generic `write` policy. `xd://report_issue` separately accepts a plain issue description.
+ - `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first, then pass one JSON object as `content`. Device schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved. `xd://<name>` also accepts a tool's unambiguous `customWireName` alias (`xd://apply_patch` for `edit` in `apply_patch` mode). The outer approval gate uses `tools.approval.<tool>`, keyed by the canonical tool name, before the generic `write` policy. `xd://report_issue` separately accepts a plain issue description.
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 2197c49075..b5bba9b1dd 100644
+index 7ece801366..1a93e5604b 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -10,6 +10,8 @@
@@ -76,16 +76,16 @@ index 2197c49075..b5bba9b1dd 100644
  ### Changed
  
 diff --git a/packages/coding-agent/src/internal-urls/proc-protocol.ts b/packages/coding-agent/src/internal-urls/proc-protocol.ts
-index e2ef1144b7..a3e232fc00 100644
+index b028b09131..f3b94e3b55 100644
 --- a/packages/coding-agent/src/internal-urls/proc-protocol.ts
 +++ b/packages/coding-agent/src/internal-urls/proc-protocol.ts
 @@ -1,4 +1,5 @@
  import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 +import { formatModelStringWithRouting } from "../config/model-resolver";
- import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
- import { formatBytes, logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+ import type { UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+ import { formatBytes, logger, sanitizeText, spillUrl, truncate } from "@oh-my-pi/pi-utils";
  import type { AsyncJob } from "../async";
-@@ -35,9 +36,10 @@ import type {
+@@ -39,9 +40,10 @@ import type {
  } from "./types";
  
  import { cfgLaunchEnabled } from "../tools/settings";
@@ -97,7 +97,7 @@ index e2ef1144b7..a3e232fc00 100644
  	/** `proc://<id>/streams` lists a bash job's pipe streams; `/streams/<n>` reads one. */
  	| { id: string; action: "streams"; stream?: number };
  
-@@ -46,9 +48,13 @@ const STREAMS_PATH = /^\/streams(?:\/(\d+))?\/?$/;
+@@ -50,9 +52,13 @@ const STREAMS_PATH = /^\/streams(?:\/(\d+))?\/?$/;
  function target(url: InternalUrl): ProcTarget {
  	const path = url.rawPathname ?? url.pathname;
  	const streams = STREAMS_PATH.exec(path);
@@ -113,7 +113,7 @@ index e2ef1144b7..a3e232fc00 100644
  		);
  	const id = url.rawHost;
  	if (id.includes("/") || id === "." || id === "..") throw new Error(`Invalid process id: ${id}`);
-@@ -56,7 +62,7 @@ function target(url: InternalUrl): ProcTarget {
+@@ -60,7 +66,7 @@ function target(url: InternalUrl): ProcTarget {
  		if (!id) throw new Error("proc://<id>/streams needs a job id, e.g. proc://bg_3/streams");
  		return { id, action: "streams", stream: streams[1] === undefined ? undefined : Number(streams[1]) };
  	}
@@ -121,8 +121,8 @@ index e2ef1144b7..a3e232fc00 100644
 +	return { id, action: path === "/mode" ? "mode" : path === "/model" ? "model" : path === "/kill" ? "kill" : "stdin" };
  }
  
- /** `proc://<id>/kill`: cancels a job, agent, or service; needs no content and touches no files. */
-@@ -70,12 +76,57 @@ function killCall(id: string): string {
+ /** `proc://<id>/kill`: cancels a job, agent, or service; ignores content and touches no files. */
+@@ -74,12 +80,57 @@ function killCall(id: string): string {
  }
  
  /** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
@@ -178,10 +178,10 @@ index e2ef1144b7..a3e232fc00 100644
 +	};
 +}
 +
- function ownerJobs(session: ToolSession): AsyncJob[] {
- 	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
- }
-@@ -266,8 +317,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
+ /** A service's `proc://<id>/mode` value, derived from its unit policy. */
+ function serviceMode(service: UnitSnapshot): "persist" | "session" | "detached" {
+ 	if (service.policy.hold === "detached") return "detached";
+@@ -316,8 +367,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
  		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
  		if (!id)
  			throw new Error(
@@ -190,13 +190,13 @@ index e2ef1144b7..a3e232fc00 100644
  			);
 +		if (action === "model") return switchAgentModel(session, id, content);
  		const ownerId = session.getAgentId?.() ?? undefined;
- 		const jobs = ownerJobs(session);
- 		const exactJob = jobs.find(item => item.id === id);
+ 		// Stamped before the daemon lookup below: a job that settles while that
+ 		// await runs finished during this call, and the kill snapshot must say so
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index f3f1ae5b2b..c2cf6cf80a 100644
+index 0d70a6d34f..b0d68021a9 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-@@ -149,6 +149,7 @@ import {
+@@ -144,6 +144,7 @@ import {
  	cfgTreeFilterMode,
  } from "../settings";
  import { cfgTaskAgentModelOverrides } from "../../task/settings";
@@ -204,16 +204,18 @@ index f3f1ae5b2b..c2cf6cf80a 100644
  
  /** First-use boundary for provider auth catalog and dialog components. */
  async function loadProviderAuthUi() {
-@@ -763,11 +764,19 @@ export class SelectorController {
+@@ -769,12 +770,20 @@ export class SelectorController {
+ 		const target = this.ctx.viewSession;
  		const focusedAgentId = this.ctx.focusedAgentId;
  		const apply = async () => {
- 			const level = thinkingLevel ?? target.resolveTemporaryModelThinkingLevel(model);
--			await target.setModelTemporary(model, level);
+-			// Without a slider level, the session's level carries over (clamped to the model).
+-			await target.setModelTemporary(model, thinkingLevel);
 +			// A subagent keeps the request it is serving and takes the model at its next one (the operator's
-+			// choice is not gated by `task.perCallModel`); the main session switches at once.
++			// choice is not gated by `task.perCallModel`); the main session switches at once. Without a slider
++			// level, the session's level carries over (clamped to the model).
 +			let state: "applied" | "queued" = "applied";
-+			if (focusedAgentId) state = await switchSubagentModelAsOperator(target, model, level);
-+			else await target.setModelTemporary(model, level);
++			if (focusedAgentId) state = await switchSubagentModelAsOperator(target, model, thinkingLevel);
++			else await target.setModelTemporary(model, thinkingLevel);
  			this.ctx.statusLine.invalidate();
  			this.ctx.updateEditorBorderColor();
  			if (focusedAgentId) {
@@ -226,9 +228,9 @@ index f3f1ae5b2b..c2cf6cf80a 100644
  				return;
  			}
  			const roleSelectorHint = appKey(this.ctx.keybindings, "app.model.select") || formatKeyHint("alt+m");
-@@ -861,7 +870,16 @@ export class SelectorController {
+@@ -845,7 +854,16 @@ export class SelectorController {
  				onPickRole: async entry => {
- 					if (!isCurrent() || selectOnly) return;
+ 					if (!isCurrent()) return;
  					try {
 -						await this.ctx.viewSession.applyRoleModel(entry);
 +						// The focused subagent keeps its turn: the role's model applies from its next request.
@@ -245,29 +247,80 @@ index f3f1ae5b2b..c2cf6cf80a 100644
  						this.ctx.updateEditorBorderColor();
  						this.ctx.showModelCycleTrack(
 diff --git a/packages/coding-agent/src/prompts/internal-urls/proc.md b/packages/coding-agent/src/prompts/internal-urls/proc.md
-index 96de9320f9..fc76589a15 100644
+index 7a9039f23d..82d24153a9 100644
 --- a/packages/coding-agent/src/prompts/internal-urls/proc.md
 +++ b/packages/coding-agent/src/prompts/internal-urls/proc.md
 @@ -1 +1 @@
--`proc://`: jobs, agents, and services; `proc://<id>` status/output; write sends stdin to services only (empty = Enter); `proc://<id>/kill` cancels/stops jobs, agents, and services, omit `content`; `proc://<id>/mode`: `persist`|`session`|`detached` (services only); start long-lived work as a named service when it needs stdin or lifetime controls; `proc://<id>/streams` lists a bash job's pipes, `proc://<id>/streams/<n>` reads what crossed pipe `n` so far (live under `| tail`/`| grep`; never rerun to see it).
-+`proc://`: jobs, agents, and services; `proc://<id>` status/output; write sends stdin to services only (empty = Enter); `proc://<id>/kill` cancels/stops jobs, agents, and services, omit `content`; `proc://<id>/model`: `content` = a configured `@role`, a price tier `$`..`$$$$` or exact `provider/model-id[:level]`, switches a running subagent you spawned from its next model request (context kept, same approval as a task `model`; refused when it has finished); `proc://<id>/mode`: `persist`|`session`|`detached` (services only); start long-lived work as a named service when it needs stdin or lifetime controls; `proc://<id>/streams` lists a bash job's pipes, `proc://<id>/streams/<n>` reads what crossed pipe `n` so far (live under `| tail`/`| grep`; never rerun to see it).
+-proc://: jobs, agents, and services; proc://<id> status/output; proc://<id>/kill with empty `content` cancels/stops jobs, agents, and services; proc://<id>/streams: a bash job's pipes so far (live under `| tail`/`| grep`; never rerun to see it); parked agents/missing job ≠ lost: check agent://<id>, history://<id>.
++proc://: jobs, agents, and services; proc://<id> status/output; proc://<id>/kill with empty `content` cancels/stops jobs, agents, and services; proc://<id>/model: `content` = a configured @role, a price tier $..$$$$ or exact provider/model-id[:level], switches a running subagent you spawned from its next model request (context kept, same approval as a task model; refused when it has finished); proc://<id>/streams: a bash job's pipes so far (live under `| tail`/`| grep`; never rerun to see it); parked agents/missing job ≠ lost: check agent://<id>, history://<id>.
 diff --git a/packages/coding-agent/src/prompts/tools/task.md b/packages/coding-agent/src/prompts/tools/task.md
-index 1351fd7626..b1c89768e1 100644
+index 1ba2f175a0..ae0fef896a 100644
 --- a/packages/coding-agent/src/prompts/tools/task.md
 +++ b/packages/coding-agent/src/prompts/tools/task.md
-@@ -30,6 +30,7 @@ Price counts when you choose: use the cheapest tier that does the work reliably,
- Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{#if tier}} ({{tier}}){{/if}}{{/list}}{{else}}none{{/if}}.
- Unsure (wording fits several roles or none, or the user's intent is unclear)? Do not guess: call `ask` with the roles as options before spawning, if you have `ask`. Rare. NEVER ask when one role clearly matches.
- Only operator-approved models; no arrays, globs or partial IDs. Also approved: {{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model. A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.{{#if perCallModelAdvertisement.allowlist.length}} Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).{{/if}} An agent's `task.agentModelOverrides` entry conflicts with `model`. Requested model unavailable → stop and report; NEVER substitute another. Every request requires an approved model; retry fallback, context promotion and prewalk are off.
-+Running agent, and the user names a model or tier for it ("use haiku for RefactorWork") → do not respawn: call `write` with `path: "proc://<agent name>/model"` and `content` the same `@role`, price tier or exact ID chosen by the rules above. The agent keeps its context and current request; its next model request uses the new model. Same approval as `model`; a finished agent is refused and changes nothing.
- {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
- {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
- {{else}}`isolated`: worktree; changes retained, not applied.
+@@ -72,6 +72,7 @@ Run one agent synchronously.
+   - An agent's `task.agentModelOverrides` entry or user-chosen effort conflicts with `model`.
+   - Requested model unavailable → stop and report; NEVER substitute another.
+   - Every request requires an approved model; retry fallback, context promotion and prewalk are off.
++  - Running agent, and the user names a model or tier for it ("use haiku for RefactorWork") → do not respawn: call `write` with `path: "proc://<agent name>/model"` and `content` the same `@role`, price tier or exact ID chosen by the rules above. The agent keeps its context and current request; its next model request uses the new model. Same approval as `model`; a finished agent is refused and changes nothing.
+ {{/if}}
+ {{#if structured}}
+ - `schemaMode`: default permissive warns after retries; strict fails.
+diff --git a/packages/coding-agent/src/session/agent-session-handle.ts b/packages/coding-agent/src/session/agent-session-handle.ts
+index e26c244a72..e2db25ffcd 100644
+--- a/packages/coding-agent/src/session/agent-session-handle.ts
++++ b/packages/coding-agent/src/session/agent-session-handle.ts
+@@ -36,6 +36,7 @@ import type {
+ 	DequeuedMessage,
+ 	EphemeralTurnOptions,
+ 	EphemeralTurnResult,
++	ModelSwitchOptions,
+ 	Prewalk,
+ 	PromptOptions,
+ 	ResolvedRoleModel,
+@@ -159,6 +160,16 @@ export interface AgentSessionHandle {
+ 	}): Promise<void>;
+ 	/** Replace the pooled-turn yield contract. */
+ 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void>;
++	/**
++	 * Select a model for the next model request without interrupting the turn in flight: a streaming session
++	 * finishes the request it is serving on its current model, an idle one switches now.
++	 * @returns `"applied"` when the model changed now, `"queued"` when it waits for the next request
++	 */
++	switchModelAtNextRequest(
++		model: Model,
++		thinkingLevel?: ConfiguredThinkingLevel,
++		options?: ModelSwitchOptions,
++	): Promise<"applied" | "queued">;
+ 	/** Dispose the session and release its resources. */
+ 	dispose(options?: AgentSessionDisposeOptions): Promise<void>;
+ }
+diff --git a/packages/coding-agent/src/session/agent-session-types.ts b/packages/coding-agent/src/session/agent-session-types.ts
+index 56fe7892e6..aff503ab04 100644
+--- a/packages/coding-agent/src/session/agent-session-types.ts
++++ b/packages/coding-agent/src/session/agent-session-types.ts
+@@ -448,6 +448,17 @@ export interface AgentSessionConfig {
+ 	autoTitle?: boolean;
+ }
+ 
++/** Options for `AgentSessionHandle.switchModelAtNextRequest`. */
++export interface ModelSwitchOptions {
++	/** Refuse a model that cannot run at or below this effort, and clamp the thinking level to it. */
++	effortCeiling?: Effort;
++	/**
++	 * The user chose the model in the session's own view. A session homed on another thread applies its
++	 * model policy there, where the policy lives (see `task/subagent-model-policy.ts`).
++	 */
++	operator?: boolean;
++}
++
+ /** Options for AgentSession.prompt(). */
+ export interface PromptOptions {
+ 	/** Whether to expand file-based prompt templates (default: true). */
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index bcea56f24b..fef1f5b406 100644
+index 3ea1fcc994..8fe487f635 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -126,6 +126,7 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
+@@ -138,6 +138,7 @@ import { cfgOffline } from "../config/auxiliary-model-policy";
  import type { ModelRegistry } from "../config/model-registry";
  import {
  	disabledProviderIds,
@@ -275,7 +328,24 @@ index bcea56f24b..fef1f5b406 100644
  	getModelMatchPreferences,
  	type ResolvedModelRoleValue,
  	resolveCliModel,
-@@ -1167,6 +1168,8 @@ export class AgentSession implements SettingsScope {
+@@ -244,6 +245,8 @@ import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+ import { toolReadsSkillUris } from "../system-prompt";
+ import {
+ 	AUTO_THINKING,
++	assertModelSupportsEffortCeiling,
++	clampThinkingLevelToCeiling,
+ 	type ConfiguredThinkingLevel,
+ 	parseConfiguredThinkingLevel,
+ 	shouldDisableReasoning,
+@@ -335,6 +338,7 @@ import type {
+ 	FollowUpOptions,
+ 	FreshSessionResult,
+ 	ModelCycleResult,
++	ModelSwitchOptions,
+ 	Prewalk,
+ 	PromptOptions,
+ 	ResetSessionContextResult,
+@@ -1359,6 +1363,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  	#modeExitDrainSuppressionDepth = 0;
  	#usagePreflightReadyForNextModelCall = false;
  	#usagePreflightReadyModel: Model | undefined;
@@ -284,7 +354,7 @@ index bcea56f24b..fef1f5b406 100644
  	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
  	#detachUsageBeforeModelCall: (() => void) | undefined;
  	/** Claude account lane (`cred:<id>`/`key:<hash>`) that served the latest Anthropic request. */
-@@ -2194,6 +2197,8 @@ export class AgentSession implements SettingsScope {
+@@ -2504,6 +2510,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  			}
  		});
  		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
@@ -293,15 +363,15 @@ index bcea56f24b..fef1f5b406 100644
  		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
  			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
  			if (this.#usagePreflightReadyForNextModelCall) {
-@@ -6186,6 +6191,7 @@ export class AgentSession implements SettingsScope {
- 		for (const dispose of this.#disposers.splice(0)) dispose();
+@@ -7026,6 +7034,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		if (this.#runActive) this.#closeRun();
  		this.#modelDiscoveryAbortController.abort();
  		this.#queuedMessageDrainBlocked = false;
 +		this.#pendingModelSwitch = undefined;
  		this.#usagePreflightReadyForNextModelCall = false;
  		this.#detachUsageBeforeQueueDequeue?.();
  		this.#detachUsageBeforeQueueDequeue = undefined;
-@@ -6945,7 +6951,8 @@ export class AgentSession implements SettingsScope {
+@@ -7809,7 +7818,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
  	 * its model calls are built from, appending a newer one when either changes: signed thinking is
  	 * bound to the system prompt and tools, so cold revival must replay them. A per-turn override is
@@ -311,7 +381,7 @@ index bcea56f24b..fef1f5b406 100644
  	 * without a `session_init` are left alone.
  	 */
  	#recordModelCallSystemPrompt(prompt: string[]): void {
-@@ -6960,7 +6967,12 @@ export class AgentSession implements SettingsScope {
+@@ -7824,7 +7834,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		const base = this.#tools.baseOfSystemPrompt(prompt);
  		const items = this.#workPoolYieldItems;
  		const persistedItems = init.workPoolYieldItems ?? [];
@@ -324,7 +394,7 @@ index bcea56f24b..fef1f5b406 100644
  			base.length === init.systemPrompt.length &&
  			base.every((block, index) => block === init.systemPrompt[index]) &&
  			items.length === persistedItems.length &&
-@@ -6970,7 +6982,14 @@ export class AgentSession implements SettingsScope {
+@@ -7834,7 +7849,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		) {
  			return;
  		}
@@ -340,8 +410,8 @@ index bcea56f24b..fef1f5b406 100644
  		this.sessionManager.appendSessionInit(cached.init);
  	}
  
-@@ -11672,6 +11691,54 @@ export class AgentSession implements SettingsScope {
- 		return this.#models.setModelTemporary(model, thinkingLevel, options);
+@@ -13103,6 +13125,63 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		await this.#models.setModelTemporary(model, thinkingLevel, options);
  	}
  
 +	/**
@@ -356,9 +426,18 @@ index bcea56f24b..fef1f5b406 100644
 +	async switchModelAtNextRequest(
 +		model: Model,
 +		thinkingLevel?: ConfiguredThinkingLevel,
++		options?: ModelSwitchOptions,
 +	): Promise<"applied" | "queued"> {
 +		if (!this.#modelRegistry.hasConfiguredAuth(model)) {
 +			throw new Error(`No API key for ${model.provider}/${model.id}`);
++		}
++		// A switch held to `task.maxEffort` is held to it in its thinking level too.
++		if (options?.effortCeiling) {
++			assertModelSupportsEffortCeiling(model, options.effortCeiling);
++			const base = thinkingLevel ?? this.configuredThinkingLevel();
++			if (base !== undefined && base !== AUTO_THINKING) {
++				thinkingLevel = clampThinkingLevelToCeiling(model, base, options.effortCeiling);
++			}
 +		}
 +		if (!this.isStreaming) {
 +			this.#pendingModelSwitch = undefined;
@@ -396,10 +475,39 @@ index bcea56f24b..fef1f5b406 100644
  	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
  		return this.#models.cycleModel(direction);
 diff --git a/packages/coding-agent/src/slash-commands/builtin-modes.ts b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-index 1b78c316b4..10f5fd59b3 100644
+index f9dd630d7f..9eeb535344 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-modes.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-@@ -495,7 +495,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+@@ -2,6 +2,7 @@ import { clearSubmittedText, runWithDetachedDraft } from "./helpers/draft";
+ import * as path from "node:path";
+ import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
++import type { Model } from "@oh-my-pi/pi-ai";
+ import { prompt } from "@oh-my-pi/pi-utils";
+ import {
+ 	formatModelString,
+@@ -9,6 +10,7 @@ import {
+ 	resolveCliModel,
+ 	type ResolveCliModelResult,
+ } from "../config/model-resolver";
++import type { ModelRegistry } from "../config/model-registry";
+ import type { Settings } from "../config/settings";
+ import {
+ 	applyModelPreset,
+@@ -59,10 +61,10 @@ export function refreshStatusLine(ctx: InteractiveModeContext): void {
+  */
+ function resolveSessionModelSelector(
+ 	selector: string,
+-	session: AgentSession,
++	session: { readonly modelRegistry: ModelRegistry; readonly scopedModels?: ReadonlyArray<{ readonly model: Model }> },
+ 	settings: Settings,
+ ): ResolveCliModelResult {
+-	const scoped = session.scopedModels.map(entry => entry.model);
++	const scoped = (session.scopedModels ?? []).map(entry => entry.model);
+ 	return resolveCliModel({
+ 		cliModel: selector,
+ 		modelRegistry: session.modelRegistry,
+@@ -495,7 +497,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
  				runtime.ctx.showModelSelector({ temporaryOnly: true });
  				return;
  			}
@@ -410,10 +518,10 @@ index 1b78c316b4..10f5fd59b3 100644
  				runtime.ctx.showError(`Unknown model: ${selector}`);
  				return;
 diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
-index 70d6d7b039..8ac2523af8 100644
+index 97fdec07d0..151138153f 100644
 --- a/packages/coding-agent/src/task/executor.ts
 +++ b/packages/coding-agent/src/task/executor.ts
-@@ -29,6 +29,7 @@ import {
+@@ -45,6 +45,7 @@ import {
  	resolveAgentAdvisorSelection,
  	resolveAgentPrewalkPattern,
  	resolveConfiguredModelPatterns,
@@ -421,16 +529,16 @@ index 70d6d7b039..8ac2523af8 100644
  	resolveExplicitModelRole,
  	resolveModelOverride,
  	resolveModelOverrideWithAuthFallback,
-@@ -79,7 +80,7 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
- import type { AuthStorage } from "../session/auth-storage";
- import type { CostGate } from "../session/cost-gate";
- import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+@@ -99,7 +100,7 @@ import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/
+ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
+ import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
+ import type { CompletionJournal } from "../session/model-usage-journal";
 -import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 +import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
  import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
  import {
  	AUTO_THINKING,
-@@ -135,6 +136,7 @@ import {
+@@ -157,6 +158,7 @@ import {
  } from "@oh-my-pi/pi-tui/tools/task";
  import { yieldSectionShapes } from "./yield-assembly";
  import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
@@ -438,7 +546,7 @@ index 70d6d7b039..8ac2523af8 100644
  import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
  import {
  	cfgTaskPrewalk,
-@@ -4093,6 +4095,8 @@ interface WarmReviveCapture {
+@@ -4448,6 +4450,8 @@ interface WarmReviveCapture {
  	spec: SubagentSessionSpec;
  	/** A per-call worker never switches models; its warm revive keeps only the exact saved model. */
  	perCallModel: boolean;
@@ -446,11 +554,11 @@ index 70d6d7b039..8ac2523af8 100644
 +	modelPolicy: SubagentModelPolicy;
  	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
  	settings: SubagentSettingsRecipe;
- 	parentArtifactManager: ArtifactManager | undefined;
-@@ -4186,6 +4190,15 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
- 			capture.spec.preparedSession || capture.perCallModel
- 				? undefined
- 				: reopened.getSessionLocalModelChange()?.model;
+ 	parentArtifactManager: ArtifactManagerApi | undefined;
+@@ -4540,6 +4544,15 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+ 		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent.
+ 		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
+ 		const sessionLocalModel = capture.perCallModel ? undefined : reopened.getSessionLocalModelChange()?.model;
 +		// A per-call worker revives on the exact model it last ran on, which a model switch may have moved off the spawn's.
 +		const savedInit = capture.perCallModel ? extractSessionInit(reopened.getEntries()) : null;
 +		const spawnModel = capture.spec.options.model;
@@ -463,7 +571,7 @@ index 70d6d7b039..8ac2523af8 100644
  		try {
  			try {
  				const options = buildSubagentSessionOptions(
-@@ -4212,6 +4225,9 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+@@ -4567,6 +4580,9 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  								thinkingLevel: undefined,
  							}
  						: undefined),
@@ -473,7 +581,7 @@ index 70d6d7b039..8ac2523af8 100644
  					oauthAccountPools: Object.hasOwn(agentAccountPools, capture.agentName)
  						? agentAccountPools[capture.agentName]
  						: undefined,
-@@ -4222,6 +4238,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+@@ -4577,6 +4593,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  			}
  			mcpFollower?.bind(revived);
  			trackSubagentSettings(revived, capture);
@@ -481,7 +589,7 @@ index 70d6d7b039..8ac2523af8 100644
  			trackSubagentPendingCandidate(revived, capture);
  			trackSubagentIrcRoster(revived, capture.spec.prompt);
  			const withoutParentOwnedTools = (toolNames: string[]): string[] =>
-@@ -4754,6 +4771,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+@@ -5168,6 +5185,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
  			}
  
  			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
@@ -494,38 +602,38 @@ index 70d6d7b039..8ac2523af8 100644
  			// Rebuilding an equivalent session from the same JSONL file re-invokes
  			// createAgentSession with this spec (same agent id, tools, model, system
  			// prompt, artifacts dir) — only the SessionManager and settings differ.
-@@ -4781,7 +4804,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
- 						? {
- 								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
- 								assertDispatchModel: (dispatchModel: Model) => {
--									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
-+									if (!modelPolicy.admitsOperatorModel(dispatchModel)) {
-+										assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
-+									}
- 									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
- 								},
- 								disableModelFallback: true,
-@@ -4931,6 +4956,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+@@ -5198,7 +5221,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 										throw new Error("Offline mode: subagent dispatch must use the active parent provider.");
+ 									}
+ 									if (perCallModelGrants) {
+-										assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
++										if (!modelPolicy.admitsOperatorModel(dispatchModel)) {
++											assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
++										}
+ 										if (spawnEffortCeiling)
+ 											assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+ 									}
+@@ -5347,6 +5372,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
  			sessionCreatedAt = performance.now();
  
  			monitor.setActiveSession(session);
 +			trackSubagentModelPolicy(session, modelPolicy);
- 			if (preparedSession) untrackedSession = undefined;
- 			// Run-state notifications precede deferrable wire-level `agent_end`,
- 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
-@@ -4960,6 +4986,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 			// Neither the agent's patterns nor the parent's model resolved (the session
+ 			// says why): name the agent and the setting to fix instead of letting the
+ 			// first prompt fail with the generic `/login` error.
+@@ -5391,6 +5417,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
  					sessionFile,
  					spec: sessionSpec,
  					perCallModel: perCallModelGrants !== undefined,
 +					modelPolicy,
  					settings: captureSubagentSettings(settings, subagentSettings),
- 					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
+ 					parentArtifactManager: options.parentArtifactManager,
  					keepTodo: prewalk !== undefined,
 diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
-index 72e562836a..ecaf88f708 100644
+index 66e15b124f..a81b219a2c 100644
 --- a/packages/coding-agent/src/task/index.ts
 +++ b/packages/coding-agent/src/task/index.ts
-@@ -60,7 +60,9 @@ import { InternalUrlRouter } from "../internal-urls/router";
+@@ -50,7 +50,9 @@ import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
  import { AgentRegistry, isResumable } from "../registry/agent-registry";
  import { type DiscoveryResult, discoverAgents } from "./discovery";
  import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
@@ -535,7 +643,7 @@ index 72e562836a..ecaf88f708 100644
  import { type TieredModelAdvertisement, tierAdvertisedRoles } from "./model-economy";
  import { generateTaskName } from "./name-generator";
  import { AgentOutputManager } from "./output-manager";
-@@ -98,6 +100,10 @@ import {
+@@ -89,6 +91,10 @@ import {
  	perCallModelEnabled,
  } from "./settings";
  
@@ -548,10 +656,10 @@ index 72e562836a..ecaf88f708 100644
  		input: 0,
 diff --git a/packages/coding-agent/src/task/model-switch.ts b/packages/coding-agent/src/task/model-switch.ts
 new file mode 100644
-index 0000000000..28ecea8aee
+index 0000000000..3fc1815a33
 --- /dev/null
 +++ b/packages/coding-agent/src/task/model-switch.ts
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,122 @@
 +/**
 + * The parent agent's switch of a running subagent's model (`write proc://<id>/model`).
 + *
@@ -560,17 +668,12 @@ index 0000000000..28ecea8aee
 + * and the model must be an available chat model the operator's configuration grants
 + * ({@link assertPerCallModelApproved}, including `task.perCallModelAllow` and `task.maxEffort`). Only the
 + * agent that spawned the subagent may switch it, and only while it runs. The switch itself applies at
-+ * the subagent's next model request ({@link AgentSession.switchModelAtNextRequest}); the user's own
++ * the subagent's next model request ({@link AgentSessionHandle.switchModelAtNextRequest}); the user's own
 + * switch in the subagent's view is ungated ({@link switchSubagentModelAsOperator}).
 + */
 +import type { Api, Model } from "@oh-my-pi/pi-ai";
 +import { modelKind } from "@oh-my-pi/pi-catalog/types";
-+import {
-+	AUTO_THINKING,
-+	assertModelSupportsEffortCeiling,
-+	type ConfiguredThinkingLevel,
-+	clampThinkingLevelToCeiling,
-+} from "@oh-my-pi/pi-tui/thinking";
++import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 +import { getModelMatchPreferences, resolveModelOverride } from "../config/model-resolver";
 +import type { ToolSession } from "../tools";
 +import { assertPerCallModelApproved, parentModelGrantPattern, type PerCallModelGrants } from "./model-approval";
@@ -666,94 +769,88 @@ index 0000000000..28ecea8aee
 +	};
 +	assertPerCallModelApproved(model, grants, modelRegistry);
 +
-+	// A caller-chosen model is held to `task.maxEffort` like a per-call spawn, and so is its thinking level.
-+	let thinkingLevel: ConfiguredThinkingLevel | undefined = resolved.explicitThinkingLevel
++	// A caller-chosen model is held to `task.maxEffort` like a per-call spawn, and so is its thinking level;
++	// the session applies the ceiling, because its configured level is read where the session lives.
++	const thinkingLevel: ConfiguredThinkingLevel | undefined = resolved.explicitThinkingLevel
 +		? resolved.thinkingLevel
 +		: undefined;
-+	const ceiling = cfgTaskMaxEffort.get(settings);
-+	if (ceiling) {
-+		assertModelSupportsEffortCeiling(model, ceiling);
-+		const base = thinkingLevel ?? session.configuredThinkingLevel();
-+		if (base !== undefined && base !== AUTO_THINKING) {
-+			thinkingLevel = clampThinkingLevelToCeiling(model, base, ceiling);
-+		}
-+	}
++	const effortCeiling = cfgTaskMaxEffort.get(settings);
 +
 +	// Resolving the selector awaited the model registry; the run may have finished meanwhile.
 +	if (registry?.get(id) !== ref || ref.status !== "running" || ref.session !== session) {
 +		throw new Error(`Agent ${id} finished before its model could change; its model was not changed.`);
 +	}
-+	return { id, model, state: await session.switchModelAtNextRequest(model, thinkingLevel) };
++	return { id, model, state: await session.switchModelAtNextRequest(model, thinkingLevel, { effortCeiling }) };
 +}
 diff --git a/packages/coding-agent/src/task/persisted-revive.ts b/packages/coding-agent/src/task/persisted-revive.ts
-index 205e1b5ee1..d81d777cb8 100644
+index 82c5a852e8..3867496d0f 100644
 --- a/packages/coding-agent/src/task/persisted-revive.ts
 +++ b/packages/coding-agent/src/task/persisted-revive.ts
-@@ -48,6 +48,7 @@ import {
+@@ -57,6 +57,7 @@ import {
  	type PerCallModelGrants,
  } from "./model-approval";
  import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 +import { SubagentModelPolicy, trackSubagentModelPolicy } from "./subagent-model-policy";
- import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
- import { seanceIsolationOptions } from "./seance-policy";
  import type { AgentDefinition } from "./types";
-@@ -185,6 +186,7 @@ export function createPersistedSubagentReviverFactory(
- 					: registry.get(ref.parentId ?? "")?.session;
- 			const parentSession = resolveParentSession();
- 			let perCallModel: Model | undefined;
-+			let configuredAgent: AgentDefinition | undefined;
- 			let assertApprovedModel: ((model: Model) => void) | undefined;
- 			if (init.perCallModel) {
- 				try {
-@@ -203,7 +205,7 @@ export function createPersistedSubagentReviverFactory(
- 					// File definitions follow the live parent's discovery scope; a missing parent
- 					// can use current root file discovery, never unrelated root-local pseudonyms.
- 					const discoverySession = parentSession ?? ctx.session;
--					const configuredAgent = init.agent
-+					configuredAgent = init.agent
- 						? getAgent(
- 								[
- 									...(
-@@ -338,6 +340,17 @@ export function createPersistedSubagentReviverFactory(
- 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
- 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
  
-+			// Who may change the revived agent's model: its dispatch gate admits the user's own choices. The
-+			// definition is only looked up for a per-call worker, so any other agent's frontmatter grants nothing.
-+			const modelPolicy = new SubagentModelPolicy({
-+				agent: {
-+					name: init.agent ?? ref.displayName,
-+					source: configuredAgent?.source,
-+					model: configuredAgent?.model,
-+					removed: configuredAgent === undefined,
-+				},
-+				effortCeiling: assertApprovedModel ? cfgTaskMaxEffort.get(ctx.settings) : undefined,
-+			});
- 			let session: AgentSession;
- 			try {
- 				({ session } = await createAgentSession({
-@@ -385,7 +398,7 @@ export function createPersistedSubagentReviverFactory(
- 								disableModelFallback: true,
- 								disableServerSideFallback: true,
- 								assertDispatchModel: (model: Model) => {
--									assertApprovedModel(model);
-+									if (!modelPolicy.admitsOperatorModel(model)) assertApprovedModel(model);
- 									assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(ctx.settings));
- 								},
- 							}
-@@ -443,6 +456,7 @@ export function createPersistedSubagentReviverFactory(
- 				}
- 			}
- 			mcpFollower?.bind(session);
-+			trackSubagentModelPolicy(session, modelPolicy);
- 			// Clamp the active set to the persisted list: createAgentSession's
- 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
- 			// the original run didn't carry. Unknown/missing names are ignored.
+ /**
+@@ -256,6 +257,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 		ref.parentId === spec.rootAgentId ? spec.root : registry.get(ref.parentId ?? "")?.session;
+ 	const parentSession = resolveParentSession();
+ 	let perCallModel: Model | undefined;
++	let configuredAgent: AgentDefinition | undefined;
+ 	let assertApprovedModel: ((model: Model) => void) | undefined;
+ 	if (init.perCallModel) {
+ 		try {
+@@ -274,7 +276,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 			// File definitions follow the live parent's discovery scope; a missing parent
+ 			// can use current root file discovery, never unrelated root-local pseudonyms.
+ 			const discoverySession = parentSession ?? spec.root;
+-			const configuredAgent = init.agent
++			configuredAgent = init.agent
+ 				? getAgent(
+ 						[
+ 							...(
+@@ -404,6 +406,17 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 	const mcpFollower = mcpManager ? followMCPTools(mcpManager, { scope: reopened.getSessionId() }) : undefined;
+ 	const mcpProxyTools = mcpFollower?.proxyTools() ?? [];
+ 
++	// Who may change the revived agent's model: its dispatch gate admits the user's own choices. The
++	// definition is only looked up for a per-call worker, so any other agent's frontmatter grants nothing.
++	const modelPolicy = new SubagentModelPolicy({
++		agent: {
++			name: init.agent ?? ref.displayName,
++			source: configuredAgent?.source,
++			model: configuredAgent?.model,
++			removed: configuredAgent === undefined,
++		},
++		effortCeiling: assertApprovedModel ? cfgTaskMaxEffort.get(spec.settings) : undefined,
++	});
+ 	let session: AgentSession;
+ 	try {
+ 		({ session } = await createAgentSession({
+@@ -435,7 +448,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 						disableModelFallback: true,
+ 						disableServerSideFallback: true,
+ 						assertDispatchModel: (model: Model) => {
+-							assertApprovedModel(model);
++							if (!modelPolicy.admitsOperatorModel(model)) assertApprovedModel(model);
+ 							assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(spec.settings));
+ 						},
+ 					}
+@@ -496,6 +509,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 		}
+ 	}
+ 	mcpFollower?.bind(session);
++	trackSubagentModelPolicy(session, modelPolicy);
+ 	// Clamp the active set to the persisted list: createAgentSession's
+ 	// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
+ 	// the original run didn't carry. Unknown/missing names are ignored.
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index 9d5b122b8f..835ddd0d70 100644
+index 72e3fb0156..a205dde45f 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
-@@ -365,7 +365,11 @@ function perCallModelDisabledReason(settings: Settings, invocationKind: "task" |
+@@ -385,7 +385,11 @@ export function normalizeModelSelector<T>(model: T): T | undefined {
   * configured that role. Roles resolve against {@link Settings.grantAuthority} only: a project
   * file cannot define a role a caller may then select, and built-in role defaults select nothing.
   */
@@ -766,7 +863,7 @@ index 9d5b122b8f..835ddd0d70 100644
  	if (invocationKind !== "task" || typeof model !== "string") return undefined;
  	const selector = model.trim();
  	if (!/^@[^\s,*?[\]{}/]+$/.test(selector)) return undefined;
-@@ -375,7 +379,7 @@ function callerModelRole(model: unknown, settings: Settings, invocationKind: "ta
+@@ -395,7 +399,7 @@ function callerModelRole(model: unknown, settings: Settings, invocationKind: "ta
  }
  
  /** A `$` to `$$$$` price tier in a task call's `model`. Only task calls take one; eval calls need an exact selector. */
@@ -775,7 +872,7 @@ index 9d5b122b8f..835ddd0d70 100644
  	return invocationKind === "task" ? parseTier(model) : undefined;
  }
  
-@@ -414,7 +418,10 @@ export function invalidModelSelectorReason(
+@@ -434,7 +438,10 @@ export function invalidModelSelectorReason(
   * dispatched and revived exactly like an exact per-call model. The role is read from the operator's
   * settings; its retry-fallback chain does not apply because a per-call worker never switches models.
   */
@@ -787,7 +884,7 @@ index 9d5b122b8f..835ddd0d70 100644
  	const { settings, modelRegistry } = request.session;
  	const fail = (message: string): never => {
  		throw new StructuredSubagentError("preflight", message);
-@@ -436,7 +443,10 @@ async function resolveCallerRoleSelector(request: StructuredSubagentRequest, sel
+@@ -456,7 +463,10 @@ async function resolveCallerRoleSelector(request: StructuredSubagentRequest, sel
   * The configured role a price tier stands for, so a tier request is approved, dispatched and revived like
   * that role. The nearest tier answers when none matches; the most used role wins within a tier.
   */
@@ -801,10 +898,10 @@ index 9d5b122b8f..835ddd0d70 100644
  		throw new StructuredSubagentError(
 diff --git a/packages/coding-agent/src/task/subagent-model-policy.ts b/packages/coding-agent/src/task/subagent-model-policy.ts
 new file mode 100644
-index 0000000000..40b960a5cf
+index 0000000000..87925f8d42
 --- /dev/null
 +++ b/packages/coding-agent/src/task/subagent-model-policy.ts
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,111 @@
 +/**
 + * What may change a running subagent's model, held per live session.
 + *
@@ -812,13 +909,14 @@ index 0000000000..40b960a5cf
 + * model in the subagent's view) is not gated: the choice is theirs, so the child's per-call dispatch
 + * gate admits it. The parent agent acts for a model-facing caller and must pass the approval a task
 + * `model` passes ({@link switchSubagentModelAsCaller}). Both reach the session's
-+ * {@link AgentSession.switchModelAtNextRequest}, so a switch never interrupts the request in flight.
++ * {@link AgentSessionHandle.switchModelAtNextRequest}, so a switch never interrupts the request in flight.
 + */
 +import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
 +import { assertModelSupportsEffortCeiling, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 +import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 +import { formatModelStringWithRouting } from "../config/model-resolver";
-+import type { AgentSession } from "../session/agent-session";
++import type { AgentSessionHandle } from "../session/agent-session-handle";
++import type { ModelSwitchOptions } from "../session/agent-session-types";
 +import type { PerCallModelGrants } from "./model-approval";
 +
 +/** The agent definition a child runs, as far as model grants read it. */
@@ -871,14 +969,17 @@ index 0000000000..40b960a5cf
 +	}
 +}
 +
-+const policies = new WeakMap<AgentSession, SubagentModelPolicy>();
++const policies = new WeakMap<AgentSessionHandle, SubagentModelPolicy>();
 +
-+/** Binds `policy` to a live child session; spawn and both revival paths call it for every session they build. */
-+export function trackSubagentModelPolicy(session: AgentSession, policy: SubagentModelPolicy): void {
++/**
++ * Binds `policy` to a live child session; spawn and both revival paths call it for every session they build.
++ * A session homed on another thread is known to this thread only by a handle, so its policy lives on its home thread.
++ */
++export function trackSubagentModelPolicy(session: AgentSessionHandle, policy: SubagentModelPolicy): void {
 +	policies.set(session, policy);
 +}
 +
-+export function subagentModelPolicy(session: AgentSession): SubagentModelPolicy | undefined {
++export function subagentModelPolicy(session: AgentSessionHandle): SubagentModelPolicy | undefined {
 +	return policies.get(session);
 +}
 +
@@ -886,32 +987,205 @@ index 0000000000..40b960a5cf
 + * The operator's switch: the user chose `model` for `session` in its view. Nothing but the model's own
 + * requirements apply, so `task.perCallModel`, grants and `task.perCallModelAllow` are not consulted; a
 + * child held to a `task.maxEffort` ceiling still refuses a model that cannot run at or below it. The
-+ * model applies at the session's next request ({@link AgentSession.switchModelAtNextRequest}).
++ * model applies at the session's next request ({@link AgentSessionHandle.switchModelAtNextRequest}).
++ * A session homed on another thread judges the switch on its home thread, where its policy is held.
 + * @returns `"applied"` when the model changed now, `"queued"` when it waits for the next request
 + */
 +export async function switchSubagentModelAsOperator(
-+	session: AgentSession,
++	session: AgentSessionHandle,
 +	model: Model<Api>,
 +	thinkingLevel?: ConfiguredThinkingLevel,
++	options?: ModelSwitchOptions,
 +): Promise<"applied" | "queued"> {
 +	const policy = subagentModelPolicy(session);
 +	if (policy?.effortCeiling) assertModelSupportsEffortCeiling(model, policy.effortCeiling);
 +	// The dispatch gate must admit the model before the request that uses it.
 +	const added = policy?.approveOperatorModel(model) ?? false;
 +	try {
-+		return await session.switchModelAtNextRequest(model, thinkingLevel);
++		// Without a local policy the session is homed elsewhere: forward the operator's authority there.
++		return await session.switchModelAtNextRequest(
++			model,
++			thinkingLevel,
++			policy ? options : { ...options, operator: true },
++		);
 +	} catch (error) {
 +		if (added) policy?.revokeOperatorModel(model);
 +		throw error;
 +	}
 +}
+diff --git a/packages/coding-agent/src/thread/peer-agent-session.ts b/packages/coding-agent/src/thread/peer-agent-session.ts
+index 1b05e868a5..4301b25831 100644
+--- a/packages/coding-agent/src/thread/peer-agent-session.ts
++++ b/packages/coding-agent/src/thread/peer-agent-session.ts
+@@ -11,6 +11,7 @@
+  */
+ import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+ import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
++import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+ import { logger } from "@oh-my-pi/pi-utils";
+ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+ import type { EffectiveExtensionRoots } from "../capability/types";
+@@ -23,6 +24,7 @@ import type {
+ import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
+ import type {
+ 	AgentSessionDisposeOptions,
++	ModelSwitchOptions,
+ 	PromptOptions,
+ 	SessionStats,
+ 	SteerOptions,
+@@ -34,12 +36,13 @@ import type { WorkPoolYieldItem } from "../task/workpool-yield";
+ import type { ThreadId } from "./identity";
+ import { emptyMirrorState } from "./remote-agent-session";
+ import { findRemoteSession, rememberRemoteSession } from "./session-directory";
+-import type {
+-	PeerStateField,
+-	SessionAbortOptions,
+-	SessionBridgeClient,
+-	SessionMirrorState,
+-	SessionRunState,
++import {
++	type PeerStateField,
++	type SessionAbortOptions,
++	type SessionBridgeClient,
++	type SessionMirrorState,
++	type SessionRunState,
++	toWireData,
+ } from "./session-mirror";
+ 
+ let bridge: SessionBridgeClient | undefined;
+@@ -229,6 +232,14 @@ export class PeerAgentSession implements AgentSessionHandle {
+ 		return mainBridge().remote.call("setWorkPoolYieldItems", this, items);
+ 	}
+ 
++	switchModelAtNextRequest(
++		model: Model,
++		thinkingLevel?: ConfiguredThinkingLevel,
++		options?: ModelSwitchOptions,
++	): Promise<"applied" | "queued"> {
++		return mainBridge().remote.call("switchModelAtNextRequest", this, toWireData(model), thinkingLevel, options);
++	}
++
+ 	dispose(options?: AgentSessionDisposeOptions): Promise<void> {
+ 		return mainBridge().remote.call("dispose", this, options);
+ 	}
+diff --git a/packages/coding-agent/src/thread/remote-agent-session.ts b/packages/coding-agent/src/thread/remote-agent-session.ts
+index e9d07ea441..a9d90e1a21 100644
+--- a/packages/coding-agent/src/thread/remote-agent-session.ts
++++ b/packages/coding-agent/src/thread/remote-agent-session.ts
+@@ -68,6 +68,7 @@ import type {
+ 	DequeuedMessage,
+ 	EphemeralTurnOptions,
+ 	EphemeralTurnResult,
++	ModelSwitchOptions,
+ 	Prewalk,
+ 	PromptOptions,
+ 	ResolvedRoleModel,
+@@ -834,6 +835,14 @@ export class RemoteAgentSession implements AgentViewSession {
+ 		return this.#command("setWorkPoolYieldItems", items);
+ 	}
+ 
++	switchModelAtNextRequest(
++		model: Model,
++		thinkingLevel?: ConfiguredThinkingLevel,
++		options?: ModelSwitchOptions,
++	): Promise<"applied" | "queued"> {
++		return this.#command("switchModelAtNextRequest", toWireData(model), thinkingLevel, options);
++	}
++
+ 	/** Dispose on the home worker; a session that is already gone counts as disposed. */
+ 	async dispose(options?: AgentSessionDisposeOptions): Promise<void> {
+ 		if (this.#closed !== undefined) return;
+diff --git a/packages/coding-agent/src/thread/services/agents.ts b/packages/coding-agent/src/thread/services/agents.ts
+index c21c6f7583..fbbaa8a491 100644
+--- a/packages/coding-agent/src/thread/services/agents.ts
++++ b/packages/coding-agent/src/thread/services/agents.ts
+@@ -243,6 +243,8 @@ function serveBridge(): RpcServe<MainSessionBridge, SessionBridgeProtocol> {
+ 		deliverIrcMessage: (_bridge, session, msg) => session.deliverIrcMessage(msg),
+ 		waitForIrcReplies: (_bridge, session) => session.waitForIrcReplies(),
+ 		setWorkPoolYieldItems: (_bridge, session, items) => session.setWorkPoolYieldItems(items),
++		switchModelAtNextRequest: (_bridge, session, model, thinkingLevel, options) =>
++			session.switchModelAtNextRequest(model, thinkingLevel, options),
+ 		emitIrcRelayObservation: (_bridge, session, record) => session.emitIrcRelayObservation(record),
+ 	};
+ }
+diff --git a/packages/coding-agent/src/thread/session-mirror.ts b/packages/coding-agent/src/thread/session-mirror.ts
+index 7ab230beaf..e36b736ba3 100644
+--- a/packages/coding-agent/src/thread/session-mirror.ts
++++ b/packages/coding-agent/src/thread/session-mirror.ts
+@@ -43,6 +43,7 @@ import type {
+ 	AgentSessionDisposeOptions,
+ 	EphemeralTurnOptions,
+ 	EphemeralTurnResult,
++	ModelSwitchOptions,
+ 	Prewalk,
+ 	PromptOptions,
+ 	ResolvedRoleModel,
+@@ -232,6 +233,10 @@ export type SessionHostProtocol = {
+ 	deliverIrcMessage: RpcMethod<[msg: IrcMessage], "injected" | "woken">;
+ 	waitForIrcReplies: RpcMethod<[], void>;
+ 	setWorkPoolYieldItems: RpcMethod<[items: readonly WorkPoolYieldItem[]], void>;
++	switchModelAtNextRequest: RpcMethod<
++		[model: Model, thinkingLevel?: ConfiguredThinkingLevel, options?: ModelSwitchOptions],
++		"applied" | "queued"
++	>;
+ 	emitIrcRelayObservation: RpcMethod<[record: CustomMessage], void>;
+ 	/** Start (true) or stop (false) forwarding the full event stream and the view state. */
+ 	watch: RpcMethod<[on: boolean], void>;
+@@ -307,6 +312,15 @@ export type SessionBridgeProtocol = {
+ 	deliverIrcMessage: RpcMethod<[session: AgentSessionHandle, msg: IrcMessage], "injected" | "woken">;
+ 	waitForIrcReplies: RpcMethod<[session: AgentSessionHandle], void>;
+ 	setWorkPoolYieldItems: RpcMethod<[session: AgentSessionHandle, items: readonly WorkPoolYieldItem[]], void>;
++	switchModelAtNextRequest: RpcMethod<
++		[
++			session: AgentSessionHandle,
++			model: Model,
++			thinkingLevel?: ConfiguredThinkingLevel,
++			options?: ModelSwitchOptions,
++		],
++		"applied" | "queued"
++	>;
+ 	emitIrcRelayObservation: RpcMethod<[session: AgentSessionHandle, record: CustomMessage], void>;
+ };
+ 
+diff --git a/packages/coding-agent/src/thread/session-publisher.ts b/packages/coding-agent/src/thread/session-publisher.ts
+index 8071984834..f23ac0032b 100644
+--- a/packages/coding-agent/src/thread/session-publisher.ts
++++ b/packages/coding-agent/src/thread/session-publisher.ts
+@@ -63,6 +63,7 @@ import {
+ 	toRestoredQueuedMessage,
+ } from "../session/queued-messages";
+ import type { SessionEntry } from "../session/session-entries";
++import { switchSubagentModelAsOperator } from "../task/subagent-model-policy";
+ import { isRpcProxy, type RpcServe } from "./rpc";
+ import {
+ 	SESSION_STATE_READERS as read,
+@@ -558,6 +559,19 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
+ 	deliverIrcMessage: async (publisher, msg) => settle(publisher, publisher.session.deliverIrcMessage(msg)),
+ 	waitForIrcReplies: async publisher => settle(publisher, publisher.session.waitForIrcReplies()),
+ 	setWorkPoolYieldItems: async (publisher, items) => settle(publisher, publisher.session.setWorkPoolYieldItems(items)),
++	// An operator switch is judged by the model policy of the session's home thread, which is this one.
++	switchModelAtNextRequest: async (publisher, model, thinkingLevel, options) =>
++		settle(
++			publisher,
++			options?.operator
++				? switchSubagentModelAsOperator(
++						publisher.session,
++						localModel(publisher.session, model),
++						thinkingLevel,
++						options,
++					)
++				: publisher.session.switchModelAtNextRequest(localModel(publisher.session, model), thinkingLevel, options),
++		),
+ 	emitIrcRelayObservation: (publisher, record) => publisher.session.emitIrcRelayObservation(record),
+ 	watch: (publisher, on) => publisher.watch(on),
+ 	settleInFlightMessagePersistence: async publisher =>
 diff --git a/packages/coding-agent/test/input-controller-focused-commands.test.ts b/packages/coding-agent/test/input-controller-focused-commands.test.ts
-index 354d21f68b..9270bb8fa7 100644
+index b2254207c0..20efcc9555 100644
 --- a/packages/coding-agent/test/input-controller-focused-commands.test.ts
 +++ b/packages/coding-agent/test/input-controller-focused-commands.test.ts
-@@ -18,6 +18,10 @@ import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/c
- import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+@@ -20,6 +20,10 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
  import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+ import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
  import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 +import type { Model } from "@oh-my-pi/pi-ai";
 +import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -920,7 +1194,7 @@ index 354d21f68b..9270bb8fa7 100644
  
  function createFocusedContext() {
  	let editorText = "";
-@@ -246,6 +250,50 @@ describe("focused subagent view slash commands", () => {
+@@ -256,6 +260,50 @@ describe("focused subagent view slash commands", () => {
  		expect(mainCycleRoles).not.toHaveBeenCalled();
  	});
  
@@ -1001,10 +1275,10 @@ index 1c083586bf..bc8bd6be81 100644
  				showError,
 diff --git a/packages/coding-agent/test/task/subagent-model-switch.test.ts b/packages/coding-agent/test/task/subagent-model-switch.test.ts
 new file mode 100644
-index 0000000000..04ed7c1580
+index 0000000000..fa0178bf13
 --- /dev/null
 +++ b/packages/coding-agent/test/task/subagent-model-switch.test.ts
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,471 @@
 +/**
 + * A running subagent's model changes mid-run without restarting it: the request in flight finishes
 + * on its current model and the next one uses the new model, with the subagent's context intact.
@@ -1035,6 +1309,7 @@ index 0000000000..04ed7c1580
 +import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 +import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 +import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
++import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 +import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 +import { extractSessionInit } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 +import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -1096,16 +1371,16 @@ index 0000000000..04ed7c1580
 +	await removeWithRetries(root);
 +});
 +
-+/** Side requests (titles) carry no `yield` tool; only the agent loop's own requests do. */
++/** Side requests (titles) carry no tools; only the agent loop's own requests carry the child's `read` tool. */
 +function isLoopRequest(context: Context): boolean {
-+	return (context.tools ?? []).some(tool => tool.name === "yield");
++	return (context.tools ?? []).some(tool => tool.name === "read");
 +}
 +
-+function yieldResult(data: string): (context: Context) => MockResponse {
++/** Ends the child's turn with `data` as its final message, which is the report of a child without `yield`. */
++function finishWith(data: string): (context: Context) => MockResponse {
 +	return context => {
 +		if (!isLoopRequest(context)) return { content: ["label"] };
-+		if (context.messages.at(-1)?.role === "toolResult") return { content: ["ok"] };
-+		return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data } }] };
++		return { content: [data] };
 +	};
 +}
 +
@@ -1116,7 +1391,7 @@ index 0000000000..04ed7c1580
 +	firstRequestServing: Promise<void>;
 +	/** Lets `primary` finish that first request (it then asks for one more turn). */
 +	releaseFirstRequest(): void;
-+	/** The subagent's run: settles when it yields. */
++	/** The subagent's run: settles when it finishes its turn. */
 +	run: Promise<unknown>;
 +	/** The tool session of the agent that spawned the subagent. */
 +	parent: ToolSession;
@@ -1158,15 +1433,15 @@ index 0000000000..04ed7c1580
 +				await releaseFirst.promise;
 +				return { content: [{ type: "toolCall", name: "read", arguments: { path: "missing.txt" } }] };
 +			}
-+			return yieldResult("finished on primary")(context);
++			return finishWith("finished on primary")(context);
 +		},
 +	});
 +	const haiku = createMockModel({
 +		id: "haiku",
-+		handler: yieldResult("finished on haiku"),
++		handler: finishWith("finished on haiku"),
 +		...(options.haikuCost ? { cost: options.haikuCost } : {}),
 +	});
-+	const other = createMockModel({ id: "other", handler: yieldResult("finished on other") });
++	const other = createMockModel({ id: "other", handler: finishWith("finished on other") });
 +	const mocks = [primary, haiku, other];
 +	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
 +	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [...mocks, ...catalogAvailable(kind)]);
@@ -1236,6 +1511,12 @@ index 0000000000..04ed7c1580
 +}
 +
 +/** Loop requests a mock model served; side requests such as titles are excluded. */
++/** The in-process session of agent `id`: this harness runs every subagent on the main thread, which the handle type hides. */
++function localSession(id: string): AgentSession | undefined {
++	const session = AgentRegistry.global().get(id)?.session;
++	return session instanceof AgentSession ? session : undefined;
++}
++
 +function loopRequests(mock: MockModel): number {
 +	return mock.calls.filter(call => isLoopRequest(call.context)).length;
 +}
@@ -1280,7 +1561,7 @@ index 0000000000..04ed7c1580
 +				state: "queued",
 +			});
 +			// Nothing changed for the request in flight.
-+			const session = AgentRegistry.global().get(CHILD_ID)?.session;
++			const session = localSession(CHILD_ID);
 +			expect(session?.model?.id).toBe("primary");
 +			expect(session?.pendingModelSwitch?.id).toBe("haiku");
 +
@@ -1307,7 +1588,7 @@ index 0000000000..04ed7c1580
 +			await writeModel(harness, CHILD_ID, "mock/haiku");
 +			harness.releaseFirstRequest();
 +			await harness.run;
-+			const entries = AgentRegistry.global().get(CHILD_ID)?.session?.sessionManager.getEntries() ?? [];
++			const entries = localSession(CHILD_ID)?.sessionManager.getEntries() ?? [];
 +			const changes = entries.filter(entry => entry.type === "model_change");
 +			expect(changes.at(-1)).toMatchObject({ model: "mock/haiku" });
 +		} finally {
@@ -1334,7 +1615,7 @@ index 0000000000..04ed7c1580
 +		const harness = await startSubagent({ settings: { "task.perCallModelAllow": ["mock/primary"] } });
 +		try {
 +			await expect(writeModel(harness, CHILD_ID, "@haiku")).rejects.toThrow(/task\.perCallModelAllow/);
-+			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++			expect(localSession(CHILD_ID)?.pendingModelSwitch).toBeUndefined();
 +		} finally {
 +			harness.releaseFirstRequest();
 +			await harness.run;
@@ -1350,7 +1631,7 @@ index 0000000000..04ed7c1580
 +					session: harness.parent,
 +				}),
 +			).rejects.toThrow(/write-only/);
-+			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++			expect(localSession(CHILD_ID)?.pendingModelSwitch).toBeUndefined();
 +		} finally {
 +			harness.releaseFirstRequest();
 +			await harness.run;
@@ -1391,7 +1672,7 @@ index 0000000000..04ed7c1580
 +					session: stranger,
 +				}),
 +			).rejects.toThrow(/not spawned by you/);
-+			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++			expect(localSession(CHILD_ID)?.pendingModelSwitch).toBeUndefined();
 +		} finally {
 +			harness.releaseFirstRequest();
 +			await harness.run;
@@ -1409,7 +1690,7 @@ index 0000000000..04ed7c1580
 +			const before = ref?.session?.model?.id;
 +			await expect(writeModel(harness, CHILD_ID, "@haiku")).rejects.toThrow(/not running/);
 +			expect(AgentRegistry.global().get(CHILD_ID)?.session?.model?.id).toBe(before);
-+			expect(AgentRegistry.global().get(CHILD_ID)?.session?.pendingModelSwitch).toBeUndefined();
++			expect(localSession(CHILD_ID)?.pendingModelSwitch).toBeUndefined();
 +		} finally {
 +			harness.close();
 +		}
@@ -1420,7 +1701,7 @@ index 0000000000..04ed7c1580
 +	it("applies to that subagent at its next request, with no approval gate", async () => {
 +		const harness = await startSubagent();
 +		try {
-+			const session = AgentRegistry.global().get(CHILD_ID)?.session;
++			const session = localSession(CHILD_ID);
 +			if (!session) throw new Error("subagent has no live session");
 +			// `other` is not granted to the model-facing route, yet the user may pick it.
 +			expect(await switchSubagentModelAsOperator(session, harness.models.other)).toBe("queued");
@@ -1438,7 +1719,7 @@ index 0000000000..04ed7c1580
 +	it("keeps a per-call worker's dispatch gate open for the user's choice, and its revival on that model", async () => {
 +		const harness = await startSubagent({ perCall: true });
 +		try {
-+			const session = AgentRegistry.global().get(CHILD_ID)?.session;
++			const session = localSession(CHILD_ID);
 +			if (!session) throw new Error("subagent has no live session");
 +			// The model-facing route still cannot reach it...
 +			await expect(writeModel(harness, CHILD_ID, "mock/other")).rejects.toThrow(/not approved/);
@@ -1470,43 +1751,43 @@ index 0000000000..04ed7c1580
 +	}, 15_000);
 +});
 diff --git a/packages/tui/src/tools/proc-render.ts b/packages/tui/src/tools/proc-render.ts
-index 2d4dba5396..21dc6efcf7 100644
+index 90a7dcb6fb..d1c6c85c5d 100644
 --- a/packages/tui/src/tools/proc-render.ts
 +++ b/packages/tui/src/tools/proc-render.ts
-@@ -34,10 +34,11 @@ export interface ProcReadDetails {
+@@ -37,10 +37,11 @@ export interface ProcReadDetails {
  
  export type ProcWriteDetails =
  	| CoordinationDetails
--	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string };
-+	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string }
+-	| { action: "stop" | "stdin" | "mode"; daemon: PersistedSnapshot; input?: string; mode?: string };
++	| { action: "stop" | "stdin" | "mode"; daemon: PersistedSnapshot; input?: string; mode?: string }
 +	| { action: "model"; agent: string; model: string; state: "applied" | "queued" };
  
  /** Process operation selected by a write URL, independent of its content. */
 -export type ProcWriteAction = "stdin" | "mode" | "kill";
 +export type ProcWriteAction = "stdin" | "mode" | "kill" | "model";
  
- function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
- 	if (!body.trim()) return [];
-@@ -162,7 +163,11 @@ export function renderProcWrite(
+ function preview(
+ 	body: string,
+@@ -200,7 +201,11 @@ export function renderProcWrite(
  				icon:
  					result === undefined ? "pending" : result.isError ? "error" : action === "kill" ? "aborted" : "success",
  				title,
--				meta: daemon ? daemonMeta(daemon, theme) : action === "mode" && content ? [safe(content)] : [],
+-				meta: daemon ? daemonMeta(serviceView(daemon), theme) : action === "mode" && content ? [safe(content)] : [],
 +				meta: daemon
-+					? daemonMeta(daemon, theme)
++					? daemonMeta(serviceView(daemon), theme)
 +					: (action === "mode" || action === "model") && content
 +						? [safe(content)]
 +						: [],
  			},
  			theme,
  		);
-@@ -384,7 +389,11 @@ export function describeProcWrite(
+@@ -415,7 +420,11 @@ export function describeProcWrite(
  	const head = toolHead(
  		`Proc ${action}`,
  		span(safe(id || "…"), "accent"),
--		daemon ? daemonMetaText(daemon) : action === "mode" && content ? safe(content) : undefined,
+-		daemon ? daemonMetaText(serviceView(daemon)) : action === "mode" && content ? safe(content) : undefined,
 +		daemon
-+			? daemonMetaText(daemon)
++			? daemonMetaText(serviceView(daemon))
 +			: (action === "mode" || action === "model") && content
 +				? safe(content)
 +				: undefined,
@@ -1514,10 +1795,10 @@ index 2d4dba5396..21dc6efcf7 100644
  	if (result?.isError) {
  		return { head, tone: "error", body: [errorText(firstText(result) || "Process operation failed.")] };
 diff --git a/packages/tui/src/tools/write.ts b/packages/tui/src/tools/write.ts
-index 96a77989fd..00ff6bca5a 100644
+index 277e7c92f4..19d020246b 100644
 --- a/packages/tui/src/tools/write.ts
 +++ b/packages/tui/src/tools/write.ts
-@@ -445,6 +445,7 @@ export interface WriteRenderContext {
+@@ -437,6 +437,7 @@ export interface WriteRenderContext {
  function procWriteTarget(target: string): { id: string; action: ProcWriteAction } {
  	if (target.endsWith("/kill")) return { id: target.slice(0, -5), action: "kill" };
  	if (target.endsWith("/mode")) return { id: target.slice(0, -5), action: "mode" };

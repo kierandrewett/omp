@@ -1,9 +1,9 @@
 diff --git a/docs/extensions.md b/docs/extensions.md
-index 463417dd74..76f6394922 100644
+index 7344f6d675..59194c88ed 100644
 --- a/docs/extensions.md
 +++ b/docs/extensions.md
-@@ -938,6 +938,22 @@ Supported:
- - `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
+@@ -1003,6 +1003,22 @@ Supported:
+ - `refreshTranscript(ids)`: asks the [transcript presenters](#transcript-presenter) again for the blocks with those ids and redraws the ones whose display changed
  - `getLinkClicksAvailable()`: whether picking a [claimed link](#extension-link-schemes), by its hint tag or a click, raises `link_activate` right now
  
 +`ctx.ui.registerRemoteUi` is available in the interactive TUI. It registers one
@@ -26,10 +26,10 @@ index 463417dd74..76f6394922 100644
  
  - `setFooter`
 diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
-index a5515b9a54..15a7f4b346 100644
+index cb7a355805..c8acc88463 100644
 --- a/packages/coding-agent/src/extensibility/extensions/types.ts
 +++ b/packages/coding-agent/src/extensibility/extensions/types.ts
-@@ -30,6 +30,7 @@ export {
+@@ -34,6 +34,7 @@ export {
  import type { type as ArkType } from "@oh-my-pi/omptype";
  import type * as TypeBox from "@oh-my-pi/omptype/typebox";
  import type * as zod from "@oh-my-pi/omptype/zod";
@@ -37,7 +37,7 @@ index a5515b9a54..15a7f4b346 100644
  import type {
  	AgentMessage,
  	AgentToolResult,
-@@ -304,6 +305,15 @@ export type ExtensionApprovalAnswer =
+@@ -331,6 +332,15 @@ export type ExtensionApprovalAnswer =
  	| "deny"
  	| { grant: ExtensionApprovalGrant["scope"]; always: boolean };
  
@@ -53,7 +53,7 @@ index a5515b9a54..15a7f4b346 100644
  /**
   * UI context for extensions to request interactive UI.
   * Each mode (interactive, RPC, print) provides its own implementation.
-@@ -318,6 +328,8 @@ export interface ExtensionUIContext {
+@@ -345,6 +355,8 @@ export interface ExtensionUIContext {
  	timeoutStartsOnPresentation?: boolean;
  	/** True when pasteToEditor updates a local or remote composer; absent means unsupported. */
  	supportsEditor?: boolean;
@@ -63,19 +63,19 @@ index a5515b9a54..15a7f4b346 100644
  	select(
  		title: string,
 diff --git a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
-index 76c5b60e9a..f347d5c6b7 100644
+index 76b1fac7ba..e138be6d49 100644
 --- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
-@@ -16,6 +16,8 @@ import type {
- 	ExtensionContextActions,
+@@ -17,6 +17,8 @@ import type {
  	ExtensionCustomOptions,
  	ExtensionError,
+ 	ExtensionFormDialogResult,
 +	ExtensionRemoteUiHandler,
 +	ExtensionRemoteUiResult,
  	ExtensionUIContext,
  	ExtensionUIDialogOptions,
  	ExtensionUISelectItem,
-@@ -111,6 +113,7 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
+@@ -140,6 +142,7 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
  
  export class ExtensionUiController {
  	#extensionTerminalInputUnsubscribers = new Set<() => void>();
@@ -83,7 +83,7 @@ index 76c5b60e9a..f347d5c6b7 100644
  	#composerShapeDisposers: Array<() => void> = [];
  	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
  	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
-@@ -182,6 +185,15 @@ export class ExtensionUiController {
+@@ -204,6 +207,15 @@ export class ExtensionUiController {
  		const uiContext: ExtensionUIContext = {
  			timeoutStartsOnPresentation: true,
  			supportsEditor: true,
@@ -99,31 +99,77 @@ index 76c5b60e9a..f347d5c6b7 100644
  			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
  			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
  			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
-@@ -807,8 +819,11 @@ export class ExtensionUiController {
- 		// strings/arrays here instead of throwing inside `sanitizeCarriageReturns`
- 		// on the guest path or taking down the local render.
- 		const normalized = normalizeDialogQuestions(questions);
+@@ -861,10 +873,14 @@ export class ExtensionUiController {
+ 	async #raceGuestDialog<T>(
+ 		dialogOptions: ExtensionUIDialogOptions | undefined,
+ 		local: (dialogOptions: ExtensionUIDialogOptions | undefined) => Promise<T | undefined>,
+-		remote: (host: CollabHost, signal: AbortSignal) => Promise<T | "unavailable" | undefined>,
++		remote: (host: Pick<CollabHost, "requestGuestUi">, signal: AbortSignal) => Promise<T | "unavailable" | undefined>,
+ 	): Promise<T | undefined> {
 -		const host = this.ctx.collabHost;
--		if (!host) return this.#showLocalAskDialog(normalized, dialogOptions);
-+		if (!this.ctx.collabHost && !this.#remoteUiRegistration)
-+			return this.#showLocalAskDialog(normalized, dialogOptions);
+-		if (!host) return local(dialogOptions);
++		// A dialog stays on the room it started in; a successor room never inherits its follow-up questions.
++		const collabHost = this.ctx.collabHost;
++		if (!collabHost && !this.#remoteUiRegistration) return local(dialogOptions);
 +		const host: Pick<CollabHost, "requestGuestUi"> = {
-+			requestGuestUi: (request, signal) => this.#requestRemoteUi(request, signal),
++			requestGuestUi: (request, signal) => this.#requestRemoteUi(request, signal, collabHost),
 +		};
  		const localAbort = new AbortController();
  		const remoteAbort = new AbortController();
  		const parentSignal = dialogOptions?.signal;
-@@ -959,6 +974,64 @@ export class ExtensionUiController {
+@@ -1020,7 +1036,7 @@ export class ExtensionUiController {
+ 	 * prefilled with its value and re-asked until it passes the form's rules.
+ 	 */
+ 	async #runGuestForm(
+-		host: CollabHost,
++		host: Pick<CollabHost, "requestGuestUi">,
+ 		form: HtmlForm,
+ 		signal: AbortSignal,
+ 	): Promise<ExtensionFormDialogResult | "unavailable" | undefined> {
+@@ -1041,7 +1057,7 @@ export class ExtensionUiController {
+ 	}
+ 
+ 	async #runGuestFormChoice(
+-		host: CollabHost,
++		host: Pick<CollabHost, "requestGuestUi">,
+ 		field: ChoiceField,
+ 		question: string,
+ 		signal: AbortSignal,
+@@ -1126,13 +1142,17 @@ export class ExtensionUiController {
+ 	}
+ 
+ 	/** A guest's free-text "Other" answer to a choice group, on one line. */
+-	async #requestGuestOtherText(host: CollabHost, question: string, signal: AbortSignal): Promise<GuestUiResult> {
++	async #requestGuestOtherText(
++		host: Pick<CollabHost, "requestGuestUi">,
++		question: string,
++		signal: AbortSignal,
++	): Promise<GuestUiResult> {
+ 		const input = await this.#requestGuestUiString(host, { kind: "editor", title: question }, signal);
+ 		return input.kind === "answered" ? { kind: "answered", value: input.value.replace(/[\r\n]+/g, " ") } : input;
+ 	}
+ 
+ 	async #runGuestFormText(
+-		host: CollabHost,
++		host: Pick<CollabHost, "requestGuestUi">,
+ 		field: TextField,
+ 		question: string,
+ 		signal: AbortSignal,
+@@ -1263,6 +1283,68 @@ export class ExtensionUiController {
  		});
  	}
  
 +	/** Race registered remote transports; transport loss never answers a dialog. */
-+	#requestRemoteUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<ExtensionRemoteUiResult> | null {
++	#requestRemoteUi(
++		request: CollabUiRequestDraft,
++		signal: AbortSignal | undefined,
++		collabHost: CollabHost | undefined,
++	): Promise<ExtensionRemoteUiResult> | null {
 +		if (signal?.aborted) return null;
 +		const abort = new AbortController();
 +		const remoteSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
 +		const requests: Array<Promise<ExtensionRemoteUiResult>> = [];
-+		const collab = this.ctx.collabHost?.requestGuestUi(request, remoteSignal, { retainOnReconnect: true });
++		const collab = collabHost?.requestGuestUi(request, remoteSignal, { retainOnReconnect: true });
 +		if (collab) requests.push(collab);
 +		const registration = this.#remoteUiRegistration;
 +		if (registration) {
@@ -178,13 +224,14 @@ index 76c5b60e9a..f347d5c6b7 100644
  	/**
  	 * Race the local hook dialog against a mirrored guest ask. First *answer*
  	 * wins and cancels the other side. A remote `unavailable` settlement
-@@ -971,14 +1044,12 @@ export class ExtensionUiController {
+@@ -1275,14 +1357,14 @@ export class ExtensionUiController {
  		signal: AbortSignal | undefined,
  		local: (signal: AbortSignal | undefined) => Promise<string | undefined>,
  	): Promise<string | undefined> {
 -		const host = this.ctx.collabHost;
 -		if (!host) return local(signal);
-+		if (!this.ctx.collabHost && !this.#remoteUiRegistration) return local(signal);
++		const collabHost = this.ctx.collabHost;
++		if (!collabHost && !this.#remoteUiRegistration) return local(signal);
  		const localAbort = new AbortController();
  		const remoteAbort = new AbortController();
 -		const remote = host.requestGuestUi(
@@ -192,10 +239,11 @@ index 76c5b60e9a..f347d5c6b7 100644
  			request,
  			signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
 -			{ retainOnReconnect: true },
++			collabHost,
  		);
  		if (!remote) return local(signal);
  		const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
-@@ -994,7 +1065,7 @@ export class ExtensionUiController {
+@@ -1298,7 +1380,7 @@ export class ExtensionUiController {
  	}
  
  	async #runGuestAskDialog(
@@ -204,7 +252,7 @@ index 76c5b60e9a..f347d5c6b7 100644
  		questions: ExtensionAskDialogQuestion[],
  		signal: AbortSignal,
  	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
-@@ -1009,7 +1080,7 @@ export class ExtensionUiController {
+@@ -1313,7 +1395,7 @@ export class ExtensionUiController {
  	}
  
  	async #runGuestAskQuestion(
@@ -213,7 +261,7 @@ index 76c5b60e9a..f347d5c6b7 100644
  		question: ExtensionAskDialogQuestion,
  		signal: AbortSignal,
  	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
-@@ -1136,7 +1207,7 @@ export class ExtensionUiController {
+@@ -1440,7 +1522,7 @@ export class ExtensionUiController {
  	}
  
  	async #requestGuestUiString(

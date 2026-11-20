@@ -1,8 +1,8 @@
 diff --git a/docs/mcp-runtime-lifecycle.md b/docs/mcp-runtime-lifecycle.md
-index 0fea07026a..fea2defe3a 100644
+index 66b4038c59..29cab05fe2 100644
 --- a/docs/mcp-runtime-lifecycle.md
 +++ b/docs/mcp-runtime-lifecycle.md
-@@ -100,6 +100,7 @@ For each discovered server in `connectServers()`:
+@@ -101,6 +101,7 @@ For each discovered server in `connectServers()`:
  - creates stdio or HTTP/SSE transport,
  - performs MCP `initialize` using protocol version `2025-11-25` and advertises the `roots` capability,
  - answers server-to-client `ping` and `roots/list` requests; unsupported request methods return JSON-RPC `-32601`,
@@ -11,7 +11,7 @@ index 0fea07026a..fea2defe3a 100644
  - for Streamable HTTP, starts the background SSE listener only after `notifications/initialized`,
  - uses timeout precedence `OMP_MCP_TIMEOUT_MS`, then `config.timeout`, then 30s; `0` disables the client-side timeout,
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 1934a6ab60..50b7422425 100644
+index fa373ecd3e..c214ea9fb0 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -10,7 +10,7 @@
@@ -424,10 +424,10 @@ index d9e9e31dde..4ddd746832 100644
  
  /**
 diff --git a/packages/coding-agent/src/mcp/manager.ts b/packages/coding-agent/src/mcp/manager.ts
-index 77ec6353ba..5045d4fa09 100644
+index 31db102477..5b70cbc38d 100644
 --- a/packages/coding-agent/src/mcp/manager.ts
 +++ b/packages/coding-agent/src/mcp/manager.ts
-@@ -611,7 +611,7 @@ export class MCPManager {
+@@ -766,7 +766,7 @@ export class MCPManager implements MCPManagerApi {
  	}
  
  	/**

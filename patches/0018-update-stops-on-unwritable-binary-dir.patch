@@ -1,8 +1,8 @@
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 63dd4c7f53..9125998b2e 100644
+index 290fc798e9..cee6b2730b 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
-@@ -1193,6 +1193,29 @@ async function unlinkIfExists(filePath: string): Promise<void> {
+@@ -1133,6 +1133,29 @@ async function unlinkIfExists(filePath: string): Promise<void> {
  	}
  }
  
@@ -32,7 +32,7 @@ index 63dd4c7f53..9125998b2e 100644
  /**
   * Remove a backup binary without letting the removal abort a completed update.
   *
-@@ -1921,6 +1944,7 @@ export async function updateViaBinaryAt(
+@@ -1892,6 +1915,7 @@ export async function updateViaBinaryAt(
  	} = {},
  ): Promise<void> {
  	if (options.validateExistingTarget) await validateExistingUpdateTarget(targetPath);

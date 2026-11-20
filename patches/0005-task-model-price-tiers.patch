@@ -1,8 +1,8 @@
 diff --git a/docs/tools/task.md b/docs/tools/task.md
-index 6bbad6cd50..9bc61b9dc3 100644
+index 2716c2675e..26b8b1eb7e 100644
 --- a/docs/tools/task.md
 +++ b/docs/tools/task.md
-@@ -68,6 +68,8 @@ Users can tag models with `^` in the composer. The resulting session-local `m1`,
+@@ -64,6 +64,8 @@ Users can tag models with `^` in the composer. The resulting session-local `m1`,
  
  When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models from the operator's settings and the narrowing allowlist; project settings never add a model and can only narrow the list. The task description lists each configured role as `@role` with its model, tells the agent to pass the role when the user names a model or tier (never a guessed version or ID), to omit `model` when the user names none, and to call `ask` with the roles as options when it cannot tell which model the user means.
  
@@ -12,7 +12,7 @@ index 6bbad6cd50..9bc61b9dc3 100644
  
  Batch calls reject a top-level `agent` rather than silently discarding a specialist selector and spawning the default agent. Put `agent` on each `tasks[]` item when selecting `reviewer`, `scout`, or a custom agent; the agent name is not inferred from the task text.
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index c539bf39cc..39d8a0b69d 100644
+index be16950822..a51080e751 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -8,6 +8,7 @@
@@ -36,24 +36,24 @@ index 5143e1751b..3d78928dc6 100644
  			"haiku": "Clearly specified, bounded mechanical work with an obvious procedure and low risk: straightforward formatting, simple repetitive edits, gathering explicitly identified information, or a narrowly specified change needing little judgment.",
  			"sonnet": "Nontrivial reasoning, complex design, debugging or investigation, security or privacy sensitive work, ambiguous requirements, unfamiliar interacting systems, consequential changes, or any task requiring substantial independent judgment. Also choose this when uncertain whether the task is safely mechanical.",
 diff --git a/packages/coding-agent/src/prompts/tools/task.md b/packages/coding-agent/src/prompts/tools/task.md
-index d61d6708e7..1351fd7626 100644
+index 3ec13399c3..1ba2f175a0 100644
 --- a/packages/coding-agent/src/prompts/tools/task.md
 +++ b/packages/coding-agent/src/prompts/tools/task.md
-@@ -24,9 +24,10 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
- {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
- {{/if}}{{#if perCallModelEnabled}}`model`: for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Pick in this order:
- 1. User names a model or tier ("haiku", "use sonnet", "the cheap one") → pass the configured role of that name as `@role`. A role is the user's own choice of model for that name. NEVER swap in a version or ID you know (not `claude-haiku-4-5` for "haiku"), and never a bare word.
--2. User names none → omit `model`; automatic selection picks a configured role from the task. If none is usable, the agent's normal routing applies.
-+2. User names none → omit `model` (automatic selection weighs the task, price and what the user uses most), or pass a price tier when you know what the work deserves: `$` to `$$$$`, where `$` is the cheapest quarter of all loaded models and `$$$$` the dearest. A tier resolves to the configured role in that tier, or the nearest tier if none; the most used wins a tie. Bounded or mechanical work → `$`; ordinary reasoning → the middle tiers. `$$$$` is VERY RARE: only when a cheaper tier would plainly fail on hard, high-stakes work. Most spawns are `$` to `$$$`.
- 3. Exact `provider/model-id[@upstream][:level]` only when the user typed that exact ID. `@upstream` pins an aggregator route and is part of the model identity.
--Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{/list}}{{else}}none{{/if}}.
-+Price counts when you choose: use the cheapest tier that does the work reliably, and a costlier one only when difficulty or risk needs it. In a batch, choose per item. NEVER pick a weak model just to save money; a role with no tier shown has an unknown price, not a low one.
-+Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{#if tier}} ({{tier}}){{/if}}{{/list}}{{else}}none{{/if}}.
- Unsure (wording fits several roles or none, or the user's intent is unclear)? Do not guess: call `ask` with the roles as options before spawning, if you have `ask`. Rare. NEVER ask when one role clearly matches.
- Only operator-approved models; no arrays, globs or partial IDs. Also approved: {{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model. A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.{{#if perCallModelAdvertisement.allowlist.length}} Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).{{/if}} An agent's `task.agentModelOverrides` entry conflicts with `model`. Requested model unavailable → stop and report; NEVER substitute another. Every request requires an approved model; retry fallback, context promotion and prewalk are off.
- {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
+@@ -59,9 +59,10 @@ Run one agent synchronously.
+ {{#if perCallModelEnabled}}
+ - `model`: for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Pick in this order:
+   1. User names a model or tier ("haiku", "use sonnet", "the cheap one") → pass the configured role of that name as `@role`. A role is the user's own choice of model for that name. NEVER swap in a version or ID you know (not `claude-haiku-4-5` for "haiku"), and never a bare word.
+-  2. User names none → omit `model`; automatic selection picks a configured role from the task. If none is usable, the agent's normal routing applies.
++  2. User names none → omit `model` (automatic selection weighs the task, price and what the user uses most), or pass a price tier when you know what the work deserves: `$` to `$$$$`, where `$` is the cheapest quarter of all loaded models and `$$$$` the dearest. A tier resolves to the configured role in that tier, or the nearest tier if none; the most used wins a tie. Bounded or mechanical work → `$`; ordinary reasoning → the middle tiers. `$$$$` is VERY RARE: only when a cheaper tier would plainly fail on hard, high-stakes work. Most spawns are `$` to `$$$`.
+   3. Exact `provider/model-id[@upstream][:level]` only when the user typed that exact ID. `@upstream` pins an aggregator route and is part of the model identity.
+-  - Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{/list}}{{else}}none{{/if}}.
++  - Price counts when you choose: use the cheapest tier that does the work reliably, and a costlier one only when difficulty or risk needs it. In a batch, choose per item. NEVER pick a weak model just to save money; a role with no tier shown has an unknown price, not a low one.
++  - Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{#if tier}} ({{tier}}){{/if}}{{/list}}{{else}}none{{/if}}.
+   - Unsure (wording fits several roles or none, or the user's intent is unclear)? Do not guess: call `ask` with the roles as options before spawning, if you have `ask`. Rare. NEVER ask when one role clearly matches.
+   - Only operator-approved models; no arrays, globs or partial IDs. Also approved: {{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model.
+   - A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.
 diff --git a/packages/coding-agent/src/task/auto-model.ts b/packages/coding-agent/src/task/auto-model.ts
-index 647f5562c1..d8f4942a3e 100644
+index 99fd45f0e2..1b707cdd8b 100644
 --- a/packages/coding-agent/src/task/auto-model.ts
 +++ b/packages/coding-agent/src/task/auto-model.ts
 @@ -1,13 +1,13 @@
@@ -66,7 +66,7 @@ index 647f5562c1..d8f4942a3e 100644
  import type { Settings } from "../config/settings";
  import { hasNativeJudge, type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
  import questionFile from "../prompts/judge/task-model.json" with { type: "json" };
- import type { CostGate } from "../session/cost-gate";
+ import type { CostGateApi } from "../session/cost-gate";
 -import { MAX_TINY_MESSAGE_CHARS, truncateTinyMessage } from "../tiny/message-preproc";
 +import { describeConfiguredRoles, formatTier } from "./model-economy";
 +import { loadModelUsage } from "./model-usage";
@@ -140,10 +140,10 @@ index 647f5562c1..d8f4942a3e 100644
  		for (const role of roles.keys()) {
  			criteria[role] = Object.hasOwn(QUESTIONS.model.criteria, role)
 diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
-index ba93e5a80c..72e562836a 100644
+index 1545dee2c3..66e15b124f 100644
 --- a/packages/coding-agent/src/task/index.ts
 +++ b/packages/coding-agent/src/task/index.ts
-@@ -60,7 +60,8 @@ import { InternalUrlRouter } from "../internal-urls/router";
+@@ -50,7 +50,8 @@ import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
  import { AgentRegistry, isResumable } from "../registry/agent-registry";
  import { type DiscoveryResult, discoverAgents } from "./discovery";
  import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
@@ -153,7 +153,7 @@ index ba93e5a80c..72e562836a 100644
  import { generateTaskName } from "./name-generator";
  import { AgentOutputManager } from "./output-manager";
  import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
-@@ -161,7 +162,7 @@ interface TaskDescriptionOptions {
+@@ -152,7 +153,7 @@ interface TaskDescriptionOptions {
  	batchEnabled: boolean;
  	effortEnabled: boolean;
  	perCallModelEnabled: boolean;
@@ -161,23 +161,26 @@ index ba93e5a80c..72e562836a 100644
 +	perCallModelAdvertisement?: TieredModelAdvertisement;
  	evalToolsEnabled: boolean;
  	structured: boolean;
- 	file: boolean;
-@@ -908,9 +909,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
- 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
- 			perCallModelEnabled: perCallModel,
- 			perCallModelAdvertisement: perCallModel
--				? getPerCallModelAdvertisement(
--						this.session.settings,
--						this.session.getActiveModel?.(),
-+				? tierAdvertisedRoles(
-+						getPerCallModelAdvertisement(
-+							this.session.settings,
-+							this.session.getActiveModel?.(),
-+							this.session.modelRegistry,
-+						),
+ 	steps: boolean;
+@@ -845,7 +846,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
+ 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
+ 		const perCallModel = perCallModelEnabled(this.session.settings, "task");
+-		const perCallModelAdvertisement =
++		const advertised =
+ 			this.session.advertisedPerCallModel?.() ??
+ 			(perCallModel
+ 				? getPerCallModelAdvertisement(
+@@ -854,6 +855,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
  						this.session.modelRegistry,
  					)
- 				: undefined,
+ 				: undefined);
++		const perCallModelAdvertisement = advertised
++			? tierAdvertisedRoles(advertised, this.session.modelRegistry)
++			: undefined;
+ 		return renderDescription({
+ 			agents,
+ 			sessionAgents,
 diff --git a/packages/coding-agent/src/task/model-economy.ts b/packages/coding-agent/src/task/model-economy.ts
 new file mode 100644
 index 0000000000..4b8a2d6e56
@@ -451,19 +454,19 @@ index 0000000000..d94b046b5f
 +	cached = undefined;
 +}
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index bfade1ca9f..9d5b122b8f 100644
+index 8a11679d20..72e3fb0156 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
-@@ -44,6 +44,8 @@ import { isIrcEnabled } from "../irc/messaging";
+@@ -45,6 +45,8 @@ import { isIrcEnabled } from "../irc/messaging";
  import { buildOutputValidator } from "../tools/output-schema-validator";
  import { trackLateCleanup } from "../utils/late-cleanup";
  import { classifyAutoTaskModel } from "./auto-model";
 +import { describeConfiguredRoles, formatTier, type PriceTier, parseTier, pickRoleForTier } from "./model-economy";
 +import { loadModelUsage } from "./model-usage";
  import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
- import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
- import {
-@@ -372,6 +374,11 @@ function callerModelRole(model: unknown, settings: Settings, invocationKind: "ta
+ import { renderStepPrompts } from "./steps";
+ import { type ExecutorOptions, runSubprocess, type SubagentToolResult, usesYield } from "./executor";
+@@ -392,6 +394,11 @@ function callerModelRole(model: unknown, settings: Settings, invocationKind: "ta
  	return role !== undefined && authority.getModelRole(role)?.trim() ? role : undefined;
  }
  
@@ -475,7 +478,7 @@ index bfade1ca9f..9d5b122b8f 100644
  /**
   * Why a per-call `model` cannot be used before dispatch: the `task.perCallModel` gate first, so a
   * caller is never told to fix a selector it may not send, then anything but one exact
-@@ -386,13 +393,17 @@ export function invalidModelSelectorReason(
+@@ -406,13 +413,17 @@ export function invalidModelSelectorReason(
  	const disabled = perCallModelDisabledReason(gate.settings, gate.invocationKind);
  	if (disabled) return disabled;
  	if (callerModelRole(model, gate.settings, gate.invocationKind) !== undefined) return undefined;
@@ -494,7 +497,7 @@ index bfade1ca9f..9d5b122b8f 100644
  		return `${label} has an invalid \`model\` value ${JSON.stringify(model)}. Use one exact provider/model-id selector, optionally followed by a supported :level${roles}. Patterns and candidate arrays are not accepted${gate.invocationKind === "task" ? "" : ", and neither are role aliases"}.`;
  	}
  	return undefined;
-@@ -421,6 +432,32 @@ async function resolveCallerRoleSelector(request: StructuredSubagentRequest, sel
+@@ -441,6 +452,32 @@ async function resolveCallerRoleSelector(request: StructuredSubagentRequest, sel
  	return resolved.explicitThinkingLevel && resolved.thinkingLevel ? `${identity}:${resolved.thinkingLevel}` : identity;
  }
  
@@ -527,7 +530,7 @@ index bfade1ca9f..9d5b122b8f 100644
  /** Gate, validate and approve a per-call `model`; returns the exact selector and the grants the running child stays held to. */
  async function preflightPerCallModel(
  	request: StructuredSubagentRequest,
-@@ -447,9 +484,13 @@ async function preflightPerCallModel(
+@@ -472,9 +509,13 @@ async function preflightPerCallModel(
  		invocationKind: request.invocationKind,
  	});
  	if (selectorProblem) fail(selectorProblem);
@@ -883,10 +886,10 @@ index 0000000000..275bc54cb6
 +	});
 +});
 diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
-index 6860a63729..e384fb1413 100644
+index 4e1b0a00c2..4d5babf868 100644
 --- a/packages/coding-agent/test/task/structured-subagent.test.ts
 +++ b/packages/coding-agent/test/task/structured-subagent.test.ts
-@@ -31,6 +31,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+@@ -41,6 +41,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
  import * as autoModelModule from "@oh-my-pi/pi-coding-agent/task/auto-model";
  import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
  import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
@@ -894,7 +897,7 @@ index 6860a63729..e384fb1413 100644
  import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
  import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
  import {
-@@ -1679,6 +1680,113 @@ describe("per-call model preflight", () => {
+@@ -1639,6 +1640,113 @@ describe("per-call model preflight", () => {
  		).rejects.toThrow(error);
  	});
  
@@ -1066,10 +1069,10 @@ index 008d7fa6cc..8cc04f7861 100644
  
  	it("does not mention roles or `model` when per-call models are off", async () => {
 diff --git a/packages/coding-agent/test/task/task-schema.test.ts b/packages/coding-agent/test/task/task-schema.test.ts
-index ab57e2b3d9..f7c96e013d 100644
+index 6b994ca5b5..57806eb8a9 100644
 --- a/packages/coding-agent/test/task/task-schema.test.ts
 +++ b/packages/coding-agent/test/task/task-schema.test.ts
-@@ -345,7 +345,7 @@ describe("task spawn validation", () => {
+@@ -246,7 +246,7 @@ describe("task spawn validation", () => {
  		}
  	});
  
@@ -1078,7 +1081,7 @@ index ab57e2b3d9..f7c96e013d 100644
  		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
  		const session = createSession({
  			settings: {
-@@ -353,12 +353,15 @@ describe("task spawn validation", () => {
+@@ -254,12 +254,15 @@ describe("task spawn validation", () => {
  				modelRoles: { review: " mock/second:high, mock/*, mock/first, mock/* " },
  			},
  		});

@@ -33,9 +33,15 @@ Check with `bun run check:types` in `packages/coding-agent`.
   instead, as `registerSubagentModelSwitcher` does.
 * Run tests with the default timeout. A test that only passes with `--timeout 20000` fails in upstream's setup.
 * Pass `set -o pipefail` when piping `scripts/build.sh` into `tail`, or the exit status is lost.
+* `scripts/update-upstream.sh` and `scripts/work.sh` read the upstream commit from the git index. After you move the
+  submodule, run `git add upstream` before `scripts/work.sh --reset`, or the work tree is built on the old commit.
+* A plain `git apply --3way` puts CHANGELOG hunks inside the new upstream release section. Copy the `[Unreleased]`
+  text across by hand.
+* `/home` fills during a build. Set `CARGO_TARGET_DIR` to a path on `/var/tmp` before the natives build.
 
 ## Known failures on plain upstream
 
-On v18.14.2, 26 tests in `test/task` and `test/eval` fail without any patch. Worktree tests fail because the commit
-proxy blocks their git identity. The cell-syntax-error tests and some startup tests fail too. Compare against this
-list before blaming a patch.
+On v19.0.0, these tests fail without any patch. Worktree, commit and jj tests fail because the commit proxy blocks
+their git identity. The `agent-plugins` discovery tests fail. `cli-responses-websocket-recovery` is flaky. In `ai` 7
+tests fail and in `tui` 12 tests fail. Compare against this list, or run the test on a clean v19.0.0 worktree, before
+blaming a patch.

@@ -1,5 +1,5 @@
 diff --git a/docs/agent-hub.md b/docs/agent-hub.md
-index 1341db394a..48baa7e0e9 100644
+index 12608d95f8..0f5b111a59 100644
 --- a/docs/agent-hub.md
 +++ b/docs/agent-hub.md
 @@ -87,6 +87,8 @@ While subagents run, a pinned `Subagents` block above the editor lists every liv
@@ -12,7 +12,7 @@ index 1341db394a..48baa7e0e9 100644
  
  Enable `tui.mouse` to click live subagent cards and jump-list rows directly in the main session, without opening the Hub first. A click focuses that card's most recent agent (a jump-list row focuses its exact agent); focusing a parked agent revives it. Hovering a live target lights it up first, so you can see what a click will open.
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 39d8a0b69d..2197c49075 100644
+index a51080e751..7ece801366 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -9,6 +9,7 @@
@@ -24,10 +24,10 @@ index 39d8a0b69d..2197c49075 100644
  ### Changed
  
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 9c8cf13489..0beefa60a6 100644
+index 7d546dbab9..eeffdea231 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -134,6 +134,8 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
+@@ -147,6 +147,8 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
  import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
  import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
  import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -36,7 +36,7 @@ index 9c8cf13489..0beefa60a6 100644
  import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
  import { registerPersistedSubagents } from "../registry/persisted-agents";
  import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-@@ -1200,6 +1202,25 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
+@@ -1272,6 +1274,25 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
  	return truncateToWidth(`${line}${elapsedLabel}`, width, "");
  }
  
@@ -62,7 +62,7 @@ index 9c8cf13489..0beefa60a6 100644
  /**
   * Build the anchored subagent HUD block: a bold accent "Subagents · N running"
   * header (with the agent-hub key right-aligned when `hubKey` is given) plus
-@@ -1237,7 +1258,12 @@ export function renderSubagentHudLines(
+@@ -1309,7 +1330,12 @@ export function renderSubagentHudLines(
  			items,
  			expanded: true,
  			renderItem: (session, context) => {
@@ -76,7 +76,7 @@ index 9c8cf13489..0beefa60a6 100644
  				const role = session.agent ?? session.progress?.agent;
  				const displayId = truncateToWidth(
  					formatTaskId(session.id),
-@@ -1285,8 +1311,11 @@ export function renderSubagentHudLines(
+@@ -1357,8 +1383,11 @@ export function renderSubagentHudLines(
  						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
  					}
  				}
@@ -91,10 +91,10 @@ index 9c8cf13489..0beefa60a6 100644
  				return preview ? [head, preview] : head;
  			},
 diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
-index 680be6e17f..70d6d7b039 100644
+index 2cd3ad9df6..97fdec07d0 100644
 --- a/packages/coding-agent/src/task/executor.ts
 +++ b/packages/coding-agent/src/task/executor.ts
-@@ -2141,6 +2141,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
+@@ -2315,6 +2315,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
  						accumulatedUsage.input += getNumberField(messageUsage, "input") ?? 0;
  						accumulatedUsage.output += getNumberField(messageUsage, "output") ?? 0;
  						accumulatedUsage.cacheRead += getNumberField(messageUsage, "cacheRead") ?? 0;
@@ -103,7 +103,7 @@ index 680be6e17f..70d6d7b039 100644
  						accumulatedUsage.totalTokens += getNumberField(messageUsage, "totalTokens") ?? 0;
  						accumulatedUsage.reasoningTokens =
 diff --git a/packages/coding-agent/test/subagent-hud-render.test.ts b/packages/coding-agent/test/subagent-hud-render.test.ts
-index c9fc0388dc..18258b9340 100644
+index 4a5de44141..5c9b403849 100644
 --- a/packages/coding-agent/test/subagent-hud-render.test.ts
 +++ b/packages/coding-agent/test/subagent-hud-render.test.ts
 @@ -277,6 +277,54 @@ describe("subagent HUD lines", () => {
@@ -162,10 +162,10 @@ index c9fc0388dc..18258b9340 100644
  		const assignment = "\x1b]0;pwned\x07\x1b[2JAudit the corpus";
  		const raw = renderSubagentHudLines(
 diff --git a/packages/tui/src/tools/task.ts b/packages/tui/src/tools/task.ts
-index 37f5deeaa3..ae941aff12 100644
+index 32c57167ed..0ab5930565 100644
 --- a/packages/tui/src/tools/task.ts
 +++ b/packages/tui/src/tools/task.ts
-@@ -2406,6 +2406,11 @@ export interface AgentProgress {
+@@ -2403,6 +2403,11 @@ export interface AgentProgress {
  	requests: number;
  	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
  	tokens: number;
@@ -175,10 +175,10 @@ index 37f5deeaa3..ae941aff12 100644
 +	 */
 +	cacheReadTokens?: number;
  	/**
- 	 * Current per-turn context size: latest assistant message's `usage.totalTokens`.
- 	 * This is the number to compare against `contextWindow` — what compaction
+ 	 * Current per-turn occupied context: the latest assistant message's
+ 	 * provider-reported `usage.contextTokens` when present, else its billable
 diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
-index d142c072b2..06e97c9cb8 100644
+index 6c346e8adc..3a8b012c68 100644
 --- a/packages/wire/src/index.ts
 +++ b/packages/wire/src/index.ts
 @@ -271,6 +271,7 @@ export interface AgentProgress {

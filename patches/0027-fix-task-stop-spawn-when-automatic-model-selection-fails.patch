@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 7a0a09ab56..9de6ab2ad3 100644
+index 149fffb07c..f7c59e08a5 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -29,6 +29,7 @@
@@ -11,7 +11,7 @@ index 7a0a09ab56..9de6ab2ad3 100644
  - Fixed a session wedged for days by a 429 carrying a huge retry hint, such as a 39-hour `retry-after-ms`: with `retry.waitForUsageReset` on it slept the whole wait while reporting busy, so `.` was refused and steers never landed. A wait past 24 hours now ends the retry (`auto_retry_end` with the error) and leaves the session idle. A 429 whose hint is past `retry.maxDelayMs` but is not a usage limit now blocks the failing credential until that hint and retries on a free sibling credential at once.
  
 diff --git a/packages/coding-agent/src/task/auto-model.ts b/packages/coding-agent/src/task/auto-model.ts
-index b95b56c285..cf92025edb 100644
+index 843f1532d7..6cda6a7902 100644
 --- a/packages/coding-agent/src/task/auto-model.ts
 +++ b/packages/coding-agent/src/task/auto-model.ts
 @@ -195,15 +195,7 @@ const STOP_AND_REPORT =
@@ -33,19 +33,27 @@ index b95b56c285..cf92025edb 100644
 +	return `Subagent not started. Automatic model selection failed: ${failure}. No model was used, and no other model stands in. ${FIX_HINT} ${STOP_AND_REPORT}`;
  }
 diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
-index 48d49f7bfd..3fdbe91157 100644
+index 65035d4ef9..155ac1b2fc 100644
 --- a/packages/coding-agent/src/task/executor.ts
 +++ b/packages/coding-agent/src/task/executor.ts
-@@ -347,8 +347,6 @@ export interface ExecutorOptions {
- 	modelRole?: string;
- 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
- 	modelRoute?: string;
+@@ -177,7 +177,6 @@ import {
+ 	cfgTierAnthropic,
+ 	cfgTierOpenai,
+ 	cfgDefaultThinkingLevel,
+-	cfgPrewalkAutoTarget,
+ } from "../session/settings";
+ import { cfgOffline } from "../config/auxiliary-model-policy";
+ import { getRetryFallbackRole, pinSubagentRetryChains } from "../session/retry-fallback-chains";
+@@ -402,8 +401,6 @@ export interface ExecutorOptions {
+ 	 * the parent's provider. It is never a model for the child.
+ 	 */
+ 	labelModelPattern?: string;
 -	/** Visible warning about how this child's model was chosen; surfaced as `resolvedModelWarning`. */
 -	modelWarning?: string;
  	/** Called with a warning the user must see, such as the child leaving the model it started on. */
  	onModelWarning?: (warning: string) => void;
- 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
-@@ -1146,8 +1144,6 @@ interface RunMonitorArgs {
+ 	/** Active parent provider; offline mode keeps the child on it. The parent's model is never a candidate. */
+@@ -1258,8 +1255,6 @@ interface RunMonitorArgs {
  	modelRole?: string;
  	/** Extension routing note for the chosen model. */
  	modelRoute?: string;
@@ -54,7 +62,7 @@ index 48d49f7bfd..3fdbe91157 100644
  	/** Called when the child leaves the model it started on. */
  	onModelWarning?: (warning: string) => void;
  	signal?: AbortSignal;
-@@ -1291,7 +1287,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
+@@ -1411,7 +1406,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
  		modelOverride: args.modelOverride,
  		modelRole: args.modelRole,
  		resolvedModelRoute: args.modelRoute,
@@ -62,7 +70,7 @@ index 48d49f7bfd..3fdbe91157 100644
  	};
  
  	const outputChunks: string[] = [];
-@@ -4370,7 +4365,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+@@ -4727,7 +4721,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
  		modelOverride,
  		modelRole,
  		modelRoute: options.modelRoute,
@@ -71,10 +79,10 @@ index 48d49f7bfd..3fdbe91157 100644
  		signal,
  		onProgress,
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index 865970ed37..bcc119b2fe 100644
+index f45ff1b80f..6df4bbb203 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
-@@ -43,7 +43,7 @@ import type { ToolSession } from "../tools";
+@@ -44,7 +44,7 @@ import type { ToolSession } from "../tools";
  import { isIrcEnabled } from "../irc/messaging";
  import { buildOutputValidator } from "../tools/output-schema-validator";
  import { trackLateCleanup } from "../utils/late-cleanup";
@@ -83,16 +91,16 @@ index 865970ed37..bcc119b2fe 100644
  import {
  	configuredAliasNames,
  	describeConfiguredRoles,
-@@ -234,8 +234,6 @@ export interface EffectiveSubagentPolicy {
+@@ -232,8 +232,6 @@ export interface EffectiveSubagentPolicy {
  	 * must pick a model at dispatch, or the spawn fails. The parent's model is never a source.
  	 */
- 	modelOrigin: "per-call" | "host" | "seance" | "override" | "agent" | "none";
+ 	modelOrigin: "per-call" | "host" | "override" | "agent" | "none";
 -	/** Visible warning for the user: automatic selection failed and an explicit source stood in. */
 -	modelWarning?: string;
  	/** Whether the child gets the `yield` tool; see {@link StructuredSubagentRequest.structured}. */
  	structured: boolean;
  	/** Present for a per-call `model`: every model the child sends to must stay approved by these grants. */
-@@ -755,18 +753,10 @@ export async function resolveEffectiveSubagentPolicy(
+@@ -761,18 +759,10 @@ export async function resolveEffectiveSubagentPolicy(
  	};
  }
  
@@ -113,7 +121,7 @@ index 865970ed37..bcc119b2fe 100644
   */
  async function applyAutoTaskModel(
  	request: StructuredSubagentRequest,
-@@ -792,16 +782,8 @@ async function applyAutoTaskModel(
+@@ -798,16 +788,8 @@ async function applyAutoTaskModel(
  				costGate: request.session.costGate,
  			})
  		: { failure: "the session has no model registry" };
@@ -132,7 +140,7 @@ index 865970ed37..bcc119b2fe 100644
  	};
  	if (autoTaskModelFailed(outcome)) return unusable(outcome.failure);
  	const selection = resolveAgentModelSelection({ requestModel: outcome.role, settings: request.session.settings });
-@@ -955,7 +937,6 @@ function buildExecutorOptions(
+@@ -963,7 +945,6 @@ function buildExecutorOptions(
  		modelOverride: policy.modelOverride,
  		modelRole: policy.modelRole,
  		modelRoute: policy.modelRoute,
@@ -140,7 +148,7 @@ index 865970ed37..bcc119b2fe 100644
  		onModelWarning: warning => session.emitNotice?.("warning", warning, "task-model"),
  		serviceTierOverride: policy.serviceTierOverride,
  		compactionThresholdOverride: policy.compactionThresholdOverride,
-@@ -1065,7 +1046,6 @@ function buildFailureResult(
+@@ -1078,7 +1059,6 @@ function buildFailureResult(
  			modelOverride: policy.modelOverride,
  			modelRole: policy.modelRole,
  			resolvedModelRoute: policy.modelRoute,
@@ -148,7 +156,7 @@ index 865970ed37..bcc119b2fe 100644
  			error: message,
  		};
  	};
-@@ -1172,7 +1152,6 @@ function describeSalvagedWork(result: SingleResult): string {
+@@ -1185,7 +1165,6 @@ function describeSalvagedWork(result: SingleResult): string {
  export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
  	const preflight = await resolveEffectiveSubagentPolicy(request);
  	const policy = await applySpawnHook(request, await applyAutoTaskModel(request, preflight));
@@ -156,8 +164,45 @@ index 865970ed37..bcc119b2fe 100644
  	const lease = await leaseArtifacts(request.session, request.invocationKind);
  	let changesApplied: boolean | null = null;
  	let mergeSummary = "";
+diff --git a/packages/coding-agent/test/cli-no-context-files.test.ts b/packages/coding-agent/test/cli-no-context-files.test.ts
+index 001679c042..4cda387016 100644
+--- a/packages/coding-agent/test/cli-no-context-files.test.ts
++++ b/packages/coding-agent/test/cli-no-context-files.test.ts
+@@ -11,6 +11,7 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+ import { __resetDirsFromEnvForTests, getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
++import { AUTO_MODEL_ROLE, stubAutoModelChoice } from "./helpers/auto-model";
+ 
+ const PRIMARY_MARKER = "primary-context-marker-7f3a";
+ const EXTRA_ROOT_MARKER = "extra-root-context-marker-2c9d";
+@@ -77,6 +78,8 @@ describe("--no-context-files", () => {
+ 			"compaction.enabled": false,
+ 			"retry.enabled": false,
+ 			includeWorkspaceTree: true,
++			// A subagent never takes the parent's model: the one configured role is what its automatic choice picks.
++			modelRoles: { [AUTO_MODEL_ROLE]: "openai/gpt-4o-mini" },
+ 		});
+ 		const args = parseArgs([
+ 			"--cwd",
+@@ -104,6 +107,7 @@ describe("--no-context-files", () => {
+ 	async function subagentPrompt(session: AgentSession): Promise<string> {
+ 		const createChild = sdkModule.createAgentSession;
+ 		let childPrompt: string | undefined;
++		const autoChoiceSpy = stubAutoModelChoice();
+ 		// The child's prompt is settled once it is created; stop before its first model call.
+ 		const createSpy = spyOn(sdkModule, "createAgentSession").mockImplementation(async childOptions => {
+ 			const created = await createChild(childOptions);
+@@ -120,6 +124,7 @@ describe("--no-context-files", () => {
+ 			});
+ 		} finally {
+ 			createSpy.mockRestore();
++			autoChoiceSpy.mockRestore();
+ 		}
+ 		if (childPrompt === undefined) throw new Error("task tool did not create a subagent session");
+ 		return childPrompt;
 diff --git a/packages/coding-agent/test/eval/agent-bridge-policy.test.ts b/packages/coding-agent/test/eval/agent-bridge-policy.test.ts
-index 49feeaf544..d6ae80cd10 100644
+index e6ac54a2bb..b802039309 100644
 --- a/packages/coding-agent/test/eval/agent-bridge-policy.test.ts
 +++ b/packages/coding-agent/test/eval/agent-bridge-policy.test.ts
 @@ -1,4 +1,4 @@
@@ -217,7 +262,7 @@ index 49feeaf544..d6ae80cd10 100644
  			}),
  		});
  
-@@ -352,9 +361,13 @@ describe("runEvalAgent", () => {
+@@ -349,9 +358,13 @@ describe("runEvalAgent", () => {
  		await runEvalAgentAndWait(
  			{ prompt: "work", agent: "reviewer", model: "p/requested:high" },
  			{
@@ -234,7 +279,29 @@ index 49feeaf544..d6ae80cd10 100644
  			},
  		);
  
-@@ -853,7 +866,7 @@ describe("agent() through eval runtimes", () => {
+@@ -381,13 +394,18 @@ describe("runEvalAgent", () => {
+ 		const session = makeSession({
+ 			activeModel: "p/current",
+ 			modelString: "p/fallback",
+-			settings: Settings.isolated({ "task.perCallModel": "off", "task.isolation.enabled": false }),
++			settings: Settings.isolated({
++				"task.perCallModel": "off",
++				"task.isolation.enabled": false,
++				modelRoles: { [AUTO_MODEL_ROLE]: "p/task-model" },
++			}),
+ 		});
+ 
+ 		await runEvalAgentAndWait({ prompt: "work", model }, { session });
+ 
+-		// The gate stays off: the agent's own frontmatter model applies and no per-call route is recorded.
+-		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/current"]);
++		// The gate stays off and a blank model is omitted: automatic selection chooses, never the parent's
++		// `p/current`, and no per-call route is recorded.
++		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/task-model"]);
+ 		expect(runSpy.mock.calls[0]?.[0]?.perCallModelGrants).toBeUndefined();
+ 	});
+ 
+@@ -867,7 +885,7 @@ describe("agent() through eval runtimes", () => {
  		const { session } = makeEvalSession(
  			tempDir,
  			"js-agent-timeout-pause",
@@ -243,7 +310,7 @@ index 49feeaf544..d6ae80cd10 100644
  		);
  		mockAgents();
  
-@@ -1072,6 +1085,7 @@ describe("runEvalAgent isolation", () => {
+@@ -1086,6 +1104,7 @@ describe("runEvalAgent isolation", () => {
  				"async.enabled": false,
  				"task.isolation.enabled": true,
  				"task.isolation.merge": "patch",
@@ -252,7 +319,7 @@ index 49feeaf544..d6ae80cd10 100644
  			}),
  		});
 diff --git a/packages/coding-agent/test/eval/agent-bridge.test.ts b/packages/coding-agent/test/eval/agent-bridge.test.ts
-index 88d9f0f481..5132a42bee 100644
+index 0544388dee..da3d85b167 100644
 --- a/packages/coding-agent/test/eval/agent-bridge.test.ts
 +++ b/packages/coding-agent/test/eval/agent-bridge.test.ts
 @@ -1,4 +1,4 @@
@@ -269,7 +336,7 @@ index 88d9f0f481..5132a42bee 100644
  
  const jobManagers = new Set<AsyncJobManager>();
  
-@@ -83,7 +84,8 @@ function createUsage(output: number) {
+@@ -84,7 +85,8 @@ function createUsage(output: number) {
  function createBudgetSession(sessionManager: SessionManager): ToolSession {
  	return {
  		cwd: "/tmp",
@@ -279,7 +346,7 @@ index 88d9f0f481..5132a42bee 100644
  		getSessionSpawns: () => "*",
  		getSessionFile: () => null,
  		getTurnBudget: () => sessionManager.getTurnBudget(),
-@@ -92,6 +94,10 @@ function createBudgetSession(sessionManager: SessionManager): ToolSession {
+@@ -93,6 +95,10 @@ function createBudgetSession(sessionManager: SessionManager): ToolSession {
  }
  
  describe("runEvalAgent", () => {
@@ -290,7 +357,7 @@ index 88d9f0f481..5132a42bee 100644
  	afterEach(async () => {
  		vi.restoreAllMocks();
  		await Promise.all([...jobManagers].map(manager => manager.dispose()));
-@@ -184,7 +190,8 @@ describe("runEvalAgent", () => {
+@@ -185,7 +191,8 @@ describe("runEvalAgent", () => {
  		const recordEvalSubagentUsage = vi.fn();
  		const session = {
  			cwd: "/tmp",
@@ -302,10 +369,10 @@ index 88d9f0f481..5132a42bee 100644
  			recordEvalSubagentUsage,
 diff --git a/packages/coding-agent/test/helpers/auto-model.ts b/packages/coding-agent/test/helpers/auto-model.ts
 new file mode 100644
-index 0000000000..1fea4038ec
+index 0000000000..4a6bfed508
 --- /dev/null
 +++ b/packages/coding-agent/test/helpers/auto-model.ts
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,32 @@
 +import { vi } from "bun:test";
 +import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 +import * as autoModelModule from "@oh-my-pi/pi-coding-agent/task/auto-model";
@@ -328,9 +395,12 @@ index 0000000000..1fea4038ec
 +	isBackgroundRefreshPending: () => true,
 +} as unknown as ModelRegistry;
 +
-+/** Make every automatic choice pick the first configured role. `vi.restoreAllMocks()` undoes it. */
-+export function stubAutoModelChoice(): void {
-+	vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockImplementation(async ({ settings }) => {
++/**
++ * Make every automatic choice pick the first configured role. `vi.restoreAllMocks()` undoes it, or call
++ * `mockRestore()` on the returned spy when other spies in the file must stay.
++ */
++export function stubAutoModelChoice() {
++	return vi.spyOn(autoModelModule, "classifyAutoTaskModel").mockImplementation(async ({ settings }) => {
 +		const [first] = Object.keys(settings.getModelRoles());
 +		return first ? { role: `@${first}` } : { failure: "the test configured no role" };
 +	});
@@ -365,7 +435,7 @@ index a5a0cefd3e..f5c312d82e 100644
  	};
  }
 diff --git a/packages/coding-agent/test/sdk-model-selection.test.ts b/packages/coding-agent/test/sdk-model-selection.test.ts
-index cd71356099..7e9b59d581 100644
+index c950fa46a7..8c2fce5fee 100644
 --- a/packages/coding-agent/test/sdk-model-selection.test.ts
 +++ b/packages/coding-agent/test/sdk-model-selection.test.ts
 @@ -36,6 +36,7 @@ import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/s
@@ -451,7 +521,7 @@ index e07e032bda..2d262a582f 100644
  			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
  			const dispatched: executorModule.ExecutorOptions[] = [];
 diff --git a/packages/coding-agent/test/sdk-task-async-guidance.test.ts b/packages/coding-agent/test/sdk-task-async-guidance.test.ts
-index 13bd957be2..af16afcce1 100644
+index 04a10f1227..da00f6e5c3 100644
 --- a/packages/coding-agent/test/sdk-task-async-guidance.test.ts
 +++ b/packages/coding-agent/test/sdk-task-async-guidance.test.ts
 @@ -16,6 +16,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -521,18 +591,42 @@ index 357e7d610c..644d49a32e 100644
  				getSessionSpawns: () => "*",
  				getSessionAgents: () => [],
 diff --git a/packages/coding-agent/test/task/executor-prewalk.test.ts b/packages/coding-agent/test/task/executor-prewalk.test.ts
-index 952fda603c..8a46171989 100644
+index 18fec060c1..84b897f60d 100644
 --- a/packages/coding-agent/test/task/executor-prewalk.test.ts
 +++ b/packages/coding-agent/test/task/executor-prewalk.test.ts
-@@ -24,6 +24,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+@@ -5,11 +5,9 @@
+  * model it resolves to, and when the hand-off is skipped (override off,
+  * target identical to the starting model).
+  */
+-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+-import * as path from "node:path";
++import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+ import type { Model } from "@oh-my-pi/pi-ai";
+ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+-import type { PrewalkRoute } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
+ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+ import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+@@ -18,7 +16,6 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
+ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+ import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+-import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+@@ -27,9 +24,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
  import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
  import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
  import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+-import { TempDir } from "@oh-my-pi/pi-utils";
+-import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+-import { asGlobalFetch } from "../helpers/fetch-mock";
 +import { AUTO_MODEL_ROLE, EMPTY_MODEL_REGISTRY, stubAutoModelChoice } from "../helpers/auto-model";
  import { createSessionDefaults } from "../helpers/session-defaults";
  
- import { cfgTaskAgentPrewalk, cfgTaskPrewalk } from "@oh-my-pi/pi-coding-agent/task/settings";
-@@ -336,6 +337,7 @@ describe("task tool plan-mode prewalk guard", () => {
+ import { cfgTaskAgentPrewalk, cfgTaskAgentPrewalkAuto, cfgTaskPrewalk } from "@oh-my-pi/pi-coding-agent/task/settings";
+@@ -342,6 +337,7 @@ describe("task tool plan-mode prewalk guard", () => {
  	};
  
  	beforeEach(() => {
@@ -540,7 +634,7 @@ index 952fda603c..8a46171989 100644
  		AgentRegistry.resetGlobalForTests();
  		AgentLifecycleManager.resetGlobalForTests();
  	});
-@@ -350,7 +352,11 @@ describe("task tool plan-mode prewalk guard", () => {
+@@ -356,7 +352,11 @@ describe("task tool plan-mode prewalk guard", () => {
  		return {
  			cwd: "/tmp",
  			hasUI: false,
@@ -554,7 +648,7 @@ index 952fda603c..8a46171989 100644
  			getSessionSpawns: () => "*",
  			getPlanModeState: () => (planMode ? { enabled: true, planFilePath: "local://PLAN.md" } : undefined),
 diff --git a/packages/coding-agent/test/task/failed-child-artifact.test.ts b/packages/coding-agent/test/task/failed-child-artifact.test.ts
-index b82f39f21f..295ee13b65 100644
+index 39e1625e19..2aa5ab26c5 100644
 --- a/packages/coding-agent/test/task/failed-child-artifact.test.ts
 +++ b/packages/coding-agent/test/task/failed-child-artifact.test.ts
 @@ -12,6 +12,7 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -587,19 +681,19 @@ index b82f39f21f..295ee13b65 100644
  	AgentLifecycleManager.resetGlobalForTests();
  });
 diff --git a/packages/coding-agent/test/task/prompt-cache.test.ts b/packages/coding-agent/test/task/prompt-cache.test.ts
-index 4765c8c362..a1df891490 100644
+index 3ccdf29a15..4fb5495c09 100644
 --- a/packages/coding-agent/test/task/prompt-cache.test.ts
 +++ b/packages/coding-agent/test/task/prompt-cache.test.ts
 @@ -1,4 +1,4 @@
 -import { afterEach, describe, expect, it, vi } from "bun:test";
 +import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+ import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
  import * as fs from "node:fs";
  import type { Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
- import { buildRequest as buildGeminiRequest } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
-@@ -18,10 +18,15 @@ import * as settingsStream from "@oh-my-pi/pi-coding-agent/session/settings-stre
- import type { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+@@ -20,10 +20,15 @@ import type { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
  import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
  import { TempDir } from "@oh-my-pi/pi-utils";
+ import { localSession } from "../helpers/local-session";
 +import { AUTO_MODEL_ROLE, stubAutoModelChoice } from "../helpers/auto-model";
  
  describe("task sibling prompt-cache routing", () => {
@@ -612,7 +706,7 @@ index 4765c8c362..a1df891490 100644
  	afterEach(async () => {
  		await Promise.all(sessions.splice(0).map(session => session.dispose()));
  		vi.restoreAllMocks();
-@@ -303,6 +308,7 @@ describe("task sibling prompt-cache routing", () => {
+@@ -309,6 +314,7 @@ describe("task sibling prompt-cache routing", () => {
  						"task.structured": true,
  						"marketplace.autoUpdate": "off",
  						"compaction.enabled": false,
@@ -620,7 +714,7 @@ index 4765c8c362..a1df891490 100644
  					}),
  					toolNames: ["task"],
  					spawns: "*",
-@@ -503,6 +509,7 @@ describe("task sibling prompt-cache routing", () => {
+@@ -511,6 +517,7 @@ describe("task sibling prompt-cache routing", () => {
  						"task.structured": true,
  						"marketplace.autoUpdate": "off",
  						"compaction.enabled": false,
@@ -628,7 +722,7 @@ index 4765c8c362..a1df891490 100644
  					}),
  					toolNames: ["task"],
  					spawns: "*",
-@@ -562,6 +569,7 @@ describe("task sibling prompt-cache routing", () => {
+@@ -574,6 +581,7 @@ describe("task sibling prompt-cache routing", () => {
  			"task.structured": true,
  			"marketplace.autoUpdate": "off",
  			"compaction.enabled": false,
@@ -637,7 +731,7 @@ index 4765c8c362..a1df891490 100644
  		const requests: Array<{
  			sessionId: string | undefined;
 diff --git a/packages/coding-agent/test/task/speculative-launch.test.ts b/packages/coding-agent/test/task/speculative-launch.test.ts
-index e6050ef783..7a6869ff90 100644
+index 507edb7204..3a13798a2d 100644
 --- a/packages/coding-agent/test/task/speculative-launch.test.ts
 +++ b/packages/coding-agent/test/task/speculative-launch.test.ts
 @@ -24,6 +24,7 @@ import { BatchArgsScanner, type TaskLaunchSession } from "@oh-my-pi/pi-coding-ag
@@ -662,7 +756,7 @@ index e6050ef783..7a6869ff90 100644
  		}),
  		getSessionFile: () => null,
  		getSessionSpawns: () => "*",
-@@ -144,6 +147,7 @@ describe("task speculative launch", () => {
+@@ -162,6 +165,7 @@ describe("task speculative launch", () => {
  	}
  
  	beforeEach(() => {
@@ -671,18 +765,18 @@ index e6050ef783..7a6869ff90 100644
  		AgentLifecycleManager.resetGlobalForTests();
  		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
-index 16c1c63ae4..a864c5bd5d 100644
+index b3e65269b2..7efc4d2841 100644
 --- a/packages/coding-agent/test/task/structured-subagent.test.ts
 +++ b/packages/coding-agent/test/task/structured-subagent.test.ts
-@@ -46,6 +46,7 @@ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
- import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
- import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+@@ -57,6 +57,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+ import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
  import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+ import { createSessionDefaults } from "../helpers/session-defaults";
 +import { AUTO_MODEL_ROLE, EMPTY_MODEL_REGISTRY, stubAutoModelChoice } from "../helpers/auto-model";
  
  import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
  import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
-@@ -80,6 +81,7 @@ function session(
+@@ -90,6 +91,7 @@ function session(
  	return {
  		cwd: options.cwd ?? "/tmp",
  		hasUI: false,
@@ -690,7 +784,7 @@ index 16c1c63ae4..a864c5bd5d 100644
  		outputSchema: options.outputSchema,
  		settings:
  			options.settings ??
-@@ -88,7 +90,7 @@ function session(
+@@ -98,7 +100,7 @@ function session(
  				"task.isolation.enabled": options.isolationEnabled ?? false,
  				"isolation.backend": "rcopy",
  				"task.enableLsp": true,
@@ -699,7 +793,7 @@ index 16c1c63ae4..a864c5bd5d 100644
  				...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
  				...(options.agentServiceTierOverrides
  					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
-@@ -135,6 +137,10 @@ function mockDiscovery(agent: AgentDefinition = AGENT): void {
+@@ -145,6 +147,10 @@ function mockDiscovery(agent: AgentDefinition = AGENT): void {
  	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
  }
  
@@ -710,7 +804,20 @@ index 16c1c63ae4..a864c5bd5d 100644
  afterEach(() => {
  	vi.restoreAllMocks();
  	resetRegisteredArtifactDirsForTests();
-@@ -641,8 +647,7 @@ describe("structured subagent primitive", () => {
+@@ -417,7 +423,11 @@ describe("structured subagent primitive", () => {
+ 		mockDiscovery({ ...AGENT, model: [selector], thinkingLevel: Effort.High });
+ 		const tagged: AgentDefinition = { ...AGENT, name: "m1", model: [`${selector}:high`], thinkingLevel: Effort.High };
+ 		const untagged: AgentDefinition = { ...AGENT, name: "m2", model: [selector], thinkingLevel: Effort.Medium };
+-		const settings = Settings.isolated({ "task.maxEffort": "low", "task.isolation.enabled": false });
++		const settings = Settings.isolated({
++			"task.maxEffort": "low",
++			"task.isolation.enabled": false,
++			modelRoles: { [AUTO_MODEL_ROLE]: selector },
++		});
+ 		const parent = Object.assign(session({ settings, sessionAgents: [tagged, untagged] }), {
+ 			modelRegistry: { authStorage: {}, refresh: async () => {}, getAvailable: () => [model] },
+ 			getApiKey: async () => "test-key",
+@@ -623,8 +633,7 @@ describe("structured subagent primitive", () => {
  		expect(dispatched[0]).toMatchObject({
  			modelOverride: ["openai/gpt-4o"],
  			modelRole: "definition",
@@ -720,7 +827,7 @@ index 16c1c63ae4..a864c5bd5d 100644
  		});
  		expect(events).toEqual([
  			{
-@@ -656,31 +661,32 @@ describe("structured subagent primitive", () => {
+@@ -638,31 +647,32 @@ describe("structured subagent primitive", () => {
  		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
  	});
  
@@ -776,7 +883,7 @@ index 16c1c63ae4..a864c5bd5d 100644
  
  	it("leaves a host-selected model to its caller instead of classifying it", async () => {
  		mockDiscovery();
-@@ -823,7 +829,7 @@ describe("structured subagent primitive", () => {
+@@ -805,7 +815,7 @@ describe("structured subagent primitive", () => {
  			tools: ["read", "yield"],
  			model: [`mock/${model.id}`],
  		});
@@ -785,16 +892,17 @@ index 16c1c63ae4..a864c5bd5d 100644
  			authStorage,
  			modelRegistry,
  			restrictToolNames: true,
-@@ -913,6 +919,7 @@ describe("structured subagent primitive", () => {
- 				"advisor.enabled": false,
- 				"autolearn.enabled": false,
- 				"todo.enabled": false,
-+				modelRoles: { [AUTO_MODEL_ROLE]: `mock/${model.id}` },
- 			});
- 			const parentSession = Object.assign(session({ cwd, settings, planMode: true, parentSpawns: "seance,scout" }), {
- 				authStorage,
+@@ -1843,7 +1853,7 @@ describe("session upstream routing inheritance", () => {
+ 			// The parent's model is never a subagent's model, pinned upstream or not: with no role alias to choose, the spawn stops.
+ 			expect(result.isError).toBe(true);
+ 			expect(runSpy).not.toHaveBeenCalled();
+-			expect(JSON.stringify(result.content)).toContain("No parent model is used");
++			expect(JSON.stringify(result.content)).toContain("no other model stands in");
+ 		} finally {
+ 			await parentSession.dispose();
+ 		}
 diff --git a/packages/coding-agent/test/task/subagent-lsp.test.ts b/packages/coding-agent/test/task/subagent-lsp.test.ts
-index 33a0174042..1134157bc9 100644
+index bce25e093e..814e13e52d 100644
 --- a/packages/coding-agent/test/task/subagent-lsp.test.ts
 +++ b/packages/coding-agent/test/task/subagent-lsp.test.ts
 @@ -1,4 +1,4 @@
@@ -803,7 +911,7 @@ index 33a0174042..1134157bc9 100644
  import * as fs from "node:fs/promises";
  import * as os from "node:os";
  import * as path from "node:path";
-@@ -21,6 +21,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
+@@ -26,6 +26,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
  import "@oh-my-pi/pi-coding-agent/tools/yield";
  import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
  import { createSessionDefaults } from "../helpers/session-defaults";
@@ -811,7 +919,7 @@ index 33a0174042..1134157bc9 100644
  import { pinnedTaskModels } from "../helpers/task-model-pin";
  
  const TEST_TASK: TaskParams = { agent: "task", name: "CheckLsp", task: "Inspect LSP tools." };
-@@ -170,6 +171,10 @@ function mockIsolation(): void {
+@@ -176,6 +177,10 @@ function mockIsolation(): void {
  }
  
  describe("subagent LSP availability", () => {
@@ -823,18 +931,18 @@ index 33a0174042..1134157bc9 100644
  		vi.restoreAllMocks();
  	});
 diff --git a/packages/coding-agent/test/task/task-batch.test.ts b/packages/coding-agent/test/task/task-batch.test.ts
-index ad065e6b24..63a323a0b1 100644
+index 71d98a06cb..545ba8b1d6 100644
 --- a/packages/coding-agent/test/task/task-batch.test.ts
 +++ b/packages/coding-agent/test/task/task-batch.test.ts
-@@ -31,6 +31,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+@@ -30,6 +30,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
  import { isRecord } from "@oh-my-pi/pi-utils";
  
  import { cfgTaskDisabledAgents, cfgTaskEnableEffort, cfgTaskStructured } from "@oh-my-pi/pi-coding-agent/task/settings";
-+import { EMPTY_MODEL_REGISTRY, stubAutoModelChoice } from "../helpers/auto-model";
++import { AUTO_MODEL_ROLE, EMPTY_MODEL_REGISTRY, stubAutoModelChoice } from "../helpers/auto-model";
  import { pinnedTaskModels } from "../helpers/task-model-pin";
  
  const taskAgent: AgentDefinition = {
-@@ -52,6 +53,7 @@ function createSession(
+@@ -51,6 +52,7 @@ function createSession(
  	return {
  		cwd: "/tmp",
  		hasUI: false,
@@ -842,7 +950,7 @@ index ad065e6b24..63a323a0b1 100644
  		settings: Settings.isolated({ ...pinnedTaskModels(options.settings), ...(options.settings ?? {}) }),
  		getSessionFile: () => null,
  		getSessionSpawns: () => options.spawns ?? "*",
-@@ -102,6 +104,10 @@ function mockDiscovery(agent: AgentDefinition | AgentDefinition[] = taskAgent):
+@@ -101,6 +103,10 @@ function mockDiscovery(agent: AgentDefinition | AgentDefinition[] = taskAgent):
  		projectAgentsDir: null,
  	});
  }
@@ -853,7 +961,15 @@ index ad065e6b24..63a323a0b1 100644
  describe("task.batch schema gating", () => {
  	afterEach(() => {
  		vi.restoreAllMocks();
-@@ -585,7 +591,8 @@ describe("task.batch spawning", () => {
+@@ -415,6 +421,7 @@ describe("task.batch validation", () => {
+ 					"task.structured": options.structured,
+ 					"task.isolation.enabled": options.isolation,
+ 					"task.perCallModel": "off",
++					modelRoles: { [AUTO_MODEL_ROLE]: "default/route" },
+ 				},
+ 			}),
+ 		);
+@@ -636,7 +643,8 @@ describe("task.batch spawning", () => {
  		});
  		expect(seen.get("Role")).toEqual(["mock/role-model"]);
  		expect(seen.get("Concrete")).toEqual(["mock/other"]);
@@ -863,7 +979,7 @@ index ad065e6b24..63a323a0b1 100644
  	});
  
  	it("spawns one background job per task item and forwards independent models and schemas with shared context", async () => {
-@@ -728,7 +735,7 @@ describe("task.batch spawning", () => {
+@@ -779,7 +787,7 @@ describe("task.batch spawning", () => {
  					"async.enabled": true,
  					"task.batch": true,
  					"task.structured": true,
@@ -872,7 +988,7 @@ index ad065e6b24..63a323a0b1 100644
  					"task.agentModelOverrides": {},
  				},
  			}),
-@@ -754,13 +761,13 @@ describe("task.batch spawning", () => {
+@@ -805,13 +813,13 @@ describe("task.batch spawning", () => {
  		const reviewerSpawn = byId.get("Review");
  		expect(scoutSpawn?.agent).toBe(scoutAgent);
  		expect(scoutSpawn?.agent.tools).toEqual(["read"]);
@@ -888,6 +1004,22 @@ index ad065e6b24..63a323a0b1 100644
  		expect(reviewerSpawn?.outputSchema).toBe(callerSchema);
  		expect(reviewerSpawn?.outputSchemaSource).toBe("caller");
  		expect(reviewerSpawn?.outputSchemaOverridesAgent).toBe(true);
+@@ -1085,7 +1093,14 @@ describe("batch model placement", () => {
+ 				.spyOn(executorModule, "runSubprocess")
+ 				.mockImplementation(async options => makeResult(options.id ?? "?"));
+ 			const tool = await TaskTool.create(
+-				createSession({ settings: { "async.enabled": false, "task.batch": true, "task.perCallModel": "off" } }),
++				createSession({
++					settings: {
++						"async.enabled": false,
++						"task.batch": true,
++						"task.perCallModel": "off",
++						modelRoles: { [AUTO_MODEL_ROLE]: "openai/gpt-4.1-mini" },
++					},
++				}),
+ 			);
+ 			const item = { task: "work", solutionSpace: "bounded", model: [] as string[] };
+ 			const params = { context: "ctx", model, tasks: [item] };
 diff --git a/packages/coding-agent/test/task/task-blocking-split.test.ts b/packages/coding-agent/test/task/task-blocking-split.test.ts
 index 476c5bed93..35dd5d0d91 100644
 --- a/packages/coding-agent/test/task/task-blocking-split.test.ts
@@ -916,26 +1048,6 @@ index 476c5bed93..35dd5d0d91 100644
  		AgentRegistry.resetGlobalForTests();
  		AgentLifecycleManager.resetGlobalForTests();
  	});
-diff --git a/packages/coding-agent/test/task/task-file.test.ts b/packages/coding-agent/test/task/task-file.test.ts
-index 061f43e90f..ec0cccaa25 100644
---- a/packages/coding-agent/test/task/task-file.test.ts
-+++ b/packages/coding-agent/test/task/task-file.test.ts
-@@ -17,6 +17,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
- import { recordApprovalGrant, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
- import { getApprovalGrants } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
- import type { AgentProgress, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-+import { stubAutoModelChoice } from "../helpers/auto-model";
- import { pinnedTaskModels } from "../helpers/task-model-pin";
- 
- function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
-@@ -36,6 +37,7 @@ describe("taskFile dispatch", () => {
- 	const started = new Map<string, PromiseWithResolvers<void>>();
- 
- 	beforeEach(async () => {
-+		stubAutoModelChoice();
- 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-file-"));
- 		executions.length = 0;
- 		AgentRegistry.resetGlobalForTests();
 diff --git a/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts b/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
 index 28cf576c3f..f309f4e0bd 100644
 --- a/packages/coding-agent/test/task/task-never-inherit-parent-model.test.ts
@@ -1042,8 +1154,66 @@ index 28cf576c3f..f309f4e0bd 100644
  		await fs.rm(perCall.artifactsDir, { recursive: true, force: true });
  		await fs.rm(host.artifactsDir, { recursive: true, force: true });
  	});
+diff --git a/packages/coding-agent/test/task/task-preflight.test.ts b/packages/coding-agent/test/task/task-preflight.test.ts
+index 61c1a0ba5d..bc65657b34 100644
+--- a/packages/coding-agent/test/task/task-preflight.test.ts
++++ b/packages/coding-agent/test/task/task-preflight.test.ts
+@@ -12,6 +12,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import { AUTO_MODEL_ROLE, EMPTY_MODEL_REGISTRY, stubAutoModelChoice } from "../helpers/auto-model";
+ 
+ const taskAgent: AgentDefinition = {
+ 	name: "task",
+@@ -96,12 +97,6 @@ describe("task async preflight", () => {
+ 			settings: { "task.perCallModel": "on" },
+ 			expectation: "invalid `model`",
+ 		},
+-		{
+-			name: "EmptyModel",
+-			params: { agent: "task", name: "EmptyModel", task: "Work.", model: " " },
+-			settings: { "task.perCallModel": "on" },
+-			expectation: "invalid `model`",
+-		},
+ 		{
+ 			name: "Disabled",
+ 			params: { agent: "task", name: "Disabled", task: "Work." },
+@@ -182,10 +177,18 @@ describe("task async preflight", () => {
+ 
+ 	it.each([false, true])("treats a blank per-call model as omitted (batch=%s)", async batch => {
+ 		mockDiscovery();
++		stubAutoModelChoice();
+ 		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("BlankModel"));
+-		const tool = await TaskTool.create(
+-			createSession({ manager: manager(), settings: { "async.enabled": false, "task.batch": batch } }),
+-		);
++		const session = createSession({
++			manager: manager(),
++			settings: {
++				"async.enabled": false,
++				"task.batch": batch,
++				modelRoles: { [AUTO_MODEL_ROLE]: "openai/gpt-4.1-mini" },
++			},
++		});
++		Object.assign(session, { modelRegistry: EMPTY_MODEL_REGISTRY });
++		const tool = await TaskTool.create(session);
+ 
+ 		const result = await tool.execute(
+ 			"blank-model",
+@@ -199,8 +202,9 @@ describe("task async preflight", () => {
+ 
+ 		expect(result.isError).toBeFalsy();
+ 		expect(runSubprocess).toHaveBeenCalledTimes(1);
+-		// A blank selector is absence: the task uses its configured model, not a per-call route.
++		// A blank selector is absence: automatic selection chooses the model, not a per-call route.
+ 		expect(runSubprocess.mock.calls[0]?.[0]?.perCallModelGrants).toBeUndefined();
++		expect(runSubprocess.mock.calls[0]?.[0]?.modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+ 	});
+ 
+ 	it("names the searched agent directories, home-shortened, when the agent is unknown", async () => {
 diff --git a/packages/coding-agent/test/task/task-spawn.test.ts b/packages/coding-agent/test/task/task-spawn.test.ts
-index 52ec0eb694..57a2f4aed4 100644
+index 1172dd15d0..923112e1bc 100644
 --- a/packages/coding-agent/test/task/task-spawn.test.ts
 +++ b/packages/coding-agent/test/task/task-spawn.test.ts
 @@ -26,12 +26,14 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -1077,7 +1247,7 @@ index 52ec0eb694..57a2f4aed4 100644
  		AgentRegistry.resetGlobalForTests();
  		AgentLifecycleManager.resetGlobalForTests();
  		IrcBus.resetGlobalForTests();
-@@ -222,12 +226,17 @@ describe("task spawn routing", () => {
+@@ -231,12 +235,17 @@ describe("task spawn routing", () => {
  			agents: [{ ...taskAgent, model: ["@task"] }],
  			projectAgentsDir: null,
  		});
@@ -1100,7 +1270,7 @@ index 52ec0eb694..57a2f4aed4 100644
  		try {
  			const deps = createAgentsHubDeps(session.cwd, session.settings, new ModelRegistry(auth), () => ({
  				explicit: [],
-@@ -235,21 +244,11 @@ describe("task spawn routing", () => {
+@@ -244,21 +253,11 @@ describe("task spawn routing", () => {
  				configuredLevel: "user",
  				mode: "explicit-only",
  			}));
@@ -1124,7 +1294,7 @@ index 52ec0eb694..57a2f4aed4 100644
  		} finally {
  			auth.close();
  		}
-@@ -279,7 +278,7 @@ describe("task spawn routing", () => {
+@@ -288,7 +287,7 @@ describe("task spawn routing", () => {
  		expect(signals[0]).toBeInstanceOf(AbortSignal);
  		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
  		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe(
@@ -1133,7 +1303,7 @@ index 52ec0eb694..57a2f4aed4 100644
  		);
  	});
  
-@@ -984,6 +983,7 @@ describe("task spawn routing", () => {
+@@ -993,6 +992,7 @@ describe("task spawn routing", () => {
  		const tool = await TaskTool.create({
  			cwd: "/tmp",
  			hasUI: false,
@@ -1141,7 +1311,7 @@ index 52ec0eb694..57a2f4aed4 100644
  			settings,
  			getSessionFile: () => null,
  			getSessionSpawns: () => "*",
-@@ -1035,6 +1035,7 @@ describe("task spawn routing", () => {
+@@ -1044,6 +1044,7 @@ describe("task spawn routing", () => {
  		const tool = await TaskTool.create({
  			cwd: "/tmp",
  			hasUI: false,

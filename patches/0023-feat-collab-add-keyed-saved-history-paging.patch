@@ -33,7 +33,7 @@ index c78290df89..df752e0e62 100644
  
  Transcript fetches are capped at 4 MiB per reply and end on complete JSONL lines. Guests continue from `newSize`; a single entry exceeding the cap produces a terminal transcript error instead of an endless empty-read retry.
 diff --git a/packages/coding-agent/src/collab/host.ts b/packages/coding-agent/src/collab/host.ts
-index b0eb938a98..2748110ef2 100644
+index d15ed9ea6b..31d454fd63 100644
 --- a/packages/coding-agent/src/collab/host.ts
 +++ b/packages/coding-agent/src/collab/host.ts
 @@ -20,6 +20,7 @@ import type {
@@ -44,7 +44,7 @@ index b0eb938a98..2748110ef2 100644
  	AgentEvent as WireAgentEvent,
  	SessionEntry as WireSessionEntry,
  } from "@oh-my-pi/pi-wire";
-@@ -33,6 +34,7 @@ import { SessionManager } from "../session/session-manager";
+@@ -34,6 +35,7 @@ import { SessionManager } from "../session/session-manager";
  import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
  import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
  import { collabDisplayName } from "./display-name";
@@ -52,10 +52,11 @@ index b0eb938a98..2748110ef2 100644
  import {
  	type AgentSnapshot,
  	COLLAB_PROMPT_MESSAGE_TYPE,
-@@ -136,6 +138,11 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
-  */
+@@ -142,6 +144,12 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
  const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  const MAX_PENDING_UI_REQUESTS = 64;
+ const RESYNC_MESSAGE = "the host discarded your backlog; rejoin to resync";
++
 +const SAVED_HISTORY_SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 +const SAVED_HISTORY_REVISION_RE = /^[0-9a-f]{64}$/;
 +const SAVED_SESSIONS_PAGE = 64;
@@ -64,7 +65,7 @@ index b0eb938a98..2748110ef2 100644
  /**
   * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
   * response (an `undefined` value is a genuine guest cancel); `unavailable`
-@@ -235,6 +242,8 @@ export class CollabHost {
+@@ -243,6 +251,8 @@ export class CollabHost {
  	 * still owed a resync error.
  	 */
  	#peers = new Map<number, { name: string; canWrite: boolean }>();
@@ -73,7 +74,7 @@ index b0eb938a98..2748110ef2 100644
  	/**
  	 * Never reset, including across a room recreation: ids must not be reissued, or
  	 * a late `ui-response` carrying an old id would settle an unrelated new request.
-@@ -767,6 +776,16 @@ export class CollabHost {
+@@ -857,6 +867,16 @@ export class CollabHost {
  			case "list-saved-sessions":
  				void this.#handleListSavedSessions(frame.reqId, frame.offset, frame.historyKey, fromPeer);
  				break;
@@ -90,7 +91,7 @@ index b0eb938a98..2748110ef2 100644
  			default:
  				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
  		}
-@@ -787,13 +806,13 @@ export class CollabHost {
+@@ -877,13 +897,13 @@ export class CollabHost {
  			return;
  		}
  		try {
@@ -108,7 +109,7 @@ index b0eb938a98..2748110ef2 100644
  				created: session.created.getTime(),
  				modified: session.modified.getTime(),
  			}));
-@@ -814,6 +833,94 @@ export class CollabHost {
+@@ -904,6 +924,94 @@ export class CollabHost {
  		}
  	}
  
@@ -204,17 +205,17 @@ index b0eb938a98..2748110ef2 100644
  	async #verifyHistoryKey(value: string): Promise<boolean> {
  		const path = process.env.OMP_COLLAB_HISTORY_KEY_FILE;
 diff --git a/packages/coding-agent/src/collab/protocol.ts b/packages/coding-agent/src/collab/protocol.ts
-index ebe6cc9736..5eb8fa2854 100644
+index 56401749f4..151e4ab6a3 100644
 --- a/packages/coding-agent/src/collab/protocol.ts
 +++ b/packages/coding-agent/src/collab/protocol.ts
-@@ -94,6 +94,7 @@ export type CollabFrame =
+@@ -100,6 +100,7 @@ export type CollabFrame =
  	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
  	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
  	| Extract<HostFrame, { t: "saved-sessions" }>
 +	| Extract<HostFrame, { t: "saved-history" }>
  	| { t: "bye"; reason: string }
- 	| { t: "error"; message: string };
- 
+ 	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
+ 	| { t: "error"; message: string; resync?: true };
 diff --git a/packages/coding-agent/src/collab/saved-history.ts b/packages/coding-agent/src/collab/saved-history.ts
 new file mode 100644
 index 0000000000..98b250097e
@@ -512,10 +513,10 @@ index 0000000000..98b250097e
 +	return out;
 +}
 diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
-index 853b9423a5..1d2ac04f16 100644
+index 6f0e87fc4a..8969a9572a 100644
 --- a/packages/wire/src/index.ts
 +++ b/packages/wire/src/index.ts
-@@ -343,7 +343,8 @@ export type GuestFrame =
+@@ -345,7 +345,8 @@ export type GuestFrame =
  	| { t: "abort" }
  	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
  	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
@@ -525,7 +526,7 @@ index 853b9423a5..1d2ac04f16 100644
  
  /** EventBus channels mirrored to guests (task subagent traffic only). */
  export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
-@@ -389,9 +390,16 @@ export type HostFrame =
+@@ -391,10 +392,17 @@ export type HostFrame =
  			nextOffset?: number;
  			error?: "unavailable" | "invalid_request";
  	  }
@@ -534,7 +535,8 @@ index 853b9423a5..1d2ac04f16 100644
 +	| { t: "saved-history"; reqId: number; revision: string; offset: number; bytes: string; done: true }
 +	| { t: "saved-history"; reqId: number; revision: string; offset: number; bytes: string; done: false; nextOffset: number }
  	| { t: "bye"; reason: string }
- 	| { t: "error"; message: string };
+ 	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
+ 	| { t: "error"; message: string; resync?: true };
  
 +/** Reasons a saved-history read fails. Never carries a path. */
 +export type SavedHistoryErrorCode = "unavailable" | "invalid_request" | "not_found" | "ambiguous" | "changed";

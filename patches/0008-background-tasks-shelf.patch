@@ -1,5 +1,5 @@
 diff --git a/docs/agent-hub.md b/docs/agent-hub.md
-index 0502c732ee..cc30b240d7 100644
+index 17ea8ed2ef..d563de8eb2 100644
 --- a/docs/agent-hub.md
 +++ b/docs/agent-hub.md
 @@ -87,6 +87,10 @@ While subagents run, a pinned `Subagents` block above the editor lists every liv
@@ -14,19 +14,19 @@ index 0502c732ee..cc30b240d7 100644
  
  Set `display.subagentLivePreview: true` to add a second line under each row showing what that agent is doing: its current tool call (or, between calls, the most recent one) with a one-line detail, plus the elapsed time once a call runs longer than five seconds. Off by default.
 diff --git a/docs/settings.md b/docs/settings.md
-index ea0273c7d7..7183dd079a 100644
+index 7cc864a068..008bf77a89 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -902,6 +902,7 @@ tui:
+@@ -963,6 +963,7 @@ tui:
  | `tui.autoGraph`               | enum    | `auto`           | Chart numeric tables in the agent's answers, in the theme's colors, on terminals that show graphics: `always` uses the built-in best guess, `smart` lets the judge model refine each chart (kind, columns, row names and grouping, scales and reference row, which way each measure is better, the focus row, and the title, or no chart at all) for every table the guess would chart, `auto` is `smart` while the judge role resolves to a native TypeSafe jev model and `always` otherwise, `off` leaves tables alone. Tern receives the chart as SVG. Applies to the main session in the TUI only: subagent transcripts, print, RPC, and ACP output stay plain, and their system prompts omit the diagram and chart guidance. |
- | `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on [extension-owned links](./extensions.md#extension-link-schemes) reach their extension (`app.links.hint` picks them without the mouse). Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on.                                                                                                                                                                                                                                           |
+ | `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on [extension-owned links](./extensions.md#extension-link-schemes) reach their extension (`app.links.hint` picks them without the mouse). Native text selection becomes Shift+drag while on, and mouse capture stops wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off.                                                                                                                                                                                                                                           |
  | `display.pinnedAgents`        | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 +| `display.pinnedJobs`          | enum    | `collapsed`      | Pinned background-task shelf above the subagent shelf: running backgrounded `bash` commands, `eval` cells and services. `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all.                                                                                                                                                                                                                                                                                                                                                                                                                  |
  | `display.subagentLivePreview` | boolean | `false`          | Show each pinned subagent's current (or most recent) tool call beneath its jump-list row.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
  | `tui.resizeScrollback`        | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport.                                                                                                                                                                                                                                                                                                                                                   |
  | `tui.completeScrollback`      | boolean | `false`          | Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback. When it shrinks, blank rows sit between the transcript and the input until new output fills them.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index b5bba9b1dd..d113000863 100644
+index 1a93e5604b..5f0805dfed 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -4,6 +4,7 @@
@@ -37,81 +37,27 @@ index b5bba9b1dd..d113000863 100644
  - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
  - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
  - Answer MCP form elicitation requests (`elicitation/create`) with a dialog. Dismissing the dialog, or having no screen, cancels the request and never accepts it. URL mode is refused.
-diff --git a/packages/coding-agent/src/async/job-manager.ts b/packages/coding-agent/src/async/job-manager.ts
-index 0460ff5042..344b08a4ab 100644
---- a/packages/coding-agent/src/async/job-manager.ts
-+++ b/packages/coding-agent/src/async/job-manager.ts
-@@ -315,6 +315,33 @@ export class AsyncJobManager {
- 	/** Live widgets of this root's jobs; set by the root session when widgets are available. */
- 	widgets: JobWidgetRegistry | undefined;
- 	readonly #settleListeners = new Set<() => void>();
-+	readonly #startListeners = new Set<() => void>();
-+
-+	/**
-+	 * Calls `listener` whenever a job starts running as a background job: registered
-+	 * as one, or promoted from a foreground call that outlived it (see
-+	 * {@link AsyncJobManager.backgroundJob}). Foreground-backed jobs stay silent
-+	 * until promoted, matching the listings. Returns the unsubscribe.
-+	 */
-+	onJobStarted(listener: () => void): () => void {
-+		this.#startListeners.add(listener);
-+		return () => {
-+			this.#startListeners.delete(listener);
-+		};
-+	}
-+
-+	#notifyJobStarted(jobId: string): void {
-+		for (const listener of this.#startListeners) {
-+			try {
-+				listener();
-+			} catch (error) {
-+				logger.warn("Async job start listener failed", {
-+					jobId,
-+					error: error instanceof Error ? error.message : String(error),
-+				});
-+			}
-+		}
-+	}
- 
- 	/**
- 	 * Calls `listener` whenever a job settles (completed, failed or cancelled), so
-@@ -490,6 +517,7 @@ export class AsyncJobManager {
- 		})();
- 
- 		this.#jobs.set(id, job);
-+		if (!job.foreground) this.#notifyJobStarted(id);
- 		return id;
- 	}
- 
-@@ -588,6 +616,7 @@ export class AsyncJobManager {
- 		if (job.status === "completed" || job.status === "failed") {
- 			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
- 		}
-+		if (job.status === "running") this.#notifyJobStarted(jobId);
- 		return true;
- 	}
- 
 diff --git a/packages/coding-agent/src/launch/live-services.ts b/packages/coding-agent/src/launch/live-services.ts
 new file mode 100644
-index 0000000000..ca7cb57a71
+index 0000000000..f1ab41de0e
 --- /dev/null
 +++ b/packages/coding-agent/src/launch/live-services.ts
 @@ -0,0 +1,109 @@
 +/**
 + * Running services of this process's sessions, kept so the TUI's Background tasks
-+ * shelf can list them without asking the daemon broker. `services.ts` feeds it from
-+ * every broker reply and completion notice it already handles, so it is as current as
++ * shelf can list them without asking the daemon. `services.ts` feeds it from
++ * every daemon reply and completion notice it already handles, so it is as current as
 + * the session's own view of its services, and it never wakes an idle UI.
 + */
 +import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
-+import type { DaemonSnapshot, DaemonState } from "@oh-my-pi/pi-tui/tools/daemon";
++import type { DaemonState, UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 +
 +/** A running service as the Background tasks shelf lists it. */
 +export interface LiveService {
 +	/** Session that owns the service. */
 +	readonly owner: string;
 +	readonly name: string;
-+	/** Daemon instance id; a restart under the same name is a new instance. */
++	/** Unit id; a restart under the same name is a new instance. */
 +	readonly id: string;
 +	readonly startedAt: number;
 +	readonly state: DaemonState;
@@ -128,24 +74,24 @@ index 0000000000..ca7cb57a71
 +	for (const listener of listeners) listener();
 +}
 +
-+/** Store `daemon` into `owned` without notifying; true when that changed the owner's services. */
++/** Store `unit` into `owned` without notifying; true when that changed the owner's services. */
 +function storeService(
 +	owned: Map<string, LiveService>,
 +	owner: string,
-+	daemon: DaemonSnapshot,
++	unit: UnitSnapshot,
 +	command: string | undefined,
 +): boolean {
-+	if (TERMINAL_STATES[daemon.state]) return owned.delete(daemon.name);
-+	const previous = owned.get(daemon.name);
++	if (TERMINAL_STATES[unit.state]) return owned.delete(unit.key);
++	const previous = owned.get(unit.key);
 +	const next: LiveService = {
 +		owner,
-+		name: daemon.name,
-+		id: daemon.id,
-+		startedAt: daemon.startedAt,
-+		state: daemon.state,
-+		pid: daemon.pid,
++		name: unit.key,
++		id: unit.id,
++		startedAt: unit.startedAt,
++		state: unit.state,
++		pid: unit.pids[0],
 +		// A later reply for the same instance carries no command; keep the one the launch recorded.
-+		command: command ?? (previous?.id === daemon.id ? previous.command : undefined),
++		command: command ?? (previous?.id === unit.id ? previous.command : undefined),
 +	};
 +	if (
 +		previous &&
@@ -157,7 +103,7 @@ index 0000000000..ca7cb57a71
 +	) {
 +		return false;
 +	}
-+	owned.set(daemon.name, next);
++	owned.set(unit.key, next);
 +	return true;
 +}
 +
@@ -170,20 +116,20 @@ index 0000000000..ca7cb57a71
 +	return owned;
 +}
 +
-+/** Record `daemon` as `owner`'s latest state for that service; a settled one is dropped. */
-+export function recordLiveService(owner: string, daemon: DaemonSnapshot, command?: string): void {
-+	if (storeService(ownedServices(owner), owner, daemon, command)) notify();
++/** Record `unit` as `owner`'s latest state for that service; a settled one is dropped. */
++export function recordLiveService(owner: string, unit: UnitSnapshot, command?: string): void {
++	if (storeService(ownedServices(owner), owner, unit, command)) notify();
 +}
 +
-+/** Replace `owner`'s services with the broker's list of them, dropping any the broker no longer knows. */
-+export function replaceLiveServices(owner: string, daemons: readonly DaemonSnapshot[]): void {
++/** Replace `owner`'s services with the daemon's list of them, dropping any the daemon no longer knows. */
++export function replaceLiveServices(owner: string, units: readonly UnitSnapshot[]): void {
 +	const owned = ownedServices(owner);
 +	let changed = false;
-+	const listed = new Set(daemons.map(daemon => daemon.name));
++	const listed = new Set(units.map(unit => unit.key));
 +	for (const name of owned.keys()) {
 +		if (!listed.has(name)) changed = owned.delete(name) || changed;
 +	}
-+	for (const daemon of daemons) changed = storeService(owned, owner, daemon, undefined) || changed;
++	for (const unit of units) changed = storeService(owned, owner, unit, undefined) || changed;
 +	if (changed) notify();
 +}
 +
@@ -207,78 +153,70 @@ index 0000000000..ca7cb57a71
 +	};
 +}
 diff --git a/packages/coding-agent/src/launch/services.ts b/packages/coding-agent/src/launch/services.ts
-index 865ce7e70f..ad169ad81b 100644
+index b482a450b0..a5b01cfb4c 100644
 --- a/packages/coding-agent/src/launch/services.ts
 +++ b/packages/coding-agent/src/launch/services.ts
-@@ -6,6 +6,7 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
- import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
- import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
- import { type DaemonBrokerClient, daemonClientForProject } from "./client";
+@@ -21,6 +21,7 @@ import {
+ } from "../daemon/protocol";
+ import { shellProcessCommand } from "../exec/shell-process";
+ import { isUrlPath } from "../internal-urls/url-filesystem";
 +import { clearLiveServices, recordLiveService, replaceLiveServices } from "./live-services";
- import { canonicalProjectDir } from "./paths";
- import type { DaemonOperation, DaemonRpcResult } from "./protocol";
- import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
-@@ -75,6 +76,7 @@ function track(session: ToolSession, daemon: DaemonSnapshot): void {
- 	const services = serviceState(session).owned;
- 	if (TERMINAL_STATES[daemon.state]) services.delete(daemon.name);
- 	else services.set(daemon.name, { id: daemon.id, startedAt: daemon.startedAt });
-+	if (owner) recordLiveService(owner, daemon);
+ import type { ToolSession } from "../tools";
+ import { isSharedBrowserUnit } from "../tools/browser/shared-daemon";
+ import { resolveToCwd } from "../tools/path-utils";
+@@ -135,6 +136,7 @@ function track(session: ToolSession, unit: UnitSnapshot): void {
+ 			scope: unit.scope,
+ 			leased: unit.policy.hold === "leases",
+ 		});
++	if (owner) recordLiveService(owner, unit);
  }
  
- function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
-@@ -95,6 +97,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
+ function notifyListeners(session: ToolSession): void {
+@@ -191,6 +193,7 @@ function subscribe(session: ToolSession, client: DaemonClient): void {
  		unsubscribe({ preservePending: true });
- 		clients.delete(client);
- 		serviceState(session).owned.clear();
+ 		state.subscribed = false;
+ 		state.owned.clear();
 +		clearLiveServices(owner);
- 		for (const listener of serviceState(session).listeners) listener();
- 	});
- 	session.registerSessionChangeCallback?.(() => {
-@@ -103,6 +106,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
- 		unsubscribe({ preservePending: true });
- 		clients.delete(client);
- 		serviceState(session).owned.clear();
-+		clearLiveServices(owner);
- 		for (const listener of serviceState(session).listeners) listener();
- 	});
+ 		notifyListeners(session);
+ 	};
+ 	session.registerDisposeCallback?.(detach);
+@@ -226,6 +229,12 @@ export async function listServices(session: ToolSession, signal?: AbortSignal):
+ 	const owner = serviceOwner(session);
+ 	serviceState(session).owned.clear();
+ 	for (const unit of units) if (unit.owner === owner) track(session, unit);
++	if (owner) {
++		replaceLiveServices(
++			owner,
++			units.filter(unit => unit.owner === owner),
++		);
++	}
+ 	return units;
  }
-@@ -119,6 +123,12 @@ async function request(
- 		const owner = serviceOwner(session);
- 		serviceState(session).owned.clear();
- 		for (const daemon of result.daemons) if (daemon.owner === owner) track(session, daemon);
-+		if (owner) {
-+			replaceLiveServices(
-+				owner,
-+				result.daemons.filter(daemon => daemon.owner === owner),
-+			);
-+		}
- 	} else if ("daemon" in result) track(session, result.daemon);
- 	return result;
- }
-@@ -266,6 +276,9 @@ export async function startService(
- 	);
- 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
- 	const launched = result.daemon;
+ 
+@@ -397,6 +406,9 @@ export async function startService(
+ 	});
+ 	const launched = opened.unit;
+ 	track(session, launched);
 +	const launchOwner = serviceOwner(session);
 +	// Only a launch records its command: later replies for the same service carry just the snapshot.
 +	if (launchOwner && launched.owner === launchOwner) recordLiveService(launchOwner, launched, params.command);
- 	// A legacy broker ignores `awaitReady` and already waited: its result is
- 	// ready, terminal, or timed out, so the wait phase is skipped.
- 	if (
+ 	const notifyArmed = params.notify !== undefined;
+ 	const readyPending = (unit: UnitSnapshot): boolean =>
+ 		proc.ready !== undefined && unit.readyAt === undefined && !TERMINAL_STATES[unit.state];
 diff --git a/packages/coding-agent/src/modes/controllers/input-controller.ts b/packages/coding-agent/src/modes/controllers/input-controller.ts
-index c9ce8e629b..24c0b632cc 100644
+index 69efcbcfc1..3b0d284c93 100644
 --- a/packages/coding-agent/src/modes/controllers/input-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/input-controller.ts
-@@ -50,7 +50,7 @@ import { openLocalFileInEditor } from "../local-file-editor";
+@@ -51,7 +51,7 @@ import { openLocalFileInEditor } from "../local-file-editor";
  import { AgentRegistry } from "../../registry/agent-registry";
- import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+ import type { DequeuedMessage, RestoredQueuedMessage } from "../../session/agent-session-types";
  import { USER_INTERRUPT_LABEL } from "../../session/messages";
 -import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 +import { PINNED_HUD_TOGGLE_ID, PINNED_JOBS_TOGGLE_ID } from "../../task/output-manager";
  import { pickRecentFocusableAgentId } from "./session-focus-controller";
  import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
  import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
-@@ -945,6 +945,10 @@ export class InputController {
+@@ -984,6 +984,10 @@ export class InputController {
  			this.ctx.togglePinnedHudExpanded();
  			return;
  		}
@@ -290,18 +228,18 @@ index c9ce8e629b..24c0b632cc 100644
  		// focusing an unrelated recent agent would open something other than
  		// what the click displayed.
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 0beefa60a6..77db4d204c 100644
+index eeffdea231..54e499e8fc 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -48,6 +48,7 @@ import {
- 	latestJobWidget,
- } from "@oh-my-pi/pi-tui/tools/job-widget";
- import type { AsyncJobManager } from "../async/job-manager";
+@@ -56,6 +56,7 @@ import { stopAgentRun } from "../async/job-control";
+ import { IrcBus } from "../irc/bus";
+ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+ import { collectTrayInput, runsInlineAgent, Tray, TrayMainActivity } from "./tray";
 +import { listLiveServices, type LiveService, onLiveServicesChanged } from "../launch/live-services";
  import type { JobWidgetRegistry } from "../job-widgets/types";
  import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
  import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
-@@ -143,6 +144,7 @@ import { sumSubagentTreeCost } from "./agent-hub-runtime";
+@@ -156,6 +157,7 @@ import { sumSubagentTreeCost } from "./agent-hub-runtime";
  import {
  	type AgentSession,
  	type AgentSessionEvent,
@@ -309,24 +247,24 @@ index 0beefa60a6..77db4d204c 100644
  	type DroppedPrompt,
  	type ResolvedRoleModel,
  	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
-@@ -288,7 +290,7 @@ import { statusLineHost } from "./status-line-host";
+@@ -334,7 +336,7 @@ import { statusLineHost } from "./status-line-host";
  import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
  import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
  import { Composer, type ComposerPreferences, type ComposerStatusCache } from "@oh-my-pi/pi-tui/prompt/composer";
 -import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
 +import { PINNED_HUD_TOGGLE_ID, PINNED_JOBS_TOGGLE_ID } from "../task/output-manager";
- import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
- import { MAGIC_KEYWORDS } from "./magic-keywords";
- import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
-@@ -380,6 +382,7 @@ import {
+ import { isUserRequestEntry, type TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+ import { LinkBrowserComponent, type LinkBrowserDeps } from "@oh-my-pi/pi-tui/overlays/link-browser";
+ import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
+@@ -427,6 +429,7 @@ import {
  	cfgDisplayCollapseCompacted,
  	cfgDisplayHideToolActivity,
  	cfgDisplayPinnedAgents,
 +	cfgDisplayPinnedJobs,
+ 	cfgDisplayShellVisualization,
  	cfgDisplayShowTokenUsage,
  	cfgDisplayShowTurnTime,
- 	cfgDisplaySubagentLivePreview,
-@@ -465,6 +468,7 @@ const cfgLiveUiSettings = combine({
+@@ -516,6 +519,7 @@ const cfgLiveUiSettings = combine({
  	"tui.vimMode": cfgTuiVimMode,
  	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
  	"display.pinnedAgents": cfgDisplayPinnedAgents,
@@ -334,7 +272,7 @@ index 0beefa60a6..77db4d204c 100644
  	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
  	"compaction.idleEnabled": cfgCompactionIdleEnabled,
  	"compaction.idleThresholdTokens": cfgCompactionIdleThresholdTokens,
-@@ -1017,15 +1021,23 @@ export class SubagentHudComponent implements Component {
+@@ -1092,15 +1096,23 @@ export class SubagentHudComponent implements Component {
  	#lines: readonly string[];
  	#order: readonly string[];
  	#toggleLine: number | undefined;
@@ -359,7 +297,7 @@ index 0beefa60a6..77db4d204c 100644
  	}
  
  	/** Repaint in place with a new view; the click map rebuilds lazily. */
-@@ -1069,7 +1081,7 @@ export class SubagentHudComponent implements Component {
+@@ -1144,7 +1156,7 @@ export class SubagentHudComponent implements Component {
  		for (let index = 0; index < this.#lines.length; index++) {
  			const height = wrapTextWithAnsi(replaceTabs(this.#lines[index]!), contentWidth).length;
  			let id: string | undefined;
@@ -368,7 +306,7 @@ index 0beefa60a6..77db4d204c 100644
  			else {
  				const orderIndex = index - 2;
  				id = orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
-@@ -1078,7 +1090,7 @@ export class SubagentHudComponent implements Component {
+@@ -1153,7 +1165,7 @@ export class SubagentHudComponent implements Component {
  		}
  		if (owner.length !== renderedRows) {
  			this.#physicalOwner = this.#lines.map((_line, index) => {
@@ -377,7 +315,7 @@ index 0beefa60a6..77db4d204c 100644
  				const orderIndex = index - 2;
  				return orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
  			});
-@@ -1356,6 +1368,128 @@ export function renderSubagentHudLines(
+@@ -1428,6 +1440,128 @@ export function renderSubagentHudLines(
  	return ["", header, ...itemLines, ...toggleRow];
  }
  
@@ -506,7 +444,7 @@ index 0beefa60a6..77db4d204c 100644
  const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
  
  /** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
-@@ -1384,6 +1518,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -1456,6 +1590,7 @@ export class InteractiveMode implements InteractiveModeContext {
  	/** Whether {@link statusContainer} rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
  	statusRowOccupied = false;
  	todoContainer: Container;
@@ -514,7 +452,7 @@ index 0beefa60a6..77db4d204c 100644
  	subagentContainer: Container;
  	btwContainer: Container;
  	omfgContainer: Container;
-@@ -1595,7 +1730,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -1684,7 +1819,7 @@ export class InteractiveMode implements InteractiveModeContext {
  		if (this.#jobSettleListener?.manager !== manager) {
  			this.#jobSettleListener?.unsubscribe();
  			this.#jobSettleListener = manager
@@ -523,7 +461,7 @@ index 0beefa60a6..77db4d204c 100644
  				: undefined;
  		}
  	}
-@@ -1956,6 +2091,23 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2180,6 +2315,23 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.ui.requestRender();
  	}
  
@@ -547,7 +485,7 @@ index 0beefa60a6..77db4d204c 100644
  	setClickHoverId(id: string | undefined): void {
  		this.composer.setHoveredClickId(id);
  	}
-@@ -2001,6 +2153,11 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2225,6 +2377,11 @@ export class InteractiveMode implements InteractiveModeContext {
  	#observerRegistry: SessionObserverRegistry;
  	/** Click override for the pinned jump-list density; undefined follows `display.pinnedAgents`. */
  	#pinnedHudOverride: boolean | undefined;
@@ -559,7 +497,7 @@ index 0beefa60a6..77db4d204c 100644
  	#eventBus?: EventBus;
  	#subagentEventBus?: EventBus;
  	#eventBusUnsubscribers: Array<() => void> = [];
-@@ -2163,6 +2320,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2452,6 +2609,7 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.#eventBusUnsubscribers.push(onDownloadActivity(activity => this.#downloadActivityHud.update(activity)));
  		this.statusContainer = new StatusHudContainer(this);
  		this.todoContainer = new TodoHudContainer(this);
@@ -567,7 +505,7 @@ index 0beefa60a6..77db4d204c 100644
  		this.subagentContainer = new AnchoredLiveContainer();
  		this.btwContainer = new AnchoredLiveContainer();
  		this.omfgContainer = new AnchoredLiveContainer();
-@@ -2500,6 +2658,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2776,6 +2934,7 @@ export class InteractiveMode implements InteractiveModeContext {
  				this.pendingShellContainer,
  				this.pendingMessagesContainer,
  				this.todoContainer,
@@ -575,7 +513,7 @@ index 0beefa60a6..77db4d204c 100644
  				this.subagentContainer,
  				this.btwContainer,
  				this.reportContainer,
-@@ -2545,6 +2704,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2826,6 +2985,7 @@ export class InteractiveMode implements InteractiveModeContext {
  				// their tallest (a restored todo list on resume), so it is never a baseline.
  				selfClearingChrome: [
  					this.todoContainer,
@@ -583,7 +521,7 @@ index 0beefa60a6..77db4d204c 100644
  					this.subagentContainer,
  					this.modelCycleContainer,
  					this.progressHudContainer,
-@@ -2622,6 +2782,13 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2918,6 +3078,13 @@ export class InteractiveMode implements InteractiveModeContext {
  				if (!paused) this.ui.requestRender();
  			}),
  		);
@@ -597,7 +535,7 @@ index 0beefa60a6..77db4d204c 100644
  		// Let the transient todo tool result light up pending todos executed by a
  		// live subagent, matching the sticky HUD's active set (#5873).
  		setActiveTodoDescriptionsProvider(() => this.#getActiveSubagentDescriptions());
-@@ -2822,6 +2989,13 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -3152,6 +3319,13 @@ export class InteractiveMode implements InteractiveModeContext {
  			this.#jobSettleListener?.unsubscribe();
  			this.#jobSettleListener = undefined;
  		});
@@ -611,7 +549,7 @@ index 0beefa60a6..77db4d204c 100644
  
  		this.#eventBusUnsubscribers.push(
  			this.session.subscribe(event => {
-@@ -4180,6 +4354,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -4494,6 +4668,7 @@ export class InteractiveMode implements InteractiveModeContext {
  		if (any("composer.shape")) this.syncComposerShape();
  		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
  		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
@@ -619,15 +557,15 @@ index 0beefa60a6..77db4d204c 100644
  		if (any("display.subagentLivePreview")) {
  			this.#renderSubagentList();
  			this.ui.requestRender();
-@@ -5025,6 +5200,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -5477,6 +5652,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			this.#observerUiSyncTimer = undefined;
  		}
- 		this.#observerUiSyncNeedsTodoReconcile = false;
  		this.#cancelSubagentPreviewTick();
 +		this.#cancelBackgroundJobsTick();
  	}
  
  	#renderTodoList(): void {
-@@ -5412,6 +5588,92 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -5891,6 +6067,86 @@ export class InteractiveMode implements InteractiveModeContext {
  		}
  	}
  
@@ -635,17 +573,11 @@ index 0beefa60a6..77db4d204c 100644
 +	 * Follow `manager` so the Background tasks shelf and the job counts repaint when a
 +	 * job starts running or settles; returns the unsubscribe.
 +	 */
-+	#followBackgroundJobs(manager: AsyncJobManager): () => void {
-+		const refresh = (): void => {
++	#followBackgroundJobs(manager: AsyncJobManagerApi): () => void {
++		return manager.onJobsChanged(() => {
 +			this.#renderBackgroundJobsShelf();
 +			this.ui.requestRender();
-+		};
-+		const stopSettled = manager.onJobSettled(refresh);
-+		const stopStarted = manager.onJobStarted(refresh);
-+		return () => {
-+			stopSettled();
-+			stopStarted();
-+		};
++		});
 +	}
 +
 +	/**
@@ -720,9 +652,9 @@ index 0beefa60a6..77db4d204c 100644
  	#vibeParentSession(): VibeParentSession {
  		return {
  			getAgentId: () => this.session.getAgentId() ?? null,
-@@ -9509,6 +9771,8 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -10189,6 +10445,8 @@ export class InteractiveMode implements InteractiveModeContext {
  
- 	async reloadTodos(source: AgentSession = this.session): Promise<void> {
+ 	async reloadTodos(source: AgentViewSession = this.session): Promise<void> {
  		await this.#loadTodoList(source);
 +		// A session switch or focus change moves the viewed session, whose background tasks the shelf lists.
 +		this.#renderBackgroundJobsShelf();
@@ -730,10 +662,10 @@ index 0beefa60a6..77db4d204c 100644
  	}
  
 diff --git a/packages/coding-agent/src/modes/settings.ts b/packages/coding-agent/src/modes/settings.ts
-index bfed9f8c64..3b5700542e 100644
+index 7f5202ed12..c6dba3864e 100644
 --- a/packages/coding-agent/src/modes/settings.ts
 +++ b/packages/coding-agent/src/modes/settings.ts
-@@ -640,6 +640,25 @@ export const cfgDisplayPinnedAgents = register({
+@@ -757,6 +757,25 @@ export const cfgDisplayPinnedAgents = register({
  	},
  });
  
@@ -760,10 +692,10 @@ index bfed9f8c64..3b5700542e 100644
  	id: "display.subagentLivePreview",
  	type: "boolean",
 diff --git a/packages/coding-agent/src/modes/types.ts b/packages/coding-agent/src/modes/types.ts
-index 2a0c3b08db..f3b33e0a2e 100644
+index a73be001d3..e4d634899f 100644
 --- a/packages/coding-agent/src/modes/types.ts
 +++ b/packages/coding-agent/src/modes/types.ts
-@@ -169,6 +169,7 @@ export interface InteractiveModeContext {
+@@ -190,6 +190,7 @@ export interface InteractiveModeContext {
  	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
  	readonly statusRowOccupied: boolean;
  	todoContainer: Container;
@@ -771,8 +703,8 @@ index 2a0c3b08db..f3b33e0a2e 100644
  	subagentContainer: Container;
  	btwContainer: Container;
  	omfgContainer: Container;
-@@ -234,6 +235,8 @@ export interface InteractiveModeContext {
- 	cancelLinkHints(): void;
+@@ -287,6 +288,8 @@ export interface InteractiveModeContext {
+ 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void;
  	/** Flip the pinned jump list between its collapsed few and the full list. */
  	togglePinnedHudExpanded(): void;
 +	/** Flip the Background tasks shelf between its collapsed few and the full list. */
@@ -781,11 +713,11 @@ index 2a0c3b08db..f3b33e0a2e 100644
  	setClickHoverId(id: string | undefined): void;
  	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. `viewOnly`
 diff --git a/packages/coding-agent/src/task/output-manager.ts b/packages/coding-agent/src/task/output-manager.ts
-index 23d4888556..54d64e3f46 100644
+index b567f913e3..7d4315fd27 100644
 --- a/packages/coding-agent/src/task/output-manager.ts
 +++ b/packages/coding-agent/src/task/output-manager.ts
-@@ -14,6 +14,8 @@ import * as fs from "node:fs/promises";
- import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
+@@ -16,6 +16,8 @@ import type { Settings } from "../config/settings";
+ import { cfgTaskCrossInstance } from "./settings";
  /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
  export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
 +/** Background tasks shelf expander click target, reserved the same way. */
@@ -793,7 +725,7 @@ index 23d4888556..54d64e3f46 100644
  
  /**
   * Manages agent output ID allocation to ensure uniqueness.
-@@ -40,6 +42,7 @@ export class AgentOutputManager {
+@@ -43,6 +45,7 @@ export class AgentOutputManager {
  		// Reserve the pinned-HUD toggle sentinel the same way: a colliding agent
  		// id would be indistinguishable from the expander row in click routing.
  		this.#taken.add(PINNED_HUD_TOGGLE_ID);
@@ -803,10 +735,10 @@ index 23d4888556..54d64e3f46 100644
  	/**
 diff --git a/packages/coding-agent/test/background-jobs-shelf.test.ts b/packages/coding-agent/test/background-jobs-shelf.test.ts
 new file mode 100644
-index 0000000000..72a5cac85b
+index 0000000000..5297d7f058
 --- /dev/null
 +++ b/packages/coding-agent/test/background-jobs-shelf.test.ts
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,415 @@
 +/**
 + * Contract: the pinned Background tasks shelf sits directly above the Subagents
 + * shelf, lists every running background job (bash commands, eval cells) and service
@@ -837,7 +769,7 @@ index 0000000000..72a5cac85b
 +import { PINNED_JOBS_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 +import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 +import { initTheme } from "@oh-my-pi/pi-tui/theme";
-+import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
++import type { UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 +import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 +import { TempDir } from "@oh-my-pi/pi-utils";
 +
@@ -1042,7 +974,7 @@ index 0000000000..72a5cac85b
 +			asyncJobManager: manager,
 +			agentId: "main",
 +		});
-+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, eventBus);
++		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, eventBus);
 +	});
 +
 +	afterEach(async () => {
@@ -1095,17 +1027,23 @@ index 0000000000..72a5cac85b
 +	it("lists a service the session owns and drops it when it ends", async () => {
 +		await mode.init({ suppressWelcomeIntro: true });
 +		const owner = session.sessionManager.getSessionId();
-+		const daemon: DaemonSnapshot = {
-+			name: "dev-server",
-+			id: "daemon-1",
++		const daemon: UnitSnapshot = {
++			id: "unit-1",
++			kind: "proc",
++			scope: { kind: "session", id: owner },
++			key: "dev-server",
++			label: "dev-server",
++			generation: "1",
 +			state: "ready",
++			pids: [],
 +			createdAt: NOW - 30_000,
 +			startedAt: NOW - 30_000,
 +			restartCount: 0,
 +			outputBytes: 0,
 +			owner,
-+			persist: false,
-+			detached: false,
++			leases: 0,
++			policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "exec" },
++			supervised: true,
 +		};
 +		recordLiveService(owner, daemon, "npm run dev");
 +		expect(shelf()).toContain("dev-server");

@@ -1,8 +1,8 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index 93db02e7ce..581e2dcf91 100644
+index b72568803a..4d68d29660 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -897,6 +897,7 @@ tui:
+@@ -955,6 +955,7 @@ tui:
  | `statusLine.sessionAccent`    | boolean | `true`           | Tint the editor border with the session color.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
  | `statusLine.transparent`      | boolean | `false`          | Use the terminal background for the status line.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
  | `statusLine.showHookStatus`   | boolean | `true`           | Show hook status messages.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -10,7 +10,7 @@ index 93db02e7ce..581e2dcf91 100644
  | `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
  | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
  | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-@@ -915,7 +916,7 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
+@@ -976,7 +977,7 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
  
  The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
  
@@ -20,7 +20,7 @@ index 93db02e7ce..581e2dcf91 100644
  When a provider holds two or more stored OAuth accounts, the `model` segment names the session's account by its stored position, the order `omp usage accounts` prints (A is the first): `Anthropic (B) > Sonnet 5.5`, and the footer shows the raw id as `anthropic-b/claude-sonnet-5-5`. A provider with one account is unchanged, and model ids themselves are never rewritten.
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index ab156b95f4..37e30ed9c6 100644
+index 322a7e7f28..bfb2114cb3 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -5,7 +5,7 @@
@@ -33,10 +33,10 @@ index ab156b95f4..37e30ed9c6 100644
  - Running background tasks now have their own pinned shelf directly above the Subagents shelf, in the same style: backgrounded `bash` commands, backgrounded `eval` cells and services, each as a row with its id (such as `bg_1099`), a one-line preview of the command and its elapsed time. Jobs that run a subagent stay in the Subagents shelf. `display.pinnedJobs` (`collapsed` by default, `full`, `off`) sets how many rows show before an expander, as `display.pinnedAgents` does for subagents.
  - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
 diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-index a0332a2037..47308e04e0 100644
+index 08580efef8..4b8dbdfddc 100644
 --- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
 +++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-@@ -248,15 +248,37 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+@@ -249,15 +249,37 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
  			];
  		case "usage_bar":
  			return [
@@ -79,10 +79,10 @@ index a0332a2037..47308e04e0 100644
  			];
  		case "collab":
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 1517fdfeda..76e8554b5d 100644
+index 0484a4e67f..6c27fcdd80 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -407,6 +407,7 @@ import {
+@@ -455,6 +455,7 @@ import {
  	cfgStatusLineSessionAccent,
  	cfgStatusLineShowHookStatus,
  	cfgStatusLineTransparent,
@@ -90,7 +90,7 @@ index 1517fdfeda..76e8554b5d 100644
  	cfgSymbolPreset,
  	cfgTerminalProgramStatus,
  	cfgTerminalShowImages,
-@@ -507,6 +508,7 @@ const cfgLiveUiSettings = combine({
+@@ -564,6 +565,7 @@ const cfgLiveUiSettings = combine({
  	"statusLine.segmentOptions": cfgStatusLineSegmentOptions,
  	"statusLine.compactThinkingLevel": cfgStatusLineCompactThinkingLevel,
  	"statusLine.contextLine": cfgStatusLineContextLine,
@@ -98,7 +98,7 @@ index 1517fdfeda..76e8554b5d 100644
  	"git.enabled": cfgGitEnabled,
  	"advisor.enabled": cfgAdvisorEnabled,
  	"advisor.maxNotesPerUpdate": cfgAdvisorMaxNotesPerUpdate,
-@@ -4521,6 +4523,7 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -4855,6 +4857,7 @@ export class InteractiveMode implements InteractiveModeContext {
  				"statusLine.segmentOptions",
  				"statusLine.compactThinkingLevel",
  				"statusLine.contextLine",
@@ -107,10 +107,10 @@ index 1517fdfeda..76e8554b5d 100644
  			)
  		) {
 diff --git a/packages/coding-agent/src/modes/settings.ts b/packages/coding-agent/src/modes/settings.ts
-index 3b5700542e..e82cecaaaf 100644
+index c6dba3864e..5464f57e4f 100644
 --- a/packages/coding-agent/src/modes/settings.ts
 +++ b/packages/coding-agent/src/modes/settings.ts
-@@ -10,6 +10,7 @@ import {
+@@ -11,6 +11,7 @@ import {
  	STATUS_LINE_PRESET_VALUES,
  	STATUS_LINE_SEGMENT_IDS,
  	STATUS_LINE_SEPARATOR_VALUES,
@@ -118,7 +118,7 @@ index 3b5700542e..e82cecaaaf 100644
  } from "@oh-my-pi/pi-tui/status-line/schema";
  import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
  import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-@@ -225,6 +226,28 @@ export const cfgStatusLineContextLine = register({
+@@ -229,6 +230,28 @@ export const cfgStatusLineContextLine = register({
  	},
  });
  
@@ -148,7 +148,7 @@ index 3b5700542e..e82cecaaaf 100644
  	id: "statusLine.sessionAccent",
  	type: "boolean",
 diff --git a/packages/coding-agent/src/modes/status-line-host.ts b/packages/coding-agent/src/modes/status-line-host.ts
-index ffa8a9c934..79c1ec2bf5 100644
+index 48d0684461..b1f7896fbb 100644
 --- a/packages/coding-agent/src/modes/status-line-host.ts
 +++ b/packages/coding-agent/src/modes/status-line-host.ts
 @@ -19,6 +19,7 @@ import {
@@ -375,7 +375,7 @@ index 0000000000..f15f50f88b
 +	});
 +});
 diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
-index 81a72430b9..1f392e6682 100644
+index 8a1e9e4826..e4347f09b0 100644
 --- a/packages/tui/CHANGELOG.md
 +++ b/packages/tui/CHANGELOG.md
 @@ -5,6 +5,8 @@
@@ -385,10 +385,10 @@ index 81a72430b9..1f392e6682 100644
 +- Added `StatusLineHost.usageWindow`, `SegmentContext.usageWindow` and `STATUS_LINE_USAGE_WINDOW_VALUES` (`weekly`, `session`, `worst`) so a host picks which quota window the `usage_bar` segment draws; `SegmentContext.usage.modelSevenDay` carries the active model's own weekly counter.
 +- The status-line usage readout shows nothing, instead of one merged account, when the active account is unresolved and the provider has several usage reports.
  
- ## [18.14.2] - 2026-10-31
+ ## [19.0.0] - 2026-11-18
  
 diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
-index e1208f4e13..3db022e8e5 100644
+index 842d7217d7..b1d67cc646 100644
 --- a/packages/tui/src/status-line/component.ts
 +++ b/packages/tui/src/status-line/component.ts
 @@ -5,6 +5,7 @@ import {
@@ -399,7 +399,7 @@ index e1208f4e13..3db022e8e5 100644
  import { getNextTimeBasedPricingTransition } from "@oh-my-pi/pi-catalog/models";
  import type { Model, ModelCost } from "@oh-my-pi/pi-catalog/types";
  import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
-@@ -184,6 +185,28 @@ interface UsageWindowCandidate {
+@@ -219,6 +220,28 @@ interface UsageWindowCandidate {
  	resetsAt?: number;
  }
  
@@ -428,7 +428,7 @@ index e1208f4e13..3db022e8e5 100644
  /** Limits sharing one model/tier scope, ranked as an indivisible display unit. */
  interface UsageScopeGroup {
  	priority: number;
-@@ -802,6 +825,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -853,6 +876,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  		fiveHour?: { percent: number; resetMinutes?: number };
  		daily?: { percent: number; resetMinutes?: number };
  		sevenDay?: { percent: number; resetHours?: number };
@@ -436,7 +436,7 @@ index e1208f4e13..3db022e8e5 100644
  		monthly?: { percent: number; resetHours?: number };
  		resetCredits?: {
  			bankedCount: number;
-@@ -2247,6 +2271,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2376,6 +2400,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  		fiveHour?: { percent: number; resetMinutes?: number };
  		daily?: { percent: number; resetMinutes?: number };
  		sevenDay?: { percent: number; resetHours?: number };
@@ -444,7 +444,7 @@ index e1208f4e13..3db022e8e5 100644
  		monthly?: { percent: number; resetHours?: number };
  		resetCredits?: {
  			bankedCount: number;
-@@ -2266,6 +2291,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2395,6 +2420,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  		const monthlySubscriptionProvider =
  			context.provider !== undefined && MONTHLY_SUBSCRIPTION_PROVIDERS[context.provider] === true;
  		const scopeGroups = new Map<string, UsageScopeGroup>();
@@ -457,7 +457,7 @@ index e1208f4e13..3db022e8e5 100644
  		for (const report of reports) {
  			if (!report || typeof report !== "object") continue;
  			const provider = "provider" in report ? report.provider : undefined;
-@@ -2340,6 +2371,21 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2469,6 +2500,21 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  					(typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined) ??
  					(typeof rawPlanType === "string" && rawPlanType.trim() ? rawPlanType.trim() : undefined);
  				const normalizedTier = normalizeUsageScopeValue(tier);
@@ -479,7 +479,7 @@ index e1208f4e13..3db022e8e5 100644
  				const scopeKey = `${modelId ?? ""}\0${normalizedTier ?? ""}`;
  				// Exact-model groups outrank provider-wide groups; within either
  				// specificity, untiered limits preserve the historical preference.
-@@ -2453,8 +2499,19 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2582,8 +2628,19 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  				}
  			}
  		}
@@ -501,7 +501,7 @@ index e1208f4e13..3db022e8e5 100644
  	}
  
  	/**
-@@ -2609,6 +2666,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2744,6 +2801,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			options: segmentOptions ?? {},
  			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
  			modelAccount: this.#modelAccount(state.model?.provider),
@@ -510,7 +510,7 @@ index e1208f4e13..3db022e8e5 100644
  			planMode: this.#planModeStatus,
  			loopMode: this.#loopModeStatus,
 diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
-index fea060b373..8fc37e2855 100644
+index 15c334aed1..7730e2584b 100644
 --- a/packages/tui/src/status-line/host.ts
 +++ b/packages/tui/src/status-line/host.ts
 @@ -3,6 +3,7 @@ import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
@@ -521,7 +521,7 @@ index fea060b373..8fc37e2855 100644
  import type { StatusLineSettings, StatusResetExpiry } from "./types";
  
  export interface StatusAccountIdentity {
-@@ -104,6 +105,8 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
+@@ -162,6 +163,8 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
  	gitEnabled(): boolean;
  	codexResetFireworksEnabled(): boolean;
  	getSettingsRevision(): number;
@@ -531,10 +531,10 @@ index fea060b373..8fc37e2855 100644
  	getSessionSettingsRevision(session: TSession): number;
  	goalStatusInFooter(session: TSession): boolean;
 diff --git a/packages/tui/src/status-line/schema.ts b/packages/tui/src/status-line/schema.ts
-index 3f437eac5b..8d7948e852 100644
+index 79043ea83a..cd88f027e8 100644
 --- a/packages/tui/src/status-line/schema.ts
 +++ b/packages/tui/src/status-line/schema.ts
-@@ -44,6 +44,12 @@ export const CUSTOM_STATUS_LINE_DEFAULTS: {
+@@ -45,6 +45,12 @@ export const CUSTOM_STATUS_LINE_DEFAULTS: {
  
  export const CONTEXT_LINE_MODE_VALUES = ["off", "percentage", "annotated", "embedded"] as const;
  export type ContextLineMode = (typeof CONTEXT_LINE_MODE_VALUES)[number];
@@ -548,10 +548,10 @@ index 3f437eac5b..8d7948e852 100644
  export type StatusLinePreset = (typeof STATUS_LINE_PRESET_VALUES)[number];
  export const STATUS_LINE_SEPARATOR_VALUES = [
 diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
-index 1c4834be30..cade4b2eca 100644
+index 8f83bcdaf1..aa42516e40 100644
 --- a/packages/tui/src/status-line/segments.ts
 +++ b/packages/tui/src/status-line/segments.ts
-@@ -1300,8 +1300,8 @@ const usageSegment: StatusLineSegment = {
+@@ -1332,8 +1332,8 @@ const usageSegment: StatusLineSegment = {
  const USAGE_BAR_CELLS = 5;
  
  interface UsageBarWindow {
@@ -562,7 +562,7 @@ index 1c4834be30..cade4b2eca 100644
  	/** Tooltip name of the window. */
  	name: string;
  	/** Used share, clamped to 0-100. */
-@@ -1309,30 +1309,52 @@ interface UsageBarWindow {
+@@ -1341,30 +1341,52 @@ interface UsageBarWindow {
  }
  
  /**
@@ -633,7 +633,7 @@ index 1c4834be30..cade4b2eca 100644
  }
  
  const usageBarSegment: StatusLineSegment = {
-@@ -1350,8 +1372,7 @@ const usageBarSegment: StatusLineSegment = {
+@@ -1382,8 +1404,7 @@ const usageBarSegment: StatusLineSegment = {
  				styleEmpty: text => theme.fg("dim", text),
  			},
  		});
@@ -643,7 +643,7 @@ index 1c4834be30..cade4b2eca 100644
  		return { content: withIcon(theme.icon.time, text), visible: true };
  	},
  	describe(ctx) {
-@@ -1364,8 +1385,8 @@ const usageBarSegment: StatusLineSegment = {
+@@ -1396,8 +1417,8 @@ const usageBarSegment: StatusLineSegment = {
  			span(theme.progress.filled.repeat(filled), color),
  			span(theme.progress.empty.repeat(USAGE_BAR_CELLS - filled), "dim"),
  			span(` ${whole}%`, color),
@@ -654,7 +654,7 @@ index 1c4834be30..cade4b2eca 100644
  	},
  };
 diff --git a/packages/tui/src/status-line/types.ts b/packages/tui/src/status-line/types.ts
-index 2455e42702..bf1a024e81 100644
+index bd45b2d940..2feafaeb08 100644
 --- a/packages/tui/src/status-line/types.ts
 +++ b/packages/tui/src/status-line/types.ts
 @@ -1,11 +1,17 @@
@@ -669,7 +669,7 @@ index 2455e42702..bf1a024e81 100644
 +	StatusLineSeparatorStyle,
 +	StatusLineUsageWindow,
 +} from "./schema";
- import type { ActiveRepoContext, StatusLineSession, StatusModelAccount } from "./host";
+ import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession, StatusModelAccount } from "./host";
  import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
  
 -export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -677,7 +677,7 @@ index 2455e42702..bf1a024e81 100644
  
  /** Context-window occupancy shown by the status line and exposed to extensions. */
  export interface ContextUsage {
-@@ -89,6 +95,8 @@ export interface SegmentContext {
+@@ -91,6 +97,8 @@ export interface SegmentContext {
  	activeRepo: ActiveRepoContext | null;
  	width: number;
  	options: StatusLineSegmentOptions;
@@ -686,7 +686,7 @@ index 2455e42702..bf1a024e81 100644
  	/** Render the model segment's thinking level as a compact leading glyph. */
  	compactThinkingLevel: boolean;
  	/**
-@@ -201,6 +209,11 @@ export interface SegmentContext {
+@@ -205,6 +213,11 @@ export interface SegmentContext {
  		fiveHour?: { percent: number; resetMinutes?: number };
  		daily?: { percent: number; resetMinutes?: number };
  		sevenDay?: { percent: number; resetHours?: number };

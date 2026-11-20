@@ -1,5 +1,5 @@
 diff --git a/docs/agent-hub.md b/docs/agent-hub.md
-index cc30b240d7..5b96e52fa3 100644
+index d563de8eb2..2d7bdc86e1 100644
 --- a/docs/agent-hub.md
 +++ b/docs/agent-hub.md
 @@ -91,7 +91,9 @@ Directly above it, a pinned `Background tasks` block lists the other work runnin
@@ -14,23 +14,23 @@ index cc30b240d7..5b96e52fa3 100644
  Set `display.subagentLivePreview: true` to add a second line under each row showing what that agent is doing: its current tool call (or, between calls, the most recent one) with a one-line detail, plus the elapsed time once a call runs longer than five seconds. Off by default.
  
 diff --git a/docs/non-compaction-retry-policy.md b/docs/non-compaction-retry-policy.md
-index f8142e5bda..2ca41f7b9e 100644
+index dbd76f76c0..6501c10cb9 100644
 --- a/docs/non-compaction-retry-policy.md
 +++ b/docs/non-compaction-retry-policy.md
-@@ -132,7 +132,7 @@ The actual local sleep is 75–100% of the nominal value, matching Anthropic-sty
+@@ -133,7 +133,7 @@ The actual local sleep is 75–100% of the nominal value, matching Anthropic-sty
  
  Delay override inputs can come from parsed retry headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, `x-ratelimit-reset`) or usage-limit backoff. Without provider timing, recognized concurrency/rate-limit reasons can impose their own wait windows. Credential/model fallback switches set delay to `0`; otherwise parsed hints can extend the capped local delay.
  
 -If the delay exceeds `retry.maxDelayMs` and no switch succeeds, retry normally fails immediately. `retry.waitForUsageReset: true` permits a longer usage-limit wait only when timing is authoritative (parsed provider reset timing or a complete usage-report future reset), not a guessed exhaustion backoff. Long waits remain abortable and are chunked to avoid timer overflow; they also hold unattended/subagent runs.
 +If the delay exceeds `retry.maxDelayMs` and no switch succeeds, retry normally fails immediately. `retry.waitForUsageReset: true` permits a longer usage-limit wait only when timing is authoritative (parsed provider reset timing or a complete usage-report future reset), not a guessed exhaustion backoff. Long waits remain abortable and are chunked to avoid timer overflow; they also hold unattended/subagent runs. A wait past 24 hours is never honored, with or without the opt-in: the saga ends with `auto_retry_end` (`success: false`) so the session is idle and accepts input. A 429 whose hint exceeds `retry.maxDelayMs` but which is not a usage limit blocks the failing credential until that hint and rotates to a free sibling at once; with none free it ends the same way.
  
- ## Abort mechanics
+ Usage-limit waits run to a wall-clock deadline, so time the machine spends asleep counts toward the reset; ordinary backoff stays monotonic.
  
 diff --git a/docs/settings.md b/docs/settings.md
-index 00f739cdc8..7f11f85a8d 100644
+index e4d889dd6e..0a9d17bd28 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -599,7 +599,7 @@ providers:
+@@ -647,7 +647,7 @@ providers:
  | `retry.rateLimitWalksChain`              | boolean | `false`           | Opt in to walking `retry.fallbackChains` at once on a rate limit instead of holding it for a turn whose thinking is signed by the failing model. By default such a turn retries the rate-limited model until `retry.maxRetries` is spent before the chain is reached.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
  | `retry.fallbackChains`                   | record  | `{}`              | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` _entry_ keeps the failing model's id and swaps the provider. Model-kind roles use their built-in chain when unset and no fallbacks when set to `[]`; the `default` chain never applies to them. Unknown models/providers or malformed chains are reported as config warnings at startup.                                                                                                                                                            |
  | `retry.fallbackRevertPolicy`             | enum    | `cooldown-expiry` | `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -40,7 +40,7 @@ index 00f739cdc8..7f11f85a8d 100644
  | `retry.usageReservePct`                  | number  | `10`              | Remaining quota percentage protected by usage-aware fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
  | `retry.usageReservePolicy`               | enum    | `confirm`         | `confirm`, `auto`, `fail-closed`. At reserve, `confirm` asks when an interactive confirmer is available and otherwise auto-falls back; exhausted quota can fall back without confirmation. `fail-closed` blocks known reserve/depleted quota rather than spending it.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 03fc58229f..1934a6ab60 100644
+index f9442f5d3b..fa373ecd3e 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -13,7 +13,8 @@
@@ -62,19 +62,11 @@ index 03fc58229f..1934a6ab60 100644
 +- Fixed a lone `.` or `c` typed into a focused subagent that was still running, or waiting out a retry back-off, printing `Agent is already processing` as an error. The shortcut now queues as a steering message like any other text; the continue shortcut itself only restarts an idle agent.
 +- Fixed a session wedged for days by a 429 carrying a huge retry hint, such as a 39-hour `retry-after-ms`: with `retry.waitForUsageReset` on it slept the whole wait while reporting busy, so `.` was refused and steers never landed. A wait past 24 hours now ends the retry (`auto_retry_end` with the error) and leaves the session idle. A 429 whose hint is past `retry.maxDelayMs` but is not a usage limit now blocks the failing credential until that hint and retries on a free sibling credential at once.
 +
- ## [18.14.2] - 2026-10-31
+ ## [19.0.0] - 2026-11-18
  
- ### Added
-diff --git a/packages/coding-agent/dictation-stopped.json b/packages/coding-agent/dictation-stopped.json
-new file mode 100644
-index 0000000000..974f77d1a0
---- /dev/null
-+++ b/packages/coding-agent/dictation-stopped.json
-@@ -0,0 +1 @@
-+{"state":"idle"}
-\ No newline at end of file
+ ### Breaking Changes
 diff --git a/packages/coding-agent/src/modes/controllers/input-controller.ts b/packages/coding-agent/src/modes/controllers/input-controller.ts
-index 24c0b632cc..c03f27f6a0 100644
+index 3b0d284c93..36bd4fb3c7 100644
 --- a/packages/coding-agent/src/modes/controllers/input-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/input-controller.ts
 @@ -1,5 +1,5 @@
@@ -84,20 +76,16 @@ index 24c0b632cc..c03f27f6a0 100644
  import type { ImageContent } from "@oh-my-pi/pi-ai";
  import {
  	type AutocompleteProvider,
-@@ -1661,15 +1661,32 @@ export class InputController {
+@@ -1729,15 +1729,28 @@ export class InputController {
  			);
  			return; // editor text not cleared: Editor does not auto-clear on submit
  		}
 -		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
-+		// `resume()` only restarts an idle agent: on a busy one it falls through to a prompt with no queueing
-+		// behavior and throws AgentBusyError. A busy target (a turn running, or a retry back-off sleeping) takes
-+		// the shortcut as plain text, which queues like any other message.
++		// `resume()` interrupts a running turn and continues it, but it cannot wake an agent waiting out a retry
++		// back-off (that is neither streaming nor idle). Such a target takes the shortcut as plain text, which
++		// queues like any other message and ends the back-off sleep.
 +		const isContinueShortcut =
-+			streamingBehavior === "steer" &&
-+			!images &&
-+			(text === "." || text === "c") &&
-+			!target.isStreaming &&
-+			!target.isRetrying;
++			streamingBehavior === "steer" && !images && (text === "." || text === "c") && !target.isRetrying;
  		this.ctx.editor.clearDraft(text);
 +		const submitQueued = async (): Promise<void> => {
 +			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
@@ -110,7 +98,7 @@ index 24c0b632cc..c03f27f6a0 100644
 +				try {
 +					await target.resume();
 +				} catch (error) {
-+					// The agent became busy between the check above and the resume: queue, never surface the error.
++					// Another turn claimed the agent between the interrupt and the continuation: queue, never surface the error.
 +					if (!(error instanceof AgentBusyError)) throw error;
 +					await submitQueued();
 +				}
@@ -123,10 +111,10 @@ index 24c0b632cc..c03f27f6a0 100644
  		} catch (error) {
  			// Hand the message back, mirroring the main submit error path: restore
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 77db4d204c..1517fdfeda 100644
+index 54e499e8fc..0484a4e67f 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -52,6 +52,7 @@ import { listLiveServices, type LiveService, onLiveServicesChanged } from "../la
+@@ -60,6 +60,7 @@ import { listLiveServices, type LiveService, onLiveServicesChanged } from "../la
  import type { JobWidgetRegistry } from "../job-widgets/types";
  import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
  import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -134,7 +122,7 @@ index 77db4d204c..1517fdfeda 100644
  import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
  import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
  import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-@@ -135,8 +136,6 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
+@@ -148,8 +149,6 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
  import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
  import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
  import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -143,7 +131,7 @@ index 77db4d204c..1517fdfeda 100644
  import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
  import { registerPersistedSubagents } from "../registry/persisted-agents";
  import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-@@ -1214,23 +1213,49 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
+@@ -1286,23 +1285,49 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
  	return truncateToWidth(`${line}${elapsedLabel}`, width, "");
  }
  
@@ -164,15 +152,26 @@ index 77db4d204c..1517fdfeda 100644
 +	const progress = session.progress;
 +	return progress?.status === "running" && (progress.durationMs > 0 || session.progressAt !== undefined);
 +}
++
++/**
++ * Delay until the shelf next needs a repaint for its elapsed times: a second while any listed subagent has a
++ * running clock, none otherwise, so an idle UI arms no timer. A subagent that makes no progress, such as one
++ * waiting out a rate limit, emits no frames, so its clock needs this tick to advance.
++ */
++export function nextSubagentCounterTickMs(sessions: readonly ObservableSession[]): number | undefined {
++	return sessions.some(subagentHasClock) ? SUBAGENT_PREVIEW_TICK_MS : undefined;
++}
  
  /**
 - * Total tokens and API cost of one subagent, e.g. `1.4M tok · $0.42`. Tokens are everything the model
 - * processed, cache reads included, so the figure matches what the provider counts. Cost shows only once it is
 - * above zero, because a subscription or unpriced model reports zero and `$0.00` would read as free. Empty until
 - * the subagent has used either.
-+ * Delay until the shelf next needs a repaint for its elapsed times: a second while any listed subagent has a
-+ * running clock, none otherwise, so an idle UI arms no timer. A subagent that makes no progress, such as one
-+ * waiting out a rate limit, emits no frames, so its clock needs this tick to advance.
++ * The counter at the right of a subagent's shelf row, longest form first: elapsed time, tokens and cost
++ * (`2m5s · 1.4M tok · $0.42`, each figure in its own colour), then the elapsed time alone for a row too narrow for
++ * the lot. Tokens count what the model processed, cache reads included. The clock runs from
++ * the last frame's `durationMs` plus the time since that frame arrived, so a subagent that has gone quiet keeps
++ * counting. It shows from the first second and before any tokens are used. Empty when there is nothing to show.
   */
 -export function formatSubagentUsage(progress: AgentProgress | undefined): string {
 -	if (!progress) return "";
@@ -181,17 +180,6 @@ index 77db4d204c..1517fdfeda 100644
 -	if (tokens > 0) parts.push(`${formatNumber(tokens)} tok`);
 -	if (progress.cost > 0) parts.push(formatCost(progress.cost));
 -	return parts.join(theme.sep.dot);
-+export function nextSubagentCounterTickMs(sessions: readonly ObservableSession[]): number | undefined {
-+	return sessions.some(subagentHasClock) ? SUBAGENT_PREVIEW_TICK_MS : undefined;
-+}
-+
-+/**
-+ * The counter at the right of a subagent's shelf row, longest form first: elapsed time, tokens and cost
-+ * (`2m5s · 1.4M tok · $0.42`, each figure in its own colour), then the elapsed time alone for a row too narrow for
-+ * the lot. Tokens count what the model processed, cache reads included. The clock runs from
-+ * the last frame's `durationMs` plus the time since that frame arrived, so a subagent that has gone quiet keeps
-+ * counting. It shows from the first second and before any tokens are used. Empty when there is nothing to show.
-+ */
 +function subagentCounterForms(session: ObservableSession, now: number): string[] {
 +	const progress = session.progress;
 +	if (!progress) return [];
@@ -206,7 +194,7 @@ index 77db4d204c..1517fdfeda 100644
  }
  
  /**
-@@ -1253,6 +1278,7 @@ export function renderSubagentHudLines(
+@@ -1325,6 +1350,7 @@ export function renderSubagentHudLines(
  	expanded = false,
  	livePreview = false,
  	hubKey?: string,
@@ -214,7 +202,7 @@ index 77db4d204c..1517fdfeda 100644
  ): string[] {
  	const running = sessions.filter(isHudSubagent);
  	if (running.length === 0) return [];
-@@ -1271,11 +1297,17 @@ export function renderSubagentHudLines(
+@@ -1343,11 +1369,17 @@ export function renderSubagentHudLines(
  			expanded: true,
  			renderItem: (session, context) => {
  				const fullWidth = Math.max(0, contentColumns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
@@ -237,7 +225,7 @@ index 77db4d204c..1517fdfeda 100644
  				const role = session.agent ?? session.progress?.agent;
  				const displayId = truncateToWidth(
  					formatTaskId(session.id),
-@@ -1324,8 +1356,8 @@ export function renderSubagentHudLines(
+@@ -1396,8 +1428,8 @@ export function renderSubagentHudLines(
  					}
  				}
  				const titled = truncateToWidth(line, rowWidth, "");
@@ -248,7 +236,7 @@ index 77db4d204c..1517fdfeda 100644
  					: titled;
  				const preview = livePreview ? renderSubagentToolPreview(session, fullWidth) : undefined;
  				itemLineCounts.set(session, preview ? 2 : 1);
-@@ -5564,10 +5596,13 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -6043,10 +6075,13 @@ export class InteractiveMode implements InteractiveModeContext {
  		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview, hubKey);
  		if (lines.length === 0) return undefined;
  		const layout = layoutPinnedHud(running.length, expanded);
@@ -267,10 +255,10 @@ index 77db4d204c..1517fdfeda 100644
  	}
  
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index fef1f5b406..71f78a3474 100644
+index 8fe487f635..862ad05242 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -8125,6 +8125,14 @@ export class AgentSession implements SettingsScope {
+@@ -9113,6 +9113,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		return this.#admitSubmission(() => this.#prompt(text, options));
  	}
  
@@ -283,11 +271,11 @@ index fef1f5b406..71f78a3474 100644
 +	}
 +
  	/**
- 	 * Resume the agent for the operator's `.`/`c` continue shortcut. A prompt the
- 	 * model has not answered yet (an Esc before any output) runs again as is: a
-@@ -9613,6 +9621,10 @@ export class AgentSession implements SettingsScope {
- 			userMessage,
- 		]);
+ 	 * Resume the agent for the operator's `.`/`c` continue shortcut. A running turn
+ 	 * is interrupted first, as Esc would, so the continuation starts from the
+@@ -10714,6 +10722,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		);
+ 		options?.onPromptQueued?.(queued);
  		options?.onPromptAdmitted?.();
 +		// The steer is on the queue. A user steer must reach the agent even while a long retry back-off
 +		// sleeps (a usage-limit wait can last days), so end that sleep now. System notices keep the
@@ -297,7 +285,7 @@ index fef1f5b406..71f78a3474 100644
  		// live run owns delivery, and an idle queue stays put until the host
  		// decides what to do with its content.
 diff --git a/packages/coding-agent/src/session/async-job-delivery.ts b/packages/coding-agent/src/session/async-job-delivery.ts
-index 73bb877509..6d02a20d0d 100644
+index 227d51cbab..6cbce28750 100644
 --- a/packages/coding-agent/src/session/async-job-delivery.ts
 +++ b/packages/coding-agent/src/session/async-job-delivery.ts
 @@ -48,6 +48,16 @@ export interface AsyncResultEntry {
@@ -326,8 +314,8 @@ index 73bb877509..6d02a20d0d 100644
  	/** Source capture metadata belongs to this job, not to the enclosing delivery report. */
  	meta?: OutputMeta;
  	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
-@@ -110,6 +122,34 @@ export function taskAgentHandles(
- 	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
+@@ -124,6 +136,34 @@ export function commandIdentity(command: string): string {
+ 	return `${oneLine.slice(0, keep)}…${oneLine.slice(-keep)}`;
  }
  
 +/**
@@ -361,15 +349,15 @@ index 73bb877509..6d02a20d0d 100644
  export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
  	if (entries.length === 0) return null;
  	const jobs = entries.map(entry => {
-@@ -139,6 +179,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
- 			agentId: entry.job?.agentId,
- 			label: entry.job?.label,
+@@ -161,6 +201,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
+ 			request: entry.job?.request === undefined ? undefined : escapeHarnessTags(entry.job.request),
+ 			namedByCommand: command !== undefined,
  			durationMs: entry.durationMs,
 +			usage: taskJobUsage(entry.job),
  			meta: entry.job?.latestDetails?.meta,
  			structured,
  			structuredJson: structuredJson === undefined ? undefined : escapeHarnessTags(structuredJson),
-@@ -158,6 +199,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
+@@ -180,6 +221,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
  			agentId: job.agentId,
  			label: job.label,
  			durationMs: job.durationMs,
@@ -378,13 +366,14 @@ index 73bb877509..6d02a20d0d 100644
  			...(job.structured ? { schema: job.structured } : {}),
  		})),
 diff --git a/packages/coding-agent/src/session/turn-recovery.ts b/packages/coding-agent/src/session/turn-recovery.ts
-index 418a62e63d..b91f0dd96a 100644
+index 48db427869..eac1a70995 100644
 --- a/packages/coding-agent/src/session/turn-recovery.ts
 +++ b/packages/coding-agent/src/session/turn-recovery.ts
-@@ -108,6 +108,12 @@ const EMPTY_STOP_MAX_RETRIES = 3;
- const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
- const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+@@ -115,6 +115,13 @@ const GENERIC_ABORT_MAX_RETRIES = 2;
  const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+ /** Bounds best-effort usage-limit bookkeeping so a stalled report or sibling probe cannot hold the terminal agent_end event. */
+ const USAGE_LIMIT_BOOKKEEPING_TIMEOUT_MS = 3_000;
++
 +/**
 + * Longest wait `retry.waitForUsageReset` will honor. A provider-stated reset past this (a 39-hour
 + * `retry-after-ms` on a rate-limit 429, a weekly window) would hold a subagent and its parent for days with the
@@ -394,16 +383,16 @@ index 418a62e63d..b91f0dd96a 100644
  const NON_WHITESPACE_RE = /\S/;
  const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
  const STREAM_STALL_ERROR_RE = /stream stall/i;
-@@ -389,6 +395,8 @@ export class TurnRecovery {
+@@ -405,6 +412,8 @@ export class TurnRecovery {
  	readonly #host: TurnRecoveryHost;
  	readonly #unexpectedStopJudgeTimeoutMs: number;
  	#retryAbortController: AbortController | undefined;
 +	/** Ends the running back-off sleep early; set only while that sleep waits. */
 +	#retryWake: (() => void) | undefined;
  	#retryAttempt = 0;
+ 	#genericAbortStreak = 0;
  	/**
- 	 * Selectors a classifier refusal has already moved off in the current retry saga; see the walk
-@@ -2871,6 +2879,51 @@ export class TurnRecovery {
+@@ -3043,6 +3052,51 @@ export class TurnRecovery {
  			}
  			if (switchedCredential) delayMs = 0;
  		}
@@ -455,7 +444,7 @@ index 418a62e63d..b91f0dd96a 100644
  		// A thinking-loop abort is not a provider failure — it is the loop guard
  		// asking for a same-model resample, paired with a hidden
  		// `thinking-loop-redirect` notice that only makes sense on the model that
-@@ -2932,6 +2985,7 @@ export class TurnRecovery {
+@@ -3113,6 +3167,7 @@ export class TurnRecovery {
  				(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
  				effectiveUsageLimitWaitMs !== undefined &&
  				waitMs <= effectiveUsageLimitWaitMs;
@@ -463,19 +452,18 @@ index 418a62e63d..b91f0dd96a 100644
  			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
  		};
  
-@@ -3076,7 +3130,10 @@ export class TurnRecovery {
- 				{
- 					success: false,
- 					attempt,
--					finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
-+					finalError:
-+						delayMs > MAX_USAGE_RESET_WAIT_MS && retrySettings.waitForUsageReset
+@@ -3330,7 +3385,9 @@ export class TurnRecovery {
+ 					// money — so the message the user acts on is the provider's own.
+ 					finalError: billingCap
+ 						? errorMessage
+-						: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
++						: delayMs > MAX_USAGE_RESET_WAIT_MS && retrySettings.waitForUsageReset
 +							? `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds the ${MAX_USAGE_RESET_WAIT_MS}ms ceiling on retry.waitForUsageReset. Original error: ${errorMessage}`
 +							: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
  				},
  				{ terminalTurn: message },
  			);
-@@ -3117,14 +3174,26 @@ export class TurnRecovery {
+@@ -3370,6 +3427,14 @@ export class TurnRecovery {
  		const retryAbortController = new AbortController();
  		this.#retryAbortController?.abort();
  		this.#retryAbortController = retryAbortController;
@@ -488,7 +476,11 @@ index 418a62e63d..b91f0dd96a 100644
 +		};
 +		this.#retryWake = wake;
  		try {
- 			await sleepLong(delayMs, retryAbortController.signal);
+ 			if (usageResetDeadline !== undefined) {
+ 				await sleepUntil(usageResetDeadline, retryAbortController.signal);
+@@ -3377,11 +3442,15 @@ export class TurnRecovery {
+ 				await sleepLong(delayMs, retryAbortController.signal);
+ 			}
  		} catch {
 -			if (this.#retryAbortController !== retryAbortController) {
 -				return false;
@@ -506,7 +498,7 @@ index 418a62e63d..b91f0dd96a 100644
  		}
  		if (this.#retryAbortController === retryAbortController) {
  			this.#retryAbortController = undefined;
-@@ -3271,6 +3340,17 @@ export class TurnRecovery {
+@@ -3529,6 +3598,17 @@ export class TurnRecovery {
  	/**
  	 * Cancel in-progress retry.
  	 */
@@ -525,10 +517,10 @@ index 418a62e63d..b91f0dd96a 100644
  		this.#retryAbortController?.abort();
  		// Note: _retryAttempt is reset in the catch block of _autoRetry
 diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
-index ecaf88f708..8f6cc6f009 100644
+index a81b219a2c..49e6f3e822 100644
 --- a/packages/coding-agent/src/task/index.ts
 +++ b/packages/coding-agent/src/task/index.ts
-@@ -1619,6 +1619,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+@@ -1556,6 +1556,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
  						progress.watch = nextProgress.watch ?? progress.watch;
  						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
  						progress.tokens = nextProgress.tokens;
@@ -536,7 +528,7 @@ index ecaf88f708..8f6cc6f009 100644
  						progress.requests = nextProgress.requests;
  						progress.contextTokens = nextProgress.contextTokens;
  						progress.contextWindow = nextProgress.contextWindow;
-@@ -1701,6 +1702,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+@@ -1638,6 +1639,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
  					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
  					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
  					progress.tokens = singleResult?.tokens ?? 0;
@@ -753,10 +745,10 @@ index 0000000000..7cda612203
 +});
 diff --git a/packages/coding-agent/test/agent-session-retry-wake.test.ts b/packages/coding-agent/test/agent-session-retry-wake.test.ts
 new file mode 100644
-index 0000000000..f795566f9f
+index 0000000000..611e434e1d
 --- /dev/null
 +++ b/packages/coding-agent/test/agent-session-retry-wake.test.ts
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,235 @@
 +import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 +import * as path from "node:path";
 +import { scheduler } from "node:timers/promises";
@@ -833,12 +825,13 @@ index 0000000000..f795566f9f
 +		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 +		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
 +
-+		// Park timers of an hour or more until their signal aborts; every other wait runs as usual.
++		// Park timers of a second or more until their signal aborts (a usage-reset sleep waits in wall-clock
++		// chunks of at most a second); every other wait runs as usual.
 +		const entered = Promise.withResolvers<AbortSignal>();
 +		const realWait = scheduler.wait.bind(scheduler);
 +		vi.spyOn(scheduler, "wait").mockImplementation((delayMs, options) => {
 +			const signal = options?.signal;
-+			if (delayMs < 60 * 60 * 1000 || !signal) return realWait(delayMs, options);
++			if (delayMs < 1_000 || !signal) return realWait(delayMs, options);
 +			entered.resolve(signal);
 +			const parked = Promise.withResolvers<void>();
 +			const abort = () => parked.reject(signal.reason ?? new Error("Aborted"));
@@ -1104,10 +1097,19 @@ index 0000000000..80978cf61e
 +	});
 +});
 diff --git a/packages/coding-agent/test/input-controller-focused-commands.test.ts b/packages/coding-agent/test/input-controller-focused-commands.test.ts
-index 9270bb8fa7..3973462e5d 100644
+index 20efcc9555..1eb6807745 100644
 --- a/packages/coding-agent/test/input-controller-focused-commands.test.ts
 +++ b/packages/coding-agent/test/input-controller-focused-commands.test.ts
-@@ -57,7 +57,14 @@ function createFocusedContext() {
+@@ -13,7 +13,7 @@
+  * the agent.
+  */
+ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
++import { AgentBusyError, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+ import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+@@ -59,7 +59,14 @@ function createFocusedContext() {
  			customCommands: [],
  			promptTemplates: [],
  		},
@@ -1123,33 +1125,23 @@ index 9270bb8fa7..3973462e5d 100644
  		focusedAgentId: "Worker",
  		skillCommands: new Map(),
  		fileSlashCommands: new Set<string>(),
-@@ -101,15 +108,50 @@ describe("focused subagent view slash commands", () => {
+@@ -103,6 +110,48 @@ describe("focused subagent view slash commands", () => {
  		}
  	});
  
--	it("restores a focused continue shortcut when the target is busy", async () => {
--		const { ctx, raw, editor, resume } = createFocusedContext();
--		resume.mockRejectedValueOnce(new AgentBusyError());
--		const controller = new InputController(ctx);
--		controller.setupEditorSubmitHandler();
--		await ctx.editor.onSubmit?.(".");
 +	describe("continue shortcut on a busy target", () => {
-+		for (const shortcut of [".", "c"]) {
-+			it(`queues a lone ${JSON.stringify(shortcut)} as a steer instead of resuming a streaming agent`, async () => {
-+				const { ctx, raw, editor, prompt, resume } = createFocusedContext();
-+				raw.viewSession.isStreaming = true;
-+				const controller = new InputController(ctx);
-+				controller.setupEditorSubmitHandler();
-+				editor.setText(shortcut);
-+				await ctx.editor.onSubmit?.(shortcut);
++		it("resumes a streaming agent through resume(), which interrupts the turn", async () => {
++			const { ctx, raw, editor, prompt, resume } = createFocusedContext();
++			raw.viewSession.isStreaming = true;
++			const controller = new InputController(ctx);
++			controller.setupEditorSubmitHandler();
++			editor.setText(".");
++			await ctx.editor.onSubmit?.(".");
 +
-+				expect(resume).not.toHaveBeenCalled();
-+				expect(raw.withLocalSubmission).toHaveBeenCalledTimes(1);
-+				expect(prompt).toHaveBeenCalledWith(shortcut, { streamingBehavior: "steer", images: undefined });
-+				expect(raw.showError).not.toHaveBeenCalled();
-+				expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
-+			});
-+		}
++			expect(resume).toHaveBeenCalledTimes(1);
++			expect(prompt).not.toHaveBeenCalled();
++			expect(raw.showError).not.toHaveBeenCalled();
++		});
 +
 +		it("queues it as a steer for an agent waiting out a retry back-off", async () => {
 +			const { ctx, raw, editor, prompt, resume } = createFocusedContext();
@@ -1165,25 +1157,25 @@ index 9270bb8fa7..3973462e5d 100644
 +			expect(raw.showError).not.toHaveBeenCalled();
 +		});
 +
-+		it("queues the shortcut instead of showing AgentBusyError when the agent became busy after the check", async () => {
++		it("queues the shortcut instead of showing AgentBusyError when another turn claimed the agent", async () => {
 +			const { ctx, raw, editor, prompt, resume } = createFocusedContext();
 +			resume.mockRejectedValueOnce(new AgentBusyError());
 +			const controller = new InputController(ctx);
 +			controller.setupEditorSubmitHandler();
 +			editor.setText(".");
 +			await ctx.editor.onSubmit?.(".");
- 
--		expect(editor.getText()).toBe(".");
--		expect(raw.showError).toHaveBeenCalledTimes(1);
++
 +			expect(prompt).toHaveBeenCalledWith(".", { streamingBehavior: "steer", images: undefined });
 +			expect(raw.showError).not.toHaveBeenCalled();
 +			expect(editor.clearDraft).toHaveBeenCalledWith(".");
 +		});
- 	});
- 
++	});
++
  	it("runs /usage from the focused view", async () => {
+ 		const { raw, prompt } = await submit("/usage");
+ 		expect(raw.handleUsageCommand).toHaveBeenCalledTimes(1);
 diff --git a/packages/coding-agent/test/subagent-hud-render.test.ts b/packages/coding-agent/test/subagent-hud-render.test.ts
-index 18258b9340..201c1117bb 100644
+index 5c9b403849..7c93a7748c 100644
 --- a/packages/coding-agent/test/subagent-hud-render.test.ts
 +++ b/packages/coding-agent/test/subagent-hud-render.test.ts
 @@ -16,6 +16,7 @@ import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-mana
@@ -1376,7 +1368,7 @@ index 18258b9340..201c1117bb 100644
  		expect(requestRender).toHaveBeenCalled();
  		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("Link");
 diff --git a/packages/tui/src/chat/transcript-render-helpers.ts b/packages/tui/src/chat/transcript-render-helpers.ts
-index 644fa7e879..22cac71b8d 100644
+index d531d1279a..6f40dcdbe8 100644
 --- a/packages/tui/src/chat/transcript-render-helpers.ts
 +++ b/packages/tui/src/chat/transcript-render-helpers.ts
 @@ -7,7 +7,7 @@
@@ -1387,10 +1379,10 @@ index 644fa7e879..22cac71b8d 100644
 +import { formatBytes, formatCount, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
  import { span } from "../native/describe";
  import type { JobSnapshot } from "../tools/wait";
- import type { DaemonSnapshot } from "../tools/daemon";
-@@ -19,8 +19,14 @@ import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render
- import { canonicalizeMessage } from "./thinking-display";
- import { ToolActivityContainer } from "../chrome/tool-activity";
+ import { type PersistedSnapshot, serviceView } from "../tools/daemon";
+@@ -38,8 +38,14 @@ import { ToolActivityContainer } from "../chrome/tool-activity";
+ import { CustomMessageComponent } from "./custom-message";
+ import type { MessageRenderer } from "./extension-types";
  import { type TranscriptBlock } from "../chrome/transcript-container";
 -import { TranscriptStatusBlock, type TranscriptStatusRow } from "../chrome/transcript-status";
 +import {
@@ -1404,7 +1396,7 @@ index 644fa7e879..22cac71b8d 100644
  
  type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
  type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
-@@ -42,6 +48,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
+@@ -61,6 +67,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
  				type?: JobSnapshot["type"];
  				label?: string;
  				durationMs?: number;
@@ -1412,7 +1404,7 @@ index 644fa7e879..22cac71b8d 100644
  				meta?: OutputMeta;
  			}>;
  			meta?: OutputMeta;
-@@ -63,16 +70,34 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
+@@ -82,16 +89,34 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
  		const jobId = job.jobId ?? "unknown";
  		const type = job.type ?? "job";
  		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
@@ -1431,7 +1423,7 @@ index 644fa7e879..22cac71b8d 100644
 +				: undefined;
  		rows.push({
  			parts: [
- 				{ text: `${theme.status.done} Background job completed`, color: "success" },
+ 				{ text: `${theme.status.success} Background job completed`, color: "success" },
  				{ text: `[${type}]`, color: "dim" },
  				{ text: jobId, color: "accent" },
 -				duration ? { text: `(${duration})`, color: "dim" } : undefined,

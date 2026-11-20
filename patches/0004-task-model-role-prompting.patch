@@ -1,10 +1,10 @@
 diff --git a/docs/tools/task.md b/docs/tools/task.md
-index 0b2dd8fac9..6bbad6cd50 100644
+index ff51a816f9..2716c2675e 100644
 --- a/docs/tools/task.md
 +++ b/docs/tools/task.md
-@@ -66,7 +66,7 @@ Restricted folders cover task files as well as the working directory. `always-as
+@@ -62,7 +62,7 @@ With `task.steps` on, an item reads `{ "name": "Implement", "steps": ["Add the p
  
- Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. A user-tagged `^provider/model` agent grants its tagged model for per-call selection, subject to `task.perCallModelAllow`. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
+ Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. A `^provider/model:level` tag also sets the agent's initial effort, which the `effort` hint does not override. A user-tagged `^provider/model` agent without a level grants its tagged model for per-call selection, subject to `task.perCallModelAllow`; a per-call `model` for a level-tagged agent is a conflict error. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
  
 -When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models from the operator's settings and the narrowing allowlist; project settings never add a model and can only narrow the list.
 +When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models from the operator's settings and the narrowing allowlist; project settings never add a model and can only narrow the list. The task description lists each configured role as `@role` with its model, tells the agent to pass the role when the user names a model or tier (never a guessed version or ID), to omit `model` when the user names none, and to call `ask` with the roles as options when it cannot tell which model the user means.
@@ -12,7 +12,7 @@ index 0b2dd8fac9..6bbad6cd50 100644
  Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape. Settled results report the requested and actual model; extension routing, auth fallback, and runtime retry fallback can switch the actual model under the existing policies.
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index b40509c0de..c539bf39cc 100644
+index bc7b3f7ab6..be16950822 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -7,6 +7,7 @@
@@ -24,24 +24,54 @@ index b40509c0de..c539bf39cc 100644
  ### Changed
  
 diff --git a/packages/coding-agent/src/prompts/tools/task.md b/packages/coding-agent/src/prompts/tools/task.md
-index a75b459f99..d61d6708e7 100644
+index 3f848c915c..3ec13399c3 100644
 --- a/packages/coding-agent/src/prompts/tools/task.md
 +++ b/packages/coding-agent/src/prompts/tools/task.md
-@@ -22,7 +22,13 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
- {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
- {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
- {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
--{{/if}}{{#if perCallModelEnabled}}`model`: one exact `provider/model-id[@upstream][:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. `@upstream` pins an aggregator route and is part of the model identity. A role named below may be written as `@role` and resolves to its current approved model. Only operator-approved models; no arrays, globs or partial IDs. Approved: {{#list perCallModelAdvertisement.roles join=", "}}{{#list patterns join=", "}}`{{this}}`{{/list}} ({{role}}){{/list}}{{#if perCallModelAdvertisement.roles.length}}; {{/if}}{{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model. A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.{{#if perCallModelAdvertisement.allowlist.length}} Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).{{/if}} An agent's `task.agentModelOverrides` entry conflicts with `model`. Omit to let automatic selection pick a configured role from the task; if none is usable, the agent's normal routing applies. Requested model unavailable → stop and report; NEVER substitute another. Every request requires an approved model; retry fallback, context promotion and prewalk are off.
-+{{/if}}{{#if perCallModelEnabled}}`model`: for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Pick in this order:
-+1. User names a model or tier ("haiku", "use sonnet", "the cheap one") → pass the configured role of that name as `@role`. A role is the user's own choice of model for that name. NEVER swap in a version or ID you know (not `claude-haiku-4-5` for "haiku"), and never a bare word.
-+2. User names none → omit `model`; automatic selection picks a configured role from the task. If none is usable, the agent's normal routing applies.
-+3. Exact `provider/model-id[@upstream][:level]` only when the user typed that exact ID. `@upstream` pins an aggregator route and is part of the model identity.
-+Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{/list}}{{else}}none{{/if}}.
-+Unsure (wording fits several roles or none, or the user's intent is unclear)? Do not guess: call `ask` with the roles as options before spawning, if you have `ask`. Rare. NEVER ask when one role clearly matches.
-+Only operator-approved models; no arrays, globs or partial IDs. Also approved: {{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model. A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.{{#if perCallModelAdvertisement.allowlist.length}} Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).{{/if}} An agent's `task.agentModelOverrides` entry conflicts with `model`. Requested model unavailable → stop and report; NEVER substitute another. Every request requires an approved model; retry fallback, context promotion and prewalk are off.
- {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
- {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
- {{else}}`isolated`: worktree; changes retained, not applied.
+@@ -57,24 +57,18 @@ Run one agent synchronously.
+ - `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
+ {{/if}}
+ {{#if perCallModelEnabled}}
+-- `model`: one exact `provider/model-id[@upstream][:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}.
+-  - `@upstream` pins an aggregator route and is part of the model identity.
+-  - A role named below may be written as `@role` and resolves to its current approved model.
+-  - Only operator-approved models; no arrays, globs or partial IDs.
+-  - Approved:
+-{{#each perCallModelAdvertisement.roles}}
+-    - {{#list patterns join=", "}}`{{this}}`{{/list}} ({{role}})
+-{{/each}}
+-{{#unless perCallModelAdvertisement.parentModelWithheld}}
+-    - your own current model
+-{{/unless}}
+-    - the selected bundled/user agent's own configured model
++- `model`: for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Pick in this order:
++  1. User names a model or tier ("haiku", "use sonnet", "the cheap one") → pass the configured role of that name as `@role`. A role is the user's own choice of model for that name. NEVER swap in a version or ID you know (not `claude-haiku-4-5` for "haiku"), and never a bare word.
++  2. User names none → omit `model`; automatic selection picks a configured role from the task. If none is usable, the agent's normal routing applies.
++  3. Exact `provider/model-id[@upstream][:level]` only when the user typed that exact ID. `@upstream` pins an aggregator route and is part of the model identity.
++  - Configured roles: {{#if perCallModelAdvertisement.roles.length}}{{#list perCallModelAdvertisement.roles join="; "}}`@{{role}}` = {{#list patterns join=" | "}}`{{this}}`{{/list}}{{/list}}{{else}}none{{/if}}.
++  - Unsure (wording fits several roles or none, or the user's intent is unclear)? Do not guess: call `ask` with the roles as options before spawning, if you have `ask`. Rare. NEVER ask when one role clearly matches.
++  - Only operator-approved models; no arrays, globs or partial IDs. Also approved: {{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model.
+   - A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.
+ {{#if perCallModelAdvertisement.allowlist.length}}
+   - Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).
+ {{/if}}
+   - An agent's `task.agentModelOverrides` entry or user-chosen effort conflicts with `model`.
+-  - Omit to let automatic selection pick a configured role from the task; if none is usable, the agent's normal routing applies.
+   - Requested model unavailable → stop and report; NEVER substitute another.
+   - Every request requires an approved model; retry fallback, context promotion and prewalk are off.
+ {{/if}}
+diff --git a/packages/coding-agent/test/task/model-approval.test.ts b/packages/coding-agent/test/task/model-approval.test.ts
+index 08a005c22f..e67326de91 100644
+--- a/packages/coding-agent/test/task/model-approval.test.ts
++++ b/packages/coding-agent/test/task/model-approval.test.ts
+@@ -444,7 +444,7 @@ describe("per-call model advertisement", () => {
+ 		]);
+ 		const taskDescription = taskTool.description;
+ 		const evalDescription = evalTool.description;
+-		expect(taskDescription).toContain("`mock/target` (default)");
++		expect(taskDescription).toContain("`@default` = `mock/target`");
+ 		expect(evalDescription).toContain("`mock/target` (default)");
+ 
+ 		// A second omp instance rewrites the shared config.yml; this session
 diff --git a/packages/coding-agent/test/task/task-model-roles-prompt.test.ts b/packages/coding-agent/test/task/task-model-roles-prompt.test.ts
 new file mode 100644
 index 0000000000..008d7fa6cc
@@ -90,10 +120,10 @@ index 0000000000..008d7fa6cc
 +	});
 +});
 diff --git a/packages/coding-agent/test/task/task-schema.test.ts b/packages/coding-agent/test/task/task-schema.test.ts
-index e7e39014b0..ab57e2b3d9 100644
+index ce9e286c42..6b994ca5b5 100644
 --- a/packages/coding-agent/test/task/task-schema.test.ts
 +++ b/packages/coding-agent/test/task/task-schema.test.ts
-@@ -297,14 +297,14 @@ describe("task spawn validation", () => {
+@@ -198,14 +198,14 @@ describe("task spawn validation", () => {
  		};
  		for (const mode of ["off", "eval"]) {
  			const text = await description(mode);
@@ -111,7 +141,7 @@ index e7e39014b0..ab57e2b3d9 100644
  		expect(text).not.toContain("anthropic/claude-haiku-4-5");
  	});
  
-@@ -330,7 +330,17 @@ describe("task spawn validation", () => {
+@@ -231,7 +231,17 @@ describe("task spawn validation", () => {
  		);
  		const text = tool.description;
  		for (const advertised of ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) expect(text).toContain(advertised);
@@ -130,7 +160,7 @@ index e7e39014b0..ab57e2b3d9 100644
  			expect(text).not.toContain(omitted);
  		}
  	});
-@@ -346,7 +356,7 @@ describe("task spawn validation", () => {
+@@ -247,7 +257,7 @@ describe("task spawn validation", () => {
  		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
  		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
  		const text = (await TaskTool.create(session)).description;
@@ -139,7 +169,7 @@ index e7e39014b0..ab57e2b3d9 100644
  		expect(text).not.toContain("mock/*");
  		expect(catalogLookup).not.toHaveBeenCalled();
  	});
-@@ -359,8 +369,8 @@ describe("task spawn validation", () => {
+@@ -260,8 +270,8 @@ describe("task spawn validation", () => {
  		});
  		Object.assign(session, { modelRegistry: { getAll: () => [model], getAvailable: () => [model] } });
  		const text = (await TaskTool.create(session)).description;
@@ -150,7 +180,7 @@ index e7e39014b0..ab57e2b3d9 100644
  	});
  
  	it("offers the caller's own model only when one selector can name it", async () => {
-@@ -398,13 +408,13 @@ describe("task spawn validation", () => {
+@@ -299,13 +309,13 @@ describe("task spawn validation", () => {
  			},
  		});
  		const tool = await TaskTool.create(session);

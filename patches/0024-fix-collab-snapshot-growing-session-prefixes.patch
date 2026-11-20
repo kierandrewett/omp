@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/collab/saved-history.ts b/packages/coding-agent/src/collab/saved-history.ts
-index 98b250097e..bb64904e2a 100644
+index 98b250097e..c776327950 100644
 --- a/packages/coding-agent/src/collab/saved-history.ts
 +++ b/packages/coding-agent/src/collab/saved-history.ts
 @@ -1,5 +1,15 @@
@@ -383,7 +383,7 @@ index 98b250097e..bb64904e2a 100644
 + */
 +async function completeLinesLength(fd: number, size: number): Promise<number> {
 +	const chunk = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, size));
-+	for (let end = size; end > 0; ) {
++	for (let end = size; end > 0;) {
 +		const start = Math.max(0, end - chunk.length);
 +		readExact(fd, chunk, end - start, start);
 +		const index = chunk.subarray(0, end - start).lastIndexOf(0x0a);
@@ -405,7 +405,7 @@ index 98b250097e..bb64904e2a 100644
 +async function digestPrefix(source: number, length: number, copy?: number): Promise<string> {
 +	const hash = createHash("sha256");
 +	const chunk = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, length));
-+	for (let offset = 0; offset < length; ) {
++	for (let offset = 0; offset < length;) {
 +		const count = Math.min(chunk.length, length - offset);
 +		readExact(source, chunk, count, offset);
 +		const bytes = chunk.subarray(0, count);

@@ -28,7 +28,7 @@ index 3748c6dc99..c78290df89 100644
  The list uses offset pagination and can change between requests if sessions
  change. This request does not provide saved message history.
 diff --git a/packages/coding-agent/src/collab/host.ts b/packages/coding-agent/src/collab/host.ts
-index 95251cf741..b0eb938a98 100644
+index dbfcf814c4..d15ed9ea6b 100644
 --- a/packages/coding-agent/src/collab/host.ts
 +++ b/packages/coding-agent/src/collab/host.ts
 @@ -10,7 +10,9 @@
@@ -41,7 +41,7 @@ index 95251cf741..b0eb938a98 100644
  import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
  import { logger } from "@oh-my-pi/pi-utils";
  import type {
-@@ -763,21 +765,20 @@ export class CollabHost {
+@@ -853,21 +855,20 @@ export class CollabHost {
  				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
  				break;
  			case "list-saved-sessions":
@@ -70,7 +70,7 @@ index 95251cf741..b0eb938a98 100644
  			this.#send({ t: "saved-sessions", reqId, sessions: [], error: "unavailable" }, fromPeer);
  			return;
  		}
-@@ -813,6 +814,28 @@ export class CollabHost {
+@@ -903,6 +904,28 @@ export class CollabHost {
  		}
  	}
  
@@ -100,10 +100,10 @@ index 95251cf741..b0eb938a98 100644
  	#verifyWriteToken(token: string | undefined): boolean {
  		const expected = this.#writeToken;
 diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
-index 9de1b6b6b0..853b9423a5 100644
+index 297a3e6996..6f0e87fc4a 100644
 --- a/packages/wire/src/index.ts
 +++ b/packages/wire/src/index.ts
-@@ -343,7 +343,7 @@ export type GuestFrame =
+@@ -345,7 +345,7 @@ export type GuestFrame =
  	| { t: "abort" }
  	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
  	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }

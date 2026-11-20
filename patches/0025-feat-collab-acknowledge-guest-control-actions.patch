@@ -53,10 +53,10 @@ index df752e0e62..30787686e8 100644
 +
  Transcript fetches are capped at 4 MiB per reply and end on complete JSONL lines. Guests continue from `newSize`; a single entry exceeding the cap produces a terminal transcript error instead of an endless empty-read retry.
 diff --git a/packages/coding-agent/src/collab/host.ts b/packages/coding-agent/src/collab/host.ts
-index 2748110ef2..cf51d80c80 100644
+index 31d454fd63..4189260102 100644
 --- a/packages/coding-agent/src/collab/host.ts
 +++ b/packages/coding-agent/src/collab/host.ts
-@@ -154,7 +154,8 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
+@@ -161,7 +161,8 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
  interface PendingCollabUiRequest {
  	request: CollabUiRequest;
  	promise: Promise<CollabGuestUiResult>;
@@ -64,11 +64,11 @@ index 2748110ef2..cf51d80c80 100644
 +	/** Resolves the request once; returns false when it had already settled. */
 +	settle(result: CollabGuestUiResult): boolean;
  	responsePending?: boolean;
- 	retainOnReconnect?: boolean;
- }
-@@ -377,15 +378,16 @@ export class CollabHost {
- 		const fullRequest: CollabUiRequest = { ...request, reqId };
+ 	/** Peers that were handed this dialog and can still answer it. */
+ 	recipients: Set<number>;
+@@ -390,15 +391,18 @@ export class CollabHost {
  		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
+ 		const recipients = new Set<number>();
  		let settled = false;
 -		const settle = (result: CollabGuestUiResult): void => {
 -			if (settled) return;
@@ -77,16 +77,18 @@ index 2748110ef2..cf51d80c80 100644
  			settled = true;
  			signal?.removeEventListener("abort", onAbort);
  			this.#pendingUi.delete(reqId);
- 			this.#sendWritablePeers({ t: "ui-request-end", reqId });
+ 			this.#endUiRequest(reqId, recipients);
  			resolve(result);
 +			return true;
++		};
++		const onAbort = (): void => {
++			settle({ kind: "unavailable" });
  		};
 -		const onAbort = (): void => settle({ kind: "unavailable" });
-+		const onAbort = (): void => { settle({ kind: "unavailable" }); };
  		signal?.addEventListener("abort", onAbort, { once: true });
- 		this.#pendingUi.set(reqId, {
- 			request: fullRequest,
-@@ -747,7 +749,7 @@ export class CollabHost {
+ 		// The queue can refuse a targeted frame and the caller has no timeout, so track
+ 		// who actually holds the dialog. With no writer connected yet, the ask waits for
+@@ -838,7 +842,7 @@ export class CollabHost {
  		// An old-room answer may wait for rollback, but cannot settle against
  		// another session. The response handler owns that bounded deferral.
  		if (frame.t === "ui-response") {
@@ -95,7 +97,7 @@ index 2748110ef2..cf51d80c80 100644
  			return;
  		}
  		// Inbound frames act on the mirrored session (join snapshots, prompts,
-@@ -759,12 +761,12 @@ export class CollabHost {
+@@ -850,12 +854,12 @@ export class CollabHost {
  				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
  				break;
  			case "prompt":
@@ -112,7 +114,39 @@ index 2748110ef2..cf51d80c80 100644
  				break;
  			case "agent-cmd":
  				if (this.#rejectWhileStarting("agent control", fromPeer)) break;
-@@ -951,9 +953,19 @@ export class CollabHost {
+@@ -911,12 +915,15 @@ export class CollabHost {
+ 				this.#send({ t: "saved-sessions", reqId, sessions: [], error: "unavailable" }, fromPeer);
+ 				return;
+ 			}
+-			this.#send({
+-				t: "saved-sessions",
+-				reqId,
+-				sessions,
+-				...(offset + page.length < all.length ? { nextOffset: offset + page.length } : {}),
+-			}, fromPeer);
++			this.#send(
++				{
++					t: "saved-sessions",
++					reqId,
++					sessions,
++					...(offset + page.length < all.length ? { nextOffset: offset + page.length } : {}),
++				},
++				fromPeer,
++			);
+ 		} catch {
+ 			if (this.#peers.get(fromPeer) === peer) {
+ 				this.#send({ t: "saved-sessions", reqId, sessions: [], error: "unavailable" }, fromPeer);
+@@ -1023,7 +1030,8 @@ export class CollabHost {
+ 		try {
+ 			file = await fs.open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+ 			const stat = await file.stat();
+-			if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0 || stat.size !== 32) return false;
++			if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0 || stat.size !== 32)
++				return false;
+ 			const expected = Buffer.alloc(33);
+ 			const { bytesRead } = await file.read(expected, 0, expected.length, 0);
+ 			return bytesRead === 32 && timingSafeEqual(expected.subarray(0, 32), supplied);
+@@ -1042,9 +1050,19 @@ export class CollabHost {
  		return bytes.byteLength === expected.byteLength && timingSafeEqual(bytes, expected);
  	}
  
@@ -134,7 +168,7 @@ index 2748110ef2..cf51d80c80 100644
  	}
  
  	/**
-@@ -961,12 +973,13 @@ export class CollabHost {
+@@ -1052,12 +1070,13 @@ export class CollabHost {
  	 * auto-started room is live before the session's startup hooks finish):
  	 * refuse with a targeted error instead of running an agent turn beside them.
  	 */
@@ -149,7 +183,7 @@ index 2748110ef2..cf51d80c80 100644
  		return true;
  	}
  
-@@ -1124,33 +1137,47 @@ export class CollabHost {
+@@ -1237,39 +1256,55 @@ export class CollabHost {
  		}
  	}
  
@@ -174,12 +208,20 @@ index 2748110ef2..cf51d80c80 100644
  		}
  		const pending = this.#pendingUi.get(reqId);
  		if (pending) {
--			if (pending.responsePending) return;
-+			// Another answer from this peer already waits on the request; this one is not applied.
-+			if (pending.responsePending) {
+-			if (!pending.recipients.has(fromPeer)) return;
++			// This peer does not hold the ask (never posed to it, or it answered already): not applied.
++			if (!pending.recipients.has(fromPeer)) {
 +				this.#ack(actionId, false, fromPeer);
 +				return;
 +			}
++			// Another answer from this peer already waits on the request; this one is not applied.
+ 			if (pending.responsePending) {
+ 				// The guest dismissed its dialog on submitting, so it holds the ask no more and
+ 				// a transition replay must re-pose it there.
+ 				pending.recipients.delete(fromPeer);
++				this.#ack(actionId, false, fromPeer);
+ 				return;
+ 			}
  			if (suspended) {
 -				void this.#settleUiAfterTransition(pending, value, fromPeer);
 +				void this.#settleUiAfterTransition(pending, value, actionId, fromPeer);
@@ -203,26 +245,38 @@ index 2748110ef2..cf51d80c80 100644
  		fromPeer: number,
  	): Promise<void> {
  		// At most one answer per existing request; stop/local cancellation wakes
-@@ -1167,21 +1194,37 @@ export class CollabHost {
+@@ -1286,30 +1321,43 @@ export class CollabHost {
  				!this.#sessionStillCurrent() &&
  				this.#ctx.session.isSessionTransitioning
  			);
 -			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
--			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) pending.settle({ kind: "answered", value });
--			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
+-			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) {
+-				pending.settle({ kind: "answered", value });
 +			// Room or session changed: no verdict can reach the guest, so it stays unknown.
 +			if (!this.#guestTrafficAllowed()) return;
 +			// Another peer or a local cancellation settled the request first: not applied.
 +			if (this.#pendingUi.get(reqId) !== pending) {
 +				this.#ack(actionId, false, fromPeer);
-+				return;
-+			}
+ 				return;
+ 			}
+-			// Re-pose only to writers not already holding it, and record who took it.
+-			const hadWritable = this.#hasWritablePeers();
+-			const holders = new Set(pending.recipients);
+-			for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: pending.request }, holders)) {
+-				pending.recipients.add(peerId);
 +			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) {
 +				this.#ack(actionId, pending.settle({ kind: "answered", value }), fromPeer);
 +			} else {
-+				this.#sendWritablePeers({ t: "ui-request", request: pending.request });
++				// Re-pose only to writers not already holding it, and record who took it.
++				const hadWritable = this.#hasWritablePeers();
++				const holders = new Set(pending.recipients);
++				for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: pending.request }, holders)) {
++					pending.recipients.add(peerId);
++				}
++				if (hadWritable && pending.recipients.size === 0) pending.settle({ kind: "unavailable" });
 +				this.#ack(actionId, false, fromPeer);
-+			}
+ 			}
+-			if (hadWritable && pending.recipients.size === 0) pending.settle({ kind: "unavailable" });
  		} catch (error) {
  			logger.warn("Collab UI response could not await session transition", { error: String(error) });
  			pending.settle({ kind: "unavailable" });
@@ -246,7 +300,7 @@ index 2748110ef2..cf51d80c80 100644
  			return;
  		}
  		const name = peer.name;
-@@ -1193,6 +1236,9 @@ export class CollabHost {
+@@ -1321,6 +1369,9 @@ export class CollabHost {
  			this.#ctx.ui.requestRender();
  			this.#scheduleStateBroadcast();
  		}
@@ -256,7 +310,7 @@ index 2748110ef2..cf51d80c80 100644
  		this.#ctx.session
  			.promptCustomMessage(
  				{
-@@ -1202,12 +1248,23 @@ export class CollabHost {
+@@ -1330,12 +1381,23 @@ export class CollabHost {
  					details,
  					attribution: "user",
  				},
@@ -282,7 +336,7 @@ index 2748110ef2..cf51d80c80 100644
  				logger.warn("collab guest prompt failed", { error: String(err) });
  				this.#send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
  			});
-@@ -1230,15 +1287,19 @@ export class CollabHost {
+@@ -1358,15 +1420,19 @@ export class CollabHost {
  		);
  	}
  
@@ -307,10 +361,10 @@ index 2748110ef2..cf51d80c80 100644
  				if (!this.#guestTrafficAllowed()) return;
  				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
 diff --git a/packages/coding-agent/src/collab/protocol.ts b/packages/coding-agent/src/collab/protocol.ts
-index 5eb8fa2854..3e4d723c3c 100644
+index 151e4ab6a3..b11610750c 100644
 --- a/packages/coding-agent/src/collab/protocol.ts
 +++ b/packages/coding-agent/src/collab/protocol.ts
-@@ -55,7 +55,7 @@ export type { CollabSessionState };
+@@ -61,7 +61,7 @@ export type { CollabSessionState };
  export type CollabFrame =
  	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
  	| Exclude<GuestFrame, { t: "prompt" }>
@@ -319,7 +373,7 @@ index 5eb8fa2854..3e4d723c3c 100644
  	// host -> guest
  	| {
  			t: "welcome";
-@@ -91,6 +91,7 @@ export type CollabFrame =
+@@ -97,6 +97,7 @@ export type CollabFrame =
  	| { t: "agents"; agents: AgentSnapshot[] }
  	| { t: "ui-request"; request: CollabUiRequest }
  	| { t: "ui-request-end"; reqId: number }
@@ -327,11 +381,24 @@ index 5eb8fa2854..3e4d723c3c 100644
  	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
  	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
  	| Extract<HostFrame, { t: "saved-sessions" }>
+diff --git a/packages/coding-agent/test/collab/steer-queue.test.ts b/packages/coding-agent/test/collab/steer-queue.test.ts
+index 478ec78a6e..6fecab0df0 100644
+--- a/packages/coding-agent/test/collab/steer-queue.test.ts
++++ b/packages/coding-agent/test/collab/steer-queue.test.ts
+@@ -203,7 +203,7 @@ describe("collab mid-turn guest prompts", () => {
+ 		const prompt = await prompted;
+ 
+ 		expect(prompt.details).toEqual({ from: "writer" });
+-		expect(prompt.options).toEqual({ streamingBehavior: "steer", queueChipText: "steer the host" });
++		expect(prompt.options).toMatchObject({ streamingBehavior: "steer", queueChipText: "steer the host" });
+ 
+ 		// The queued steer must reach guests through state.queuedMessageCount —
+ 		// that field drives the web composer's "queued ×N" badge.
 diff --git a/packages/wire/src/index.ts b/packages/wire/src/index.ts
-index 1d2ac04f16..cd9d7856b2 100644
+index 8969a9572a..54b822b2c4 100644
 --- a/packages/wire/src/index.ts
 +++ b/packages/wire/src/index.ts
-@@ -338,9 +338,9 @@ export type GuestFrame =
+@@ -340,13 +340,20 @@ export type GuestFrame =
  			 */
  			writeToken?: string;
  	  }
@@ -344,7 +411,19 @@ index 1d2ac04f16..cd9d7856b2 100644
  	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
  	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
  	| { t: "list-saved-sessions"; reqId: number; offset: number; historyKey: string }
-@@ -381,6 +381,14 @@ export type HostFrame =
+-	| { t: "read-saved-history"; reqId: number; sessionId: string; offset: number; revision?: string; historyKey: string };
++	| {
++			t: "read-saved-history";
++			reqId: number;
++			sessionId: string;
++			offset: number;
++			revision?: string;
++			historyKey: string;
++	  };
+ 
+ /** EventBus channels mirrored to guests (task subagent traffic only). */
+ export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
+@@ -383,6 +390,14 @@ export type HostFrame =
  	| { t: "agents"; agents: AgentSnapshot[] }
  	| { t: "ui-request"; request: CollabUiRequest }
  	| { t: "ui-request-end"; reqId: number }
@@ -359,3 +438,20 @@ index 1d2ac04f16..cd9d7856b2 100644
  	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
  	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
  	| {
+@@ -395,7 +410,15 @@ export type HostFrame =
+ 	/** Reply to read-saved-history. `revision` must be echoed on the next page; `bytes` is base64url. */
+ 	| { t: "saved-history"; reqId: number; error: SavedHistoryErrorCode }
+ 	| { t: "saved-history"; reqId: number; revision: string; offset: number; bytes: string; done: true }
+-	| { t: "saved-history"; reqId: number; revision: string; offset: number; bytes: string; done: false; nextOffset: number }
++	| {
++			t: "saved-history";
++			reqId: number;
++			revision: string;
++			offset: number;
++			bytes: string;
++			done: false;
++			nextOffset: number;
++	  }
+ 	| { t: "bye"; reason: string }
+ 	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
+ 	| { t: "error"; message: string; resync?: true };

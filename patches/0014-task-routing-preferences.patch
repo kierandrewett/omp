@@ -1,8 +1,8 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index 7f11f85a8d..93db02e7ce 100644
+index 0a9d17bd28..b72568803a 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -472,6 +472,7 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
+@@ -517,6 +517,7 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
  | Key                         | Type   | Default | Notes |
  | --------------------------- | ------ | ------- | ----- |
  | `judgment.attemptTimeoutMs` | number | `3000` | Positive integer milliseconds allowed for one native judge candidate, including credentials, headers, retries, and response-body reading, while a `retry.fallbackChains.judge` entry remains to try. Local image preparation is excluded; prompted and on-device judges are unchanged. |
@@ -11,10 +11,10 @@ index 7f11f85a8d..93db02e7ce 100644
  The deadline only applies when you configured a judge fallback: a timed-out candidate is cancelled and the next configured fallback is tried, and its route is skipped for 30 seconds in the same session and model registry (judges without a session ID keep their own cooldown). A timeout never hands the judgment to a model you did not configure, such as a built-in default or the session model; without a configured fallback, a slow native judge runs to completion. The caller's own cancellation always ends the judgment without failover.
  
 diff --git a/docs/task-agent-discovery.md b/docs/task-agent-discovery.md
-index d4576212d3..c489d00aaa 100644
+index 3de0475c10..45bd78d3f9 100644
 --- a/docs/task-agent-discovery.md
 +++ b/docs/task-agent-discovery.md
-@@ -279,6 +279,16 @@ For a per-call `model`, `task.maxEffort` bounds every per-call-model spawn, not
+@@ -295,6 +295,16 @@ For a per-call `model`, `task.maxEffort` bounds every per-call-model spawn, not
  
  At actual dispatch, not preflight, the native Jev judge selects among configured, usable named model roles. The rubric favors `@haiku` for clearly bounded mechanical work, `@sonnet` for nontrivial, risky, ambiguous or uncertain work, and `@opus` for unusually difficult high-stakes work; other configured aliases are considered using their selector information, without assuming capabilities from their names. Built-in routing roles are not candidates. Both the winning probability and confidence must be at least 0.7. The judge receives the task, shared batch context if present, resolved agent type and candidate alias-to-selector map; each text field is bounded to 2,000 characters. This data is sent to the configured native judgment provider and may be cached in the shared judgment cache.
  
@@ -28,11 +28,11 @@ index d4576212d3..c489d00aaa 100644
 +
 +Set it with `omp config set task.routingPreferences "<text>"` or in the settings UI under Tasks.
 +
- Automatic selection applies only to ordinary task calls that carry no model of any kind (no per-call `model`, no host `model`, not the bundled seance); eval calls keep their existing routing. It takes precedence over `task.agentModelOverrides` and agent frontmatter. The judgment has a four-second timeout. If native judgment is unavailable, fails, times out, is insufficiently confident, or cannot choose among at least two usable roles, routing falls back to `@sonnet` when that role is configured and usable. If no conservative role can be used, or the session has no model registry, the existing override/frontmatter/parent resolution is preserved. Caller cancellation propagates instead of triggering a fallback. The result and progress routing note identifies the chosen role, conservative fallback, or use of existing resolution; actual model selection may still change under authentication or retry fallback.
+ Automatic selection applies only to ordinary task calls that carry no model of any kind (no per-call `model`, no host `model`); eval calls keep their existing routing. It takes precedence over `task.agentModelOverrides` and agent frontmatter. The judgment has a four-second timeout. If native judgment is unavailable, fails, times out, is insufficiently confident, or cannot choose among at least two usable roles, routing falls back to `@sonnet` when that role is configured and usable. If no conservative role can be used, or the session has no model registry, the existing override/frontmatter/parent resolution is preserved. Caller cancellation propagates instead of triggering a fallback. The result and progress routing note identifies the chosen role, conservative fallback, or use of existing resolution; actual model selection may still change under authentication or retry fallback.
  
  After automatic selection, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block any spawn, or replace model patterns when no host or per-call model was supplied; a replacement and its routing note are reported. An explicit host or per-call selector cannot be replaced by the hook. Authentication and retry fallback policies remain in force; task results report the requested and actual model.
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 50b7422425..ab156b95f4 100644
+index c214ea9fb0..322a7e7f28 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -10,6 +10,7 @@
@@ -56,11 +56,11 @@ index 3d78928dc6..88699927ce 100644
  			"haiku": "Clearly specified, bounded mechanical work with an obvious procedure and low risk: straightforward formatting, simple repetitive edits, gathering explicitly identified information, or a narrowly specified change needing little judgment.",
  			"sonnet": "Nontrivial reasoning, complex design, debugging or investigation, security or privacy sensitive work, ambiguous requirements, unfamiliar interacting systems, consequential changes, or any task requiring substantial independent judgment. Also choose this when uncertain whether the task is safely mechanical.",
 diff --git a/packages/coding-agent/src/task/auto-model.ts b/packages/coding-agent/src/task/auto-model.ts
-index d8f4942a3e..99684d3ea5 100644
+index 1b707cdd8b..0cdc934f09 100644
 --- a/packages/coding-agent/src/task/auto-model.ts
 +++ b/packages/coding-agent/src/task/auto-model.ts
 @@ -8,6 +8,7 @@ import questionFile from "../prompts/judge/task-model.json" with { type: "json"
- import type { CostGate } from "../session/cost-gate";
+ import type { CostGateApi } from "../session/cost-gate";
  import { describeConfiguredRoles, formatTier } from "./model-economy";
  import { loadModelUsage } from "./model-usage";
 +import { cfgTaskRoutingPreferences } from "./settings";
@@ -78,10 +78,10 @@ index d8f4942a3e..99684d3ea5 100644
  		for (const role of roles.keys()) {
  			criteria[role] = Object.hasOwn(QUESTIONS.model.criteria, role)
 diff --git a/packages/coding-agent/src/task/settings.ts b/packages/coding-agent/src/task/settings.ts
-index 55d3c6e1b6..2ec2553321 100644
+index b2754631d5..286907995d 100644
 --- a/packages/coding-agent/src/task/settings.ts
 +++ b/packages/coding-agent/src/task/settings.ts
-@@ -372,6 +372,19 @@ export const cfgTaskPerCallModelAllow = register({
+@@ -436,6 +436,19 @@ export const cfgTaskPerCallModelAllow = register({
  	},
  });
  

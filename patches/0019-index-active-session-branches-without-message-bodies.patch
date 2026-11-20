@@ -1,8 +1,8 @@
 diff --git a/packages/coding-agent/src/session/session-entries.ts b/packages/coding-agent/src/session/session-entries.ts
-index 033eaa87fb..92b8175ea0 100644
+index 563062a2ae..aba6ba5f10 100644
 --- a/packages/coding-agent/src/session/session-entries.ts
 +++ b/packages/coding-agent/src/session/session-entries.ts
-@@ -364,12 +364,12 @@ export type SessionEntry =
+@@ -431,12 +431,12 @@ export type SessionEntry =
  	| ResetBoundaryEntry;
  
  /** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
@@ -17,7 +17,7 @@ index 033eaa87fb..92b8175ea0 100644
  	for (let index = entries.length - 1; index >= 0; index--) {
  		const entry = entries[index];
  		if (sessionEntryLeafId(entry) === entry.id) return entry.id;
-@@ -381,7 +381,7 @@ export function lastSelfSelectedLeafId(entries: readonly SessionEntry[]): string
+@@ -448,7 +448,7 @@ export function lastSelfSelectedLeafId(entries: readonly SessionEntry[]): string
   * Active leaf after replaying entries in file order; an empty or cleared session has no leaf.
   * A captured leaf that no longer exists (rollback, rewrite) falls back to the newest self-selecting entry.
   */
@@ -27,10 +27,10 @@ index 033eaa87fb..92b8175ea0 100644
  	if (!last) return null;
  	const leafId = sessionEntryLeafId(last);
 diff --git a/packages/coding-agent/src/session/session-loader.ts b/packages/coding-agent/src/session/session-loader.ts
-index d3d913df03..2158852d85 100644
+index 0cfdcfaa0e..98062bd974 100644
 --- a/packages/coding-agent/src/session/session-loader.ts
 +++ b/packages/coding-agent/src/session/session-loader.ts
-@@ -24,7 +24,13 @@ import {
+@@ -22,7 +22,13 @@ import {
  	resolveImageDataUrlSync,
  } from "./blob-store";
  import { buildSessionContext } from "./session-context";
@@ -45,7 +45,7 @@ index d3d913df03..2158852d85 100644
  import { migrateToCurrentVersion } from "./session-migrations";
  import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
  import { FileSessionStorage, type SessionStorage } from "./session-storage";
-@@ -618,6 +624,35 @@ export async function visitEntriesFromFile(
+@@ -584,6 +590,35 @@ export async function visitEntriesFromFile(
  	}
  }
  

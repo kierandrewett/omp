@@ -1,8 +1,8 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index 7183dd079a..a0c3b36dc2 100644
+index 008bf77a89..e39cf79a4e 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -603,6 +603,7 @@ providers:
+@@ -651,6 +651,7 @@ providers:
  | `retry.usageAwareFallback`               | boolean | `false`           | Before a turn, use reliable coding-plan quota reports to prefer healthy same-provider accounts and then configured fallback models. Unknown usage keeps the current model; ordinary API keys are excluded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
  | `retry.usageReservePct`                  | number  | `10`              | Remaining quota percentage protected by usage-aware fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
  | `retry.usageReservePolicy`               | enum    | `confirm`         | `confirm`, `auto`, `fail-closed`. At reserve, `confirm` asks when an interactive confirmer is available and otherwise auto-falls back; exhausted quota can fall back without confirmation. `fail-closed` blocks known reserve/depleted quota rather than spending it.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -11,7 +11,7 @@ index 7183dd079a..a0c3b36dc2 100644
  
  When the active chat model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default` — which also owns a live model that belongs to no role (`/model` switch, ephemeral hop). The effective chain is the owning role's primary followed by its configured entries, and a live selector that appears nowhere in it is offered the whole chain. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching chat roles when the session is not on those roles. It skips chat candidates whose selectors are still cooling down and switches for the rest of the turn. Model-kind runners resolve their named role chain separately and never consume `default`. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`. A subagent spawned on a single model inherits its role's chain (`@reviewer` → `fallbackChains.reviewer`), or `default`'s when the role has none; an explicit `[]` gives it no fallbacks even when `default` is assigned the same model. Exact-model and `provider/*` keys still take precedence over that inherited chain.
 diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
-index 6a3a1ccb01..1ac476f4c5 100644
+index 10a52a6f94..633c3ea804 100644
 --- a/packages/ai/CHANGELOG.md
 +++ b/packages/ai/CHANGELOG.md
 @@ -2,6 +2,10 @@
@@ -22,14 +22,14 @@ index 6a3a1ccb01..1ac476f4c5 100644
 +
 +- Added `AuthStorageOptions.accountMode` (`"balanced"` or `"sequential"`) and the `drainSequentially` ranking-strategy flag. In `sequential` mode the Claude strategy serves every session from one stored account at a time, stores the account that served last under `account:active:<provider>`, and moves to the next account only when the active one is blocked or spent. It does not hand back after a reset.
 +
- ## [18.14.2] - 2026-10-31
+ ## [19.0.0] - 2026-11-18
  
- ### Breaking Changes
+ ### Added
 diff --git a/packages/ai/src/auth-broker/discover.ts b/packages/ai/src/auth-broker/discover.ts
-index 20969f4754..2f289e10f1 100644
+index 6ff421fda7..b06b207b27 100644
 --- a/packages/ai/src/auth-broker/discover.ts
 +++ b/packages/ai/src/auth-broker/discover.ts
-@@ -18,10 +18,12 @@ import {
+@@ -20,10 +20,12 @@ import {
  } from "@oh-my-pi/pi-utils";
  import { YAML } from "bun";
  import {
@@ -42,7 +42,7 @@ index 20969f4754..2f289e10f1 100644
  	DEFAULT_USAGE_RESERVE_PCT,
  	SqliteAuthCredentialStore,
  } from "../auth-storage";
-@@ -85,6 +87,7 @@ interface ConfigSnapshot {
+@@ -108,6 +110,7 @@ interface ConfigSnapshot {
  	token?: string;
  	accountPolicies?: unknown;
  	usageReservePct?: unknown;
@@ -50,7 +50,7 @@ index 20969f4754..2f289e10f1 100644
  }
  
  /**
-@@ -198,6 +201,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
+@@ -221,6 +224,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
  	});
  }
  
@@ -63,7 +63,7 @@ index 20969f4754..2f289e10f1 100644
  function parseUsageReservePct(value: unknown): number {
  	const reservePct = value === undefined ? DEFAULT_USAGE_RESERVE_PCT : value;
  	if (typeof reservePct !== "number" || !Number.isFinite(reservePct)) {
-@@ -234,6 +243,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+@@ -257,6 +266,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
  			token: readDottedString(record, "auth.broker.token"),
  			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
  			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
@@ -71,7 +71,7 @@ index 20969f4754..2f289e10f1 100644
  		};
  	}
  	return {};
-@@ -242,12 +252,14 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+@@ -265,12 +275,14 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
  export interface AuthAccountPolicyConfig {
  	accountPolicies: AuthAccountPolicies;
  	defaultReservePct: number;
@@ -86,7 +86,7 @@ index 20969f4754..2f289e10f1 100644
  }
  
  /** Load and strictly validate account-selection policy configuration, with main-config fallback. */
-@@ -255,7 +267,10 @@ export async function loadAuthAccountPolicyConfig(
+@@ -278,7 +290,10 @@ export async function loadAuthAccountPolicyConfig(
  	options: LoadAuthAccountPolicyConfigOptions = {},
  ): Promise<AuthAccountPolicyConfig> {
  	const agentDir = options.agentDir ?? getAgentDir();
@@ -98,7 +98,7 @@ index 20969f4754..2f289e10f1 100644
  	const snapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
  	return {
  		accountPolicies: parseAuthAccountPolicies(
-@@ -264,6 +279,7 @@ export async function loadAuthAccountPolicyConfig(
+@@ -287,6 +302,7 @@ export async function loadAuthAccountPolicyConfig(
  		defaultReservePct: parseUsageReservePct(
  			options.usageReservePct === undefined ? snapshot?.usageReservePct : options.usageReservePct,
  		),
@@ -106,7 +106,7 @@ index 20969f4754..2f289e10f1 100644
  	};
  }
  
-@@ -518,10 +534,11 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+@@ -614,10 +630,11 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
  		agentDir,
  		configValueResolver: options.configValueResolver,
  	});
@@ -119,7 +119,7 @@ index 20969f4754..2f289e10f1 100644
  	});
  	const { store, sourceLabel } = await openAuthCredentialStore({
  		brokerConfig,
-@@ -536,6 +553,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+@@ -634,6 +651,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
  		sourceLabel,
  		accountPolicies,
  		defaultReservePct,
@@ -128,19 +128,11 @@ index 20969f4754..2f289e10f1 100644
  	await storage.credentials.reload();
  	return storage;
 diff --git a/packages/ai/src/auth-storage.ts b/packages/ai/src/auth-storage.ts
-index b718d5eb2d..0cba68ffb4 100644
+index 50aed16dc6..c4d5b704f2 100644
 --- a/packages/ai/src/auth-storage.ts
 +++ b/packages/ai/src/auth-storage.ts
-@@ -33,6 +33,7 @@ import { CredentialSelector } from "./auth/select";
- import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
- import type { AuthCredentialStore } from "./auth/store";
- import type {
-+	AuthAccountMode,
- 	AuthAccountPolicies,
- 	AuthApiKeyOptions,
- 	AuthCredential,
-@@ -95,7 +96,11 @@ export class AuthStorage {
- 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
+@@ -251,7 +251,11 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
+ 	constructor(store: AuthCredentialStore, options: AuthStorageOptions) {
  		this.#options = options;
  		this.#overrides = new KeyOverrides(options.configValueResolver);
 -		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
@@ -152,16 +144,7 @@ index b718d5eb2d..0cba68ffb4 100644
  		this.#modules = this.#compose(store, options.sourceLabel);
  		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
  	}
-@@ -144,11 +149,15 @@ export class AuthStorage {
- 	 * several stored OAuth accounts, or two policies claim the same account; a
- 	 * policy naming an absent account stays inactive and logs a warning.
- 	 */
--	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
-+	setAccountPolicies(config: {
-+		accountPolicies: AuthAccountPolicies;
-+		defaultReservePct: number;
-+		accountMode?: AuthAccountMode;
-+	}): void {
+@@ -288,7 +292,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
  		const pool = this.#modules.pool;
  		const stored = new Map<string, AuthCredential[]>();
  		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
@@ -169,7 +152,7 @@ index b718d5eb2d..0cba68ffb4 100644
 +		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored, config.accountMode);
  	}
  
- 	/**
+ 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
 diff --git a/packages/ai/src/auth/policy.ts b/packages/ai/src/auth/policy.ts
 index bf01e6e5b2..70a45a0886 100644
 --- a/packages/ai/src/auth/policy.ts
@@ -257,10 +240,10 @@ index 89b80c11aa..c552f14692 100644
  	// Short-window guard: candidates whose primary (e.g. 5h) window is
  	// nearly exhausted rank behind cool ones regardless of drain urgency —
 diff --git a/packages/ai/src/auth/select.ts b/packages/ai/src/auth/select.ts
-index 4bab440623..44802fb9d2 100644
+index cc913d1c5c..5c37a60513 100644
 --- a/packages/ai/src/auth/select.ts
 +++ b/packages/ai/src/auth/select.ts
-@@ -72,6 +72,11 @@ export type TryOAuthOptions = {
+@@ -80,6 +80,11 @@ export type TryOAuthOptions = {
  	onTransientRefreshFailure?: (error: unknown) => void;
  };
  
@@ -272,7 +255,7 @@ index 4bab440623..44802fb9d2 100644
  /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
  export interface CredentialSelectorDeps {
  	store: AuthCredentialStore;
-@@ -103,6 +108,27 @@ export class CredentialSelector {
+@@ -111,6 +116,27 @@ export class CredentialSelector {
  		}
  	}
  
@@ -300,7 +283,7 @@ index 4bab440623..44802fb9d2 100644
  	/**
  	 * Returns next index in round-robin sequence for load distribution.
  	 * Increments stored counter and wraps at total.
-@@ -439,6 +465,9 @@ export class CredentialSelector {
+@@ -448,6 +474,9 @@ export class CredentialSelector {
  		strategy?: CredentialRankingStrategy;
  		defaultReservePct?: number;
  		rankingContext: CredentialRankingContext;
@@ -310,7 +293,7 @@ index 4bab440623..44802fb9d2 100644
  		blockScope?: string;
  		/** Scopes a block may live under for this request; reads honour all of them. */
  		blockScopes?: readonly string[];
-@@ -551,6 +580,11 @@ export class CredentialSelector {
+@@ -560,6 +589,11 @@ export class CredentialSelector {
  				primaryRequiredDrain:
  					strategy === undefined ? 0 : windowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
  				orderPos,
@@ -322,7 +305,7 @@ index 4bab440623..44802fb9d2 100644
  			});
  		}
  		return orderUsageRankedCandidates(ranked, args.planGate !== undefined);
-@@ -601,6 +635,13 @@ export class CredentialSelector {
+@@ -610,6 +644,13 @@ export class CredentialSelector {
  		const providerKey = providerTypeKey(provider, "oauth");
  		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
  		const strategy = this.#deps.strategies(provider);
@@ -336,7 +319,7 @@ index 4bab440623..44802fb9d2 100644
  		const rankingContext: CredentialRankingContext = {
  			modelId: options?.modelId,
  		};
-@@ -642,15 +683,18 @@ export class CredentialSelector {
+@@ -651,15 +692,18 @@ export class CredentialSelector {
  		// rank. Legacy pins predating `lastUsedAtMs` count as warm until the next resolve rewrites the row.
  		const sessionPreferredLastUsedAtMs =
  			sessionCredential?.type === "oauth" ? sessionCredential.lastUsedAtMs : undefined;
@@ -359,7 +342,7 @@ index 4bab440623..44802fb9d2 100644
  		const rankDespitePin =
  			!sessionPreferredIsAvailable ||
  			!sessionPreferredIsWarm ||
-@@ -686,9 +730,9 @@ export class CredentialSelector {
+@@ -695,9 +739,9 @@ export class CredentialSelector {
  					return rightPriority - leftPriority || leftIndex - rightIndex;
  				})
  			: order;
@@ -371,7 +354,7 @@ index 4bab440623..44802fb9d2 100644
  				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
  				: -1;
  		if (sessionPreferredRankingPos > 0) {
-@@ -706,7 +750,10 @@ export class CredentialSelector {
+@@ -715,7 +759,10 @@ export class CredentialSelector {
  					credentials,
  					options,
  					strategy,
@@ -383,7 +366,7 @@ index 4bab440623..44802fb9d2 100644
  					rankingContext,
  					blockScope,
  					blockScopes,
-@@ -998,7 +1045,20 @@ export class CredentialSelector {
+@@ -1004,7 +1051,20 @@ export class CredentialSelector {
  					blockScopes,
  					onTransientRefreshFailure: recordTransientRefreshFailure,
  				});
@@ -406,10 +389,10 @@ index 4bab440623..44802fb9d2 100644
  		}
  
 diff --git a/packages/ai/src/auth/types.ts b/packages/ai/src/auth/types.ts
-index b2ac2f54b8..4c17508e64 100644
+index 4c29791647..c6b29b3679 100644
 --- a/packages/ai/src/auth/types.ts
 +++ b/packages/ai/src/auth/types.ts
-@@ -24,6 +24,17 @@ import type {
+@@ -25,6 +25,17 @@ import type {
  /** Default remaining quota protected for accounts without an explicit policy override. */
  export const DEFAULT_USAGE_RESERVE_PCT = 10;
  
@@ -427,7 +410,7 @@ index b2ac2f54b8..4c17508e64 100644
  /** Stored API key used by credential selection. */
  export type ApiKeyCredential = {
  	type: "api_key";
-@@ -339,6 +350,8 @@ export type AuthStorageOptions = {
+@@ -348,6 +359,8 @@ export type AuthStorageOptions = {
  	accountPolicies?: AuthAccountPolicies;
  	/** Global reserve fallback for accounts without a matching reservePct policy. */
  	defaultReservePct?: number;
@@ -437,10 +420,10 @@ index b2ac2f54b8..4c17508e64 100644
  	usageRequestTimeoutMs?: number;
  	usageLogger?: UsageLogger;
 diff --git a/packages/ai/src/usage.ts b/packages/ai/src/usage.ts
-index 4fc15f12f0..32cc783e63 100644
+index 2d1633b541..3a1ae56488 100644
 --- a/packages/ai/src/usage.ts
 +++ b/packages/ai/src/usage.ts
-@@ -456,6 +456,15 @@ export interface CredentialRankingStrategy {
+@@ -473,6 +473,15 @@ export interface CredentialRankingStrategy {
  	planGate?(context: CredentialRankingContext): PlanGate | undefined;
  	/** Idle window after which a session pin stops suppressing usage re-ranking because the provider's prompt cache cannot still be warm; omit for indefinite stickiness. */
  	stickyWarmMs?: number;
@@ -457,10 +440,10 @@ index 4fc15f12f0..32cc783e63 100644
  	findWindowLimits(
  		report: UsageReport,
 diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
-index c983e2e2c9..6f949b106e 100644
+index bb1acd7180..d7eaf9e8fb 100644
 --- a/packages/ai/src/usage/claude.ts
 +++ b/packages/ai/src/usage/claude.ts
-@@ -916,6 +916,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+@@ -1044,6 +1044,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
  	 * own cache lifetimes are verified.
  	 */
  	stickyWarmMs: 60 * 60_000,
@@ -782,7 +765,7 @@ index 0000000000..4a7bd8a2f9
 +	});
 +});
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index d113000863..cac89f9828 100644
+index 5f0805dfed..a53aed68e2 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -4,6 +4,7 @@
@@ -794,19 +777,19 @@ index d113000863..cac89f9828 100644
  - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
  - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
 diff --git a/packages/coding-agent/src/cli/auth-gateway-cli.ts b/packages/coding-agent/src/cli/auth-gateway-cli.ts
-index 124d4d65d1..1ecef7974e 100644
+index d129a8cc36..2783c0b593 100644
 --- a/packages/coding-agent/src/cli/auth-gateway-cli.ts
 +++ b/packages/coding-agent/src/cli/auth-gateway-cli.ts
-@@ -399,7 +399,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
- 	// in sdk.ts. The gateway never touches local SQLite.
+@@ -382,7 +382,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  	const accountPool = await loadAuthBrokerAccountPool();
  	const settings = await resolveEffectiveSettings();
+ 	applyUnpausedProviders(settings);
 -	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 +	const { accountPolicies, defaultReservePct, accountMode } = await loadEffectiveAuthAccountPolicyConfig({ settings });
  	const client = createBrokerClient(brokerConfig);
  	const initialSnapshot = await fetchBrokerSnapshot(client);
  	const store = new RemoteAuthCredentialStore({
-@@ -415,6 +415,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -398,6 +398,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  		sourceLabel: `broker ${brokerConfig.url}`,
  		accountPolicies,
  		defaultReservePct,
@@ -814,16 +797,16 @@ index 124d4d65d1..1ecef7974e 100644
  	});
  	await storage.credentials.reload();
  
-@@ -875,7 +876,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
- 
+@@ -861,7 +862,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  	const accountPool = await loadAuthBrokerAccountPool();
  	const settings = await resolveEffectiveSettings();
+ 	applyUnpausedProviders(settings);
 -	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 +	const { accountPolicies, defaultReservePct, accountMode } = await loadEffectiveAuthAccountPolicyConfig({ settings });
  	const client = createBrokerClient(brokerConfig);
  	const initialSnapshot = await fetchBrokerSnapshot(client);
  	const store = new RemoteAuthCredentialStore({
-@@ -887,6 +888,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -873,6 +874,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  		sourceLabel: `broker ${brokerConfig.url}`,
  		accountPolicies,
  		defaultReservePct,
@@ -832,10 +815,10 @@ index 124d4d65d1..1ecef7974e 100644
  	try {
  		await storage.credentials.reload();
 diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
-index b379d77e16..c4ed1785dd 100644
+index 8fac817795..029f4db73f 100644
 --- a/packages/coding-agent/src/sdk.ts
 +++ b/packages/coding-agent/src/sdk.ts
-@@ -1064,7 +1064,7 @@ export {
+@@ -1185,7 +1185,7 @@ export {
   * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
   * override to re-mint access tokens when needed.
   *
@@ -844,7 +827,7 @@ index b379d77e16..c4ed1785dd 100644
   * effective settings: `options.settings` when given, else the matching global
   * instance, else a read-only load for `options.cwd`; explicit option values win.
   *
-@@ -1084,6 +1084,7 @@ export async function discoverAuthStorage(
+@@ -1207,6 +1207,7 @@ export async function discoverAuthStorage(
  		authStorageOptions: {
  			...discoveryOptions.authStorageOptions,
  			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
@@ -853,19 +836,19 @@ index b379d77e16..c4ed1785dd 100644
  	});
  }
 diff --git a/packages/coding-agent/src/session/auth-broker-config.ts b/packages/coding-agent/src/session/auth-broker-config.ts
-index e212c2a076..9ec1824319 100644
+index a5d8961dcb..1f5bb63389 100644
 --- a/packages/coding-agent/src/session/auth-broker-config.ts
 +++ b/packages/coding-agent/src/session/auth-broker-config.ts
-@@ -41,7 +41,7 @@ import { Settings } from "../config/settings";
- import type { AuthStorage } from "./auth-storage";
- 
- import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
+@@ -49,7 +49,7 @@ import {
+ 	cfgAuthBrokerUrl,
+ 	cfgOperatorUnpausedProviders,
+ } from "../config/model-settings";
 -import { cfgRetryUsageReservePct } from "./settings";
 +import { cfgRetryAccountMode, cfgRetryUsageReservePct } from "./settings";
  
  export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
  
-@@ -75,7 +75,7 @@ export async function resolveEffectiveSettings({
+@@ -83,7 +83,7 @@ export async function resolveEffectiveSettings({
  	return Settings.loadReadOnly({ cwd, agentDir });
  }
  
@@ -874,7 +857,7 @@ index e212c2a076..9ec1824319 100644
  export async function loadEffectiveAuthAccountPolicyConfig(
  	scope: EffectiveSettingsScope = {},
  ): Promise<AuthAccountPolicyConfig> {
-@@ -83,6 +83,7 @@ export async function loadEffectiveAuthAccountPolicyConfig(
+@@ -91,6 +91,7 @@ export async function loadEffectiveAuthAccountPolicyConfig(
  	return loadAuthAccountPolicyConfig({
  		accountPolicies: cfgAuthAccountPolicies.get(settings),
  		usageReservePct: cfgRetryUsageReservePct.get(settings),
@@ -882,45 +865,45 @@ index e212c2a076..9ec1824319 100644
  	});
  }
  
-@@ -130,6 +131,7 @@ const cfgAuthStorageSettings = combine({
+@@ -138,6 +139,7 @@ const cfgAuthStorageSettings = combine({
  	brokerToken: cfgAuthBrokerToken,
  	accountPolicies: cfgAuthAccountPolicies,
  	usageReservePct: cfgRetryUsageReservePct,
 +	accountMode: cfgRetryAccountMode,
+ 	unpausedProviders: cfgOperatorUnpausedProviders,
  });
  
- /** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
-@@ -142,7 +144,7 @@ export interface AuthStorageSettingsSync {
+@@ -164,7 +166,7 @@ export interface AuthStorageSettingsSync {
  
  /**
   * Keeps a long-lived `authStorage` in step with the auth settings of `scope`:
 - * - `auth.accountPolicies` / `retry.usageReservePct` re-apply account routing policy.
 + * - `auth.accountPolicies` / `retry.usageReservePct` / `retry.accountMode` re-apply account routing policy.
-  * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
-  *   broker with startup precedence (env → config.yml → token file; project layers
-  *   never redirect credentials), and swap the credential store in place when the
-@@ -194,6 +196,7 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
+  * - `auth.unpausedProviders` (operator layers only) re-applies which paused providers are back
+  *   on — loaded credential pools refilter on their next read — and refreshes `modelRegistry`'s
+  *   catalog for each newly unpaused provider, as a login does.
+@@ -233,6 +235,7 @@ export function createAuthStorageSettingsSync(
  		const brokerChanged = next.brokerUrl !== previous.brokerUrl || next.brokerToken !== previous.brokerToken;
  		const policiesChanged =
  			next.usageReservePct !== previous.usageReservePct ||
 +			next.accountMode !== previous.accountMode ||
  			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
- 		pending = pending.then(async () => {
- 			if (brokerChanged) await applyBroker();
+ 		const unpausedChanged = !Bun.deepEquals(next.unpausedProviders, previous.unpausedProviders);
+ 		const unpausedAdded = next.unpausedProviders.filter(provider => !previous.unpausedProviders.includes(provider));
 diff --git a/packages/coding-agent/src/session/settings.ts b/packages/coding-agent/src/session/settings.ts
-index aa60885161..34c2876419 100644
+index 50797b86c6..185c9c9ea6 100644
 --- a/packages/coding-agent/src/session/settings.ts
 +++ b/packages/coding-agent/src/session/settings.ts
-@@ -20,7 +20,7 @@ import {
- 	TINY_MODEL_DTYPE_SETTING_VALUES,
+@@ -23,7 +23,7 @@ import {
  } from "../tiny/dtype";
  import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
+ import { compileModelPatterns } from "../utils/model-patterns";
 -import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 +import { DEFAULT_AUTH_ACCOUNT_MODE, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
  import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
  import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
  import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
-@@ -857,6 +857,32 @@ export const cfgRetryUsageReservePct = register({
+@@ -921,6 +921,32 @@ export const cfgRetryUsageReservePct = register({
  	},
  });
  

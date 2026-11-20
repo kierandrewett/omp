@@ -1,8 +1,8 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index a0c3b36dc2..00f739cdc8 100644
+index e39cf79a4e..e4d889dd6e 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -914,6 +914,10 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
+@@ -975,6 +975,10 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
  
  The `pi` segment tags the brand with the active named profile (`π-work`; see [Profiles](config-usage.md#profiles)). Set `statusLine.segmentOptions.pi.showProfile: false` to hide the tag.
  
@@ -12,9 +12,9 @@ index a0c3b36dc2..00f739cdc8 100644
 +
  The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
  
- ### Interaction
+ The `cache` segment (in the `full` and `nerd` presets) shows before you send whether the next message reads the prompt cache: a dim database glyph while it does, struck through in the warning colour once the entry expired, omp's warm refresh missed it, the context was compacted, or the model, thinking level, tools, system prompt or cache retention changed. The Unicode symbol preset draws `●`/`⊘`, ASCII `cache`/`!cache`. It is hidden when nothing has used the cache yet, the model declares no cache lifetime, or the session is a subagent's; entries a provider keeps indefinitely (logged-in Codex) never expire. A reopened session is read off its newest cached reply and shown as likely cached. In Tern, hovering the marker says until when the entry holds (or why not) and how much the next message sends; clicking it opens `/session`, whose Prompt Cache section adds the tier and the warming schedule.
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index cac89f9828..03fc58229f 100644
+index a53aed68e2..f9442f5d3b 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -5,6 +5,8 @@
@@ -27,10 +27,10 @@ index cac89f9828..03fc58229f 100644
  - Name an operator-configured model role such as `@worker` in a task item's `model`, in a mixed-model batch if you like; it resolves to that role's current model and goes through the same `task.perCallModel` gate and approval as an exact `provider/model-id`.
  - Task subagents called without `model` now get a configured model role chosen by the native judge, falling back to `@sonnet` when it is unsure or unavailable. Task results show the requested and resolved model and a `modelRoute` note such as `Automatic model selection: @sonnet.`
 diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-index 6a54f8d16c..a0332a2037 100644
+index 24eb6b530c..08580efef8 100644
 --- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
 +++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-@@ -107,6 +107,10 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+@@ -108,6 +108,10 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
  				{ label: "advisor error", session: { advisorStatus: "error" } },
  				{ label: "advisor paused", session: { advisorStatus: "paused" } },
  				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },
@@ -41,7 +41,7 @@ index 6a54f8d16c..a0332a2037 100644
  			];
  		case "mode":
  			return [
-@@ -242,6 +246,19 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+@@ -243,6 +247,19 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
  					context: { usage: { tier: "Pro", fiveHour: { percent: 92, resetMinutes: 75 } } },
  				},
  			];
@@ -101,7 +101,7 @@ index 0000000000..b435a85194
 +	return { label: `${formatProviderName(provider)} (${letter})`, rawProvider: `${provider}-${letter.toLowerCase()}` };
 +}
 diff --git a/packages/coding-agent/src/modes/status-line-host.ts b/packages/coding-agent/src/modes/status-line-host.ts
-index 2ab041f34d..ffa8a9c934 100644
+index 8b29c13e5f..48d0684461 100644
 --- a/packages/coding-agent/src/modes/status-line-host.ts
 +++ b/packages/coding-agent/src/modes/status-line-host.ts
 @@ -7,6 +7,7 @@ import { limitMatchesActiveAccount } from "../slash-commands/helpers/active-oaut
@@ -112,10 +112,10 @@ index 2ab041f34d..ffa8a9c934 100644
  
  import {
  	cfgGitEnabled,
-@@ -55,6 +56,12 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
- 	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
- 	activeAccount: (session, provider) =>
- 		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
+@@ -67,6 +68,12 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
+ 		const sticky = authStorage?.sessions?.sticky?.(provider, session.sessionId);
+ 		return sticky?.credentialId !== undefined ? { credentialId: sticky.credentialId } : undefined;
+ 	},
 +	modelAccount: (session, provider) =>
 +		resolveModelAccount(
 +			provider,
@@ -127,7 +127,7 @@ index 2ab041f34d..ffa8a9c934 100644
  	resolveActiveRepo: resolveActiveRepoContextSync,
 diff --git a/packages/coding-agent/test/model-account-label.test.ts b/packages/coding-agent/test/model-account-label.test.ts
 new file mode 100644
-index 0000000000..c1ae0fed21
+index 0000000000..5fe499ec5b
 --- /dev/null
 +++ b/packages/coding-agent/test/model-account-label.test.ts
 @@ -0,0 +1,208 @@
@@ -203,7 +203,7 @@ index 0000000000..c1ae0fed21
 +		isFastModeActive: () => false,
 +		getContextUsage: () => undefined,
 +		getAsyncJobSnapshot: () => ({ running: [] }),
-+		modelRegistry: { authStorage, isUsingOAuth: () => true },
++		modelRegistry: { authStorage, isUsingOAuth: () => true, isUsingSubscription: () => false },
 +		sessionManager: {
 +			getSessionName: () => undefined,
 +			getSessionId: () => SESSION_ID,
@@ -340,7 +340,7 @@ index 0000000000..c1ae0fed21
 +	});
 +});
 diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
-index a0a14c0e0c..81a72430b9 100644
+index 71c291c578..8a1e9e4826 100644
 --- a/packages/tui/CHANGELOG.md
 +++ b/packages/tui/CHANGELOG.md
 @@ -2,6 +2,10 @@
@@ -351,22 +351,22 @@ index a0a14c0e0c..81a72430b9 100644
 +
 +- Added the `usage_bar` status-line segment id and `StatusLineHost.modelAccount` / `FooterHost.modelAccount`, which let a host qualify the model with the session's account (`Anthropic (B) > Sonnet 5.5`, raw `anthropic-b/claude-sonnet-5-5`).
 +
- ## [18.14.2] - 2026-10-31
+ ## [19.0.0] - 2026-11-18
  
- ### Added
+ ### Breaking Changes
 diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
-index e56d2dba15..e1208f4e13 100644
+index 76d75a1ae8..842d7217d7 100644
 --- a/packages/tui/src/status-line/component.ts
 +++ b/packages/tui/src/status-line/component.ts
-@@ -24,6 +24,7 @@ import type {
- 	StatusAccountIdentity as OAuthAccountIdentity,
+@@ -28,6 +28,7 @@ import type {
  	StatusLineHost,
+ 	PromptCacheStatus,
  	StatusLineSession,
 +	StatusModelAccount,
  } from "./host";
  import type { Editor } from "../components/editor";
  import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
-@@ -429,6 +430,8 @@ class StatusLineExternalInputs {
+@@ -464,6 +465,8 @@ class StatusLineExternalInputs {
  	modelId: string | undefined = undefined;
  	modelName: string | undefined = undefined;
  	modelProvider: string | undefined = undefined;
@@ -375,7 +375,7 @@ index e56d2dba15..e1208f4e13 100644
  	modelContextWindow: Model["contextWindow"] | undefined = undefined;
  	modelThinking: Model["thinking"] = undefined;
  	thinkingLevel: unknown = undefined;
-@@ -2022,6 +2025,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2151,6 +2154,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  		].join("\0");
  	}
  
@@ -387,7 +387,7 @@ index e56d2dba15..e1208f4e13 100644
  	#getUsageContextKey(session: TSession): string {
  		const activeProvider = session.state.model?.provider ?? session.model?.provider;
  		const identity = activeProvider ? this.host.activeAccount(session, activeProvider) : undefined;
-@@ -2600,6 +2608,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2735,6 +2743,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			width,
  			options: segmentOptions ?? {},
  			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
@@ -395,7 +395,7 @@ index e56d2dba15..e1208f4e13 100644
  			hookStatuses: this.#sortedHookStatuses,
  			planMode: this.#planModeStatus,
  			loopMode: this.#loopModeStatus,
-@@ -2773,6 +2782,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2910,6 +2919,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  		target.modelId = model?.id;
  		target.modelName = model?.name;
  		target.modelProvider = model?.provider;
@@ -403,7 +403,7 @@ index e56d2dba15..e1208f4e13 100644
  		target.modelContextWindow = model?.contextWindow;
  		target.modelThinking = model?.thinking;
  		target.thinkingLevel = state.thinkingLevel;
-@@ -2838,6 +2848,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2975,6 +2985,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			left.modelId === right.modelId &&
  			left.modelName === right.modelName &&
  			left.modelProvider === right.modelProvider &&
@@ -412,7 +412,7 @@ index e56d2dba15..e1208f4e13 100644
  			left.modelThinking === right.modelThinking &&
  			left.thinkingLevel === right.thinkingLevel &&
 diff --git a/packages/tui/src/status-line/footer.ts b/packages/tui/src/status-line/footer.ts
-index 80854dd48a..646bac88d7 100644
+index 3b589dc055..bfa1ba80aa 100644
 --- a/packages/tui/src/status-line/footer.ts
 +++ b/packages/tui/src/status-line/footer.ts
 @@ -5,6 +5,7 @@ import { type Component, padding, truncateToWidth, visibleWidth } from "../index
@@ -457,11 +457,11 @@ index 80854dd48a..646bac88d7 100644
  		// Add thinking level hint when the current model advertises supported efforts
  		let rightSide = modelName;
 diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
-index fbdb0b5bf2..fea060b373 100644
+index 06231cd75b..15c334aed1 100644
 --- a/packages/tui/src/status-line/host.ts
 +++ b/packages/tui/src/status-line/host.ts
-@@ -12,6 +12,19 @@ export interface StatusAccountIdentity {
- 	orgId?: string;
+@@ -19,6 +19,19 @@ export interface StatusAccountIdentity {
+ 	credentialId?: number;
  }
  
 +/**
@@ -480,7 +480,7 @@ index fbdb0b5bf2..fea060b373 100644
  /** Nested repository selected as the active workspace context. */
  export interface ActiveRepoContext {
  	cwd: string;
-@@ -108,9 +121,16 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
+@@ -166,9 +179,16 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
  	 * reset is warned about once, not once per refresh or conversation.
  	 */
  	resetExpiryNotice?(session: TSession, reports: readonly UsageReport[], nowMs: number): string | undefined;
@@ -521,7 +521,7 @@ index 0000000000..559b1191a2
 +	return account ? `${account.rawProvider}/${id}` : id;
 +}
 diff --git a/packages/tui/src/status-line/presets.ts b/packages/tui/src/status-line/presets.ts
-index 81ee4e36de..17800b1ae7 100644
+index 964e7c3322..753bcf890a 100644
 --- a/packages/tui/src/status-line/presets.ts
 +++ b/packages/tui/src/status-line/presets.ts
 @@ -3,7 +3,20 @@ import type { PresetDef, StatusLinePreset } from "./types";
@@ -547,11 +547,11 @@ index 81ee4e36de..17800b1ae7 100644
  		separator: "powerline-thin",
  		segmentOptions: {
 diff --git a/packages/tui/src/status-line/schema.ts b/packages/tui/src/status-line/schema.ts
-index 4e810cf551..3f437eac5b 100644
+index 2e0a6438c8..79043ea83a 100644
 --- a/packages/tui/src/status-line/schema.ts
 +++ b/packages/tui/src/status-line/schema.ts
-@@ -24,6 +24,7 @@ export const STATUS_LINE_SEGMENT_IDS = [
- 	"cache_hit",
+@@ -25,6 +25,7 @@ export const STATUS_LINE_SEGMENT_IDS = [
+ 	"cache",
  	"session_name",
  	"usage",
 +	"usage_bar",
@@ -559,10 +559,10 @@ index 4e810cf551..3f437eac5b 100644
  	"stream",
  	"vim",
 diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
-index 06b42e18fc..1c4834be30 100644
+index d37b73b164..8f83bcdaf1 100644
 --- a/packages/tui/src/status-line/segments.ts
 +++ b/packages/tui/src/status-line/segments.ts
-@@ -29,6 +29,8 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+@@ -30,6 +30,8 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
  import { node, span } from "../native/describe";
  import { thinkingLevelToken } from "../theme/theme-class";
  import type { StatusLineSession } from "./host";
@@ -571,7 +571,7 @@ index 06b42e18fc..1c4834be30 100644
  import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
  
  export type { SegmentContext } from "./types";
-@@ -283,11 +285,11 @@ const statusSegment: StatusLineSegment = {
+@@ -286,11 +288,11 @@ const statusSegment: StatusLineSegment = {
  	},
  };
  
@@ -585,7 +585,7 @@ index 06b42e18fc..1c4834be30 100644
  }
  
  /**
-@@ -1294,6 +1296,80 @@ const usageSegment: StatusLineSegment = {
+@@ -1326,6 +1328,80 @@ const usageSegment: StatusLineSegment = {
  	},
  };
  
@@ -666,8 +666,8 @@ index 06b42e18fc..1c4834be30 100644
  // ═══════════════════════════════════════════════════════════════════════════
  // Segment Registry
  // ═══════════════════════════════════════════════════════════════════════════
-@@ -1323,6 +1399,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
- 	cache_hit: cacheHitSegment,
+@@ -1356,6 +1432,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
+ 	cache: cacheSegment,
  	session_name: sessionNameSegment,
  	usage: usageSegment,
 +	usage_bar: usageBarSegment,
@@ -675,19 +675,19 @@ index 06b42e18fc..1c4834be30 100644
  	stream: streamSegment,
  	vim: vimSegment,
 diff --git a/packages/tui/src/status-line/types.ts b/packages/tui/src/status-line/types.ts
-index 47917bfb72..2455e42702 100644
+index f844fb6544..bd45b2d940 100644
 --- a/packages/tui/src/status-line/types.ts
 +++ b/packages/tui/src/status-line/types.ts
 @@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
  import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
  import type { NativeNode, NativeUiEvent } from "../native/node";
  import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
--import type { ActiveRepoContext, StatusLineSession } from "./host";
-+import type { ActiveRepoContext, StatusLineSession, StatusModelAccount } from "./host";
+-import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession } from "./host";
++import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession, StatusModelAccount } from "./host";
  import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
  
  export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
-@@ -91,6 +91,11 @@ export interface SegmentContext {
+@@ -93,6 +93,11 @@ export interface SegmentContext {
  	options: StatusLineSegmentOptions;
  	/** Render the model segment's thinking level as a compact leading glyph. */
  	compactThinkingLevel: boolean;

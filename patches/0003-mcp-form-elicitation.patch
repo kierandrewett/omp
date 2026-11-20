@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 2a8542e327..b40509c0de 100644
+index 13137b9732..bc7b3f7ab6 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -6,6 +6,7 @@
@@ -477,20 +477,20 @@ index 0000000000..d9e9e31dde
 +	}
 +}
 diff --git a/packages/coding-agent/src/mcp/manager.ts b/packages/coding-agent/src/mcp/manager.ts
-index f93cb7183c..77ec6353ba 100644
+index ae1db767ec..31db102477 100644
 --- a/packages/coding-agent/src/mcp/manager.ts
 +++ b/packages/coding-agent/src/mcp/manager.ts
 @@ -11,6 +11,7 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
  import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
- import { resolveConfigValue } from "../config/resolve-config-value";
+ import { invalidateCommandConfig, isCommandConfigValue, resolveConfigValue } from "../config/resolve-config-value";
  import type { CustomTool } from "../extensibility/custom-tools/types";
 +import { ElicitationBroker, type ElicitationDialogs } from "./elicitation";
  import type { AuthStorage } from "../session/auth-storage";
  import {
  	MCPConnectionTimeoutError,
-@@ -351,6 +352,11 @@ export class MCPManager {
- 	 */
- 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
+@@ -485,6 +486,11 @@ export class MCPManager implements MCPManagerApi {
+ 	/** Bumped whenever any session's view of the tools may have changed; starts above a worker's empty cache (0). */
+ 	#toolViewsRevision = 1;
  
 +	/** Whether new connections declare form elicitation. Set only for sessions that can show a dialog. */
 +	#elicitationEnabled = false;
@@ -500,7 +500,7 @@ index f93cb7183c..77ec6353ba 100644
  	constructor(
  		private cwd: string,
  		private toolCache: MCPToolCache | null = null,
-@@ -596,6 +602,22 @@ export class MCPManager {
+@@ -751,6 +757,22 @@ export class MCPManager implements MCPManagerApi {
  			});
  	}
  
@@ -523,7 +523,7 @@ index f93cb7183c..77ec6353ba 100644
  	setNotificationsEnabled(enabled: boolean): void {
  		const wasEnabled = this.#notificationsEnabled;
  		this.#notificationsEnabled = enabled;
-@@ -855,8 +877,9 @@ export class MCPManager {
+@@ -1027,8 +1049,9 @@ export class MCPManager implements MCPManagerApi {
  						this.#handleServerNotification(name, method, params);
  					},
  					onRequest: (method, params) => {
@@ -534,7 +534,7 @@ index f93cb7183c..77ec6353ba 100644
  				});
  			})().then(
  				async connection => {
-@@ -1150,12 +1173,15 @@ export class MCPManager {
+@@ -1394,12 +1417,15 @@ export class MCPManager implements MCPManagerApi {
  	}
  
  	/** Handle server-to-client JSON-RPC requests (e.g. ping, roots/list). */
@@ -551,7 +551,7 @@ index f93cb7183c..77ec6353ba 100644
  			default:
  				throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
  		}
-@@ -1703,8 +1729,9 @@ export class MCPManager {
+@@ -1985,8 +2011,9 @@ export class MCPManager implements MCPManagerApi {
  				this.#handleServerNotification(name, method, params);
  			},
  			onRequest: (method, params) => {
@@ -563,10 +563,10 @@ index f93cb7183c..77ec6353ba 100644
  
  		connection.config = config;
 diff --git a/packages/coding-agent/src/mcp/types.ts b/packages/coding-agent/src/mcp/types.ts
-index 1c03ae05d2..dc5d826832 100644
+index 8252c3a9f3..a5e0a3b419 100644
 --- a/packages/coding-agent/src/mcp/types.ts
 +++ b/packages/coding-agent/src/mcp/types.ts
-@@ -202,9 +202,51 @@ export interface MCPImplementation {
+@@ -203,9 +203,51 @@ export interface MCPImplementation {
  export interface MCPClientCapabilities {
  	roots?: { listChanged?: boolean };
  	sampling?: Record<string, never>;
@@ -619,24 +619,25 @@ index 1c03ae05d2..dc5d826832 100644
  export interface MCPServerCapabilities {
  	tools?: { listChanged?: boolean };
 diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
-index 8a0bf56cda..b379d77e16 100644
+index 9b3f393f0f..8fac817795 100644
 --- a/packages/coding-agent/src/sdk.ts
 +++ b/packages/coding-agent/src/sdk.ts
-@@ -2700,6 +2700,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
- 				const cacheStorage = settings.getStorage();
- 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
- 				mcpManager.setAuthStorage(authStorage);
+@@ -3030,6 +3030,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				ownedMcpManager = deferredMCPManager;
+ 				mcpManager = deferredMCPManager;
+ 				deferredMCPManager.setAuthStorage(authStorage);
 +				// This branch only runs for sessions with a screen (`hasUI`), so servers may ask the user questions.
-+				mcpManager.setElicitationEnabled(true);
- 				toolSession.mcpManager = mcpManager;
++				deferredMCPManager.setElicitationEnabled(true);
+ 				toolSession.mcpManager = deferredMCPManager;
  
  				if (cfgMcpNotifications.get(settings)) {
-@@ -4542,6 +4544,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -4982,6 +4984,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  
  		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
  			toolContextStore.setUIContext(uiContext, hasUI);
-+			// A subagent borrows its parent's manager and must not replace the parent's dialogs.
-+			if (mcpManager && !options.mcpManager) mcpManager.setElicitationUI(hasUI ? uiContext : undefined);
++			// A subagent borrows its parent's manager and must not replace the parent's dialogs: only a manager
++			// this session created answers through this session's UI.
++			ownedMcpManager?.setElicitationUI(hasUI ? uiContext : undefined);
  		};
  
  		const initialTools = initialToolNames

@@ -1,18 +1,18 @@
 diff --git a/docs/environment-variables.md b/docs/environment-variables.md
-index c148cbc073..e4e4f82570 100644
+index 629bde5f54..544e117c8e 100644
 --- a/docs/environment-variables.md
 +++ b/docs/environment-variables.md
-@@ -579,7 +579,7 @@ These affect where coding-agent stores data and which process-local settings ove
+@@ -620,7 +620,7 @@ These affect where coding-agent stores data and which process-local settings ove
  | `PWD`                                               | Used when matching canonical current working directory in path helpers                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
  | `OMP_WORKTREE_DIR`                                  | Agent-managed worktrees directory override (default `~/.omp/wt`); must be absolute or `~`-relative, relative paths are ignored; wins over the `worktree.base` setting                                                                                                                                                                                                                                                                                                                                                                           |
  | `OMP_GITHUB_CACHE_DB`                               | Overrides the GitHub view cache database path (default `~/.omp/cache/github-cache.db`)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 -| `PI_BUILD_URL`                                      | Origin of the build service standalone binaries come from (default `https://build.stencil.so`; trailing slashes are trimmed). `omp update` on a binary install, the binary takeover of a binary-only release, and a compiled binary's startup update check ask `<origin>/api/products/omp/latest/<target>?channel=stable\|canary`; downloads are verified against the answer's size and SHA-256, from a patch against the installed binary when one is offered. The install scripts (`install.sh`, `install.ps1`) download from the same origin |
-+| `PI_BUILD_URL`                                      | Upstream installer/build-service override; fork `omp update` and startup checks ignore it and use GitHub fork releases instead |
++| `PI_BUILD_URL`                                      | Build-service origin override (default `https://build.stencil.so`), used only for products other than omp itself, such as the WebKit browser engine download; fork `omp update` and startup checks ignore it and use GitHub fork releases instead |
  | `PI_GRAMMARS_URL`                                   | Base URL for on-demand WebAssembly tree-sitter grammars (default `https://github.com/stencil-hq/wasm-grammars/releases/download`); assets are fetched as `<base>/<release>/<file>.zst` and verified against the addon's pinned SHA-256 before landing in `<natives dir>/grammars` (`~/.omp/natives/grammars`)                                                                                                                                                                                                                                   |
  
  ---
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 4c53720f49..2a8542e327 100644
+index 2ecb6d1a9a..13137b9732 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -7,6 +7,10 @@
@@ -23,11 +23,11 @@ index 4c53720f49..2a8542e327 100644
 +
 +- `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
 +
- ## [18.14.2] - 2026-10-31
+ ## [19.0.0] - 2026-11-18
  
- ### Added
+ ### Breaking Changes
 diff --git a/packages/coding-agent/README.md b/packages/coding-agent/README.md
-index c1d4032730..5bdba26b98 100644
+index 85182936c0..39c85f6163 100644
 --- a/packages/coding-agent/README.md
 +++ b/packages/coding-agent/README.md
 @@ -15,6 +15,23 @@ Package-specific references:
@@ -51,124 +51,64 @@ index c1d4032730..5bdba26b98 100644
 +
 +Check the checksum command succeeds before installing, and ensure `~/.local/bin` precedes the old manager's bin directory in `PATH`. The `install` command replaces any existing `~/.local/bin/omp`; back it up first if necessary. Verify the selected executable with `command -v omp` and `omp --version`. Roll back by restoring that backup or removing the separately installed fork binary and selecting the original managed launcher on `PATH`. Do not uninstall the old package until you no longer need that rollback path; package-manager cleanup may remove manager-owned launchers. Configuration and credentials are unchanged. Release checksums detect corrupted downloads but are not independent signatures.
 +
- ## Memory backends
+ ## Bash visualization
  
- The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):
+ Embedded-shell calls default to Python-like **Pseudo**; switch to **Raw** for the original command. Syntax appears incrementally as the shell compiles it. Active commands retain their colors while inactive code fades; only failures get `×`. Values appear beside each variable's latest observed setter.
 diff --git a/packages/coding-agent/src/cli/build-service.ts b/packages/coding-agent/src/cli/build-service.ts
-index 4ba1d4d2ac..67feecd83f 100644
+index 7664a8522f..969e2f9f27 100644
 --- a/packages/coding-agent/src/cli/build-service.ts
 +++ b/packages/coding-agent/src/cli/build-service.ts
-@@ -1,31 +1,4 @@
--/**
-- * Client for Stencil's build service, the source of omp's standalone binaries.
-- *
-- * `omp update` on a standalone binary install, the binary takeover of a
-- * package-manager install, and the startup update check of a compiled binary
-- * all ask the service which build to install ({@link fetchBuild}):
-- *
-- * - `GET {origin}/api/products/omp/latest/{target}?channel=stable|canary` for
-- *   the newest build on a channel;
-- * - `GET {origin}/api/products/omp/versions/{version}/{target}` for one exact
-- *   version.
-- *
-- * omp is a public product, so no token is sent. The origin is `PI_BUILD_URL`
-- * ({@link DEFAULT_BUILD_URL} when unset). `{target}` is
-- * `{macos|linux|linux-musl|windows}-{arm64|x86_64}` ({@link resolveBuildHost}).
-- * Requests carry `User-Agent: omp/<version>`, which the service counts in its
-- * update-check statistics.
-- *
-- * Adding `from_version=<installed version>` makes the answer carry an
-- * HDiffPatch patch from that version's file to the answered one when the
-- * service has it; when it does not yet, the service starts making it
-- * (`patch_pending`) so a later check finds it.
-- *
-- * An answer is checked before anything in it is used ({@link parseBuildAnswer}):
-- * a malformed answer is an error, a malformed `patch` is dropped so the whole
-- * file still installs. `404 {"error":"no_build"}` means nothing is published
-- * for the target (on the channel, or at the version).
-- */
-+/** Fork release discovery and shared build metadata types for the updater. */
- import * as fs from "node:fs";
- import { $env, APP_NAME, isRecord, VERSION } from "@oh-my-pi/pi-utils";
- import { $ } from "bun";
-@@ -44,7 +17,7 @@ export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promi
+@@ -18,6 +18,12 @@
+  * Requests carry `User-Agent: omp/<version>`, which the service counts in its
+  * update-check statistics.
+  *
++ * This fork does not take omp's own builds ({@link OMP_BUILD}) from the
++ * service: {@link fetchBuild} answers them from the latest stable release of
++ * the fork's GitHub repository ({@link FORK_REPOSITORY}), checking the asset
++ * against the release's `SHA256SUMS.txt`. The rest of this comment describes
++ * the service, which other products (the browser engine) still use.
++ *
+  * Adding `from_version=<installed version>` makes the answer carry an
+  * HDiffPatch patch from that version's file to the answered one when the
+  * service has it; when it does not yet, the service starts making it
+@@ -47,6 +53,9 @@ export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promi
+ /** Build service origin used when `PI_BUILD_URL` is unset. */
  export const DEFAULT_BUILD_URL = "https://build.stencil.so";
  
- /** The product omp's builds are published under. */
--const PRODUCT = "omp";
++/** The GitHub repository whose stable releases omp's own builds come from. */
 +const FORK_REPOSITORY = "kierandrewett/omp";
- 
++
  const BUILD_CHECK_TIMEOUT_MS = 30_000;
  
-@@ -246,58 +219,58 @@ export interface FetchBuildOptions {
+ /** Ceiling of one build file download ({@link downloadBuildFile}); a temp file older than this is abandoned. */
+@@ -277,9 +286,71 @@ export interface FetchBuildOptions {
  	host?: BuildHost;
  }
  
 -/** Ask the build service for a build of this host's target ({@link BuildSelector}). */
-+/** Fetch a stable fork release and verify its platform-specific checksum metadata. */
- export async function fetchBuild(selector: BuildSelector, options: FetchBuildOptions = {}): Promise<BuildAnswer> {
++/** Fetch a stable fork release of omp and verify its platform-specific checksum metadata. */
++async function fetchForkRelease(selector: BuildSelector, options: FetchBuildOptions): Promise<BuildAnswer> {
 +	if ("channel" in selector && selector.channel !== "stable") {
 +		throw new Error("The fork publishes stable releases only; use --stable.");
 +	}
- 	const host = options.host ?? (await currentBuildHost());
--	const origin = buildServiceUrl();
- 	const timeoutMs = options.timeoutMs ?? BUILD_CHECK_TIMEOUT_MS;
--	const route =
--		"channel" in selector
--			? `latest/${host.target}`
--			: `versions/${encodeURIComponent(selector.version)}/${host.target}`;
--	const url = new URL(`${origin}/api/products/${PRODUCT}/${route}`);
--	if ("channel" in selector) url.searchParams.set("channel", selector.channel);
--	if (options.fromVersion) url.searchParams.set("from_version", options.fromVersion);
--	const what = `${APP_NAME} ${"channel" in selector ? `${selector.channel} build` : `build ${selector.version}`} for ${host.target}`;
--
--	const mapError = (err: unknown): unknown => {
--		if (isTimeoutError(err)) {
--			return new Error(`Timed out asking ${origin} for the ${what} after ${Math.round(timeoutMs / 1000)}s`, {
--				cause: err,
--			});
--		}
--		if (isUnsupportedProxyError(err)) return new Error(unsupportedProxyMessage(), { cause: err });
--		return err;
--	};
--
--	let response: Response;
--	let body: unknown;
--	try {
--		response = await (options.fetchImpl ?? fetch)(url, {
--			headers: { Accept: "application/json", "User-Agent": `${APP_NAME}/${VERSION}` },
--			signal: withTimeoutSignal(timeoutMs),
--		});
++	const host = options.host ?? (await currentBuildHost());
++	const timeoutMs = options.timeoutMs ?? BUILD_CHECK_TIMEOUT_MS;
 +	const fetchImpl = options.fetchImpl ?? fetch;
 +	const api = `https://api.github.com/repos/${FORK_REPOSITORY}/releases`;
 +	const route = "version" in selector ? `/tags/${encodeURIComponent(`v${selector.version}`)}` : "/latest";
 +	const request = async (url: string, accept: string): Promise<Response> => {
- 		try {
--			body = await response.json();
++		try {
 +			const response = await fetchImpl(url, {
 +				headers: { Accept: accept, "User-Agent": `${APP_NAME}/${VERSION}` },
 +				signal: withTimeoutSignal(timeoutMs),
 +			});
 +			if (!response.ok) throw new Error(`GitHub release request failed: ${response.status} ${response.statusText}`);
 +			return response;
- 		} catch (err) {
--			// A malformed body is reported below; body-read timeouts and resets surface.
--			if (!(err instanceof SyntaxError)) throw err;
++		} catch (err) {
 +			if (isTimeoutError(err)) throw new Error("Timed out fetching fork release metadata", { cause: err });
 +			if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 +			throw err;
- 		}
--	} catch (err) {
--		throw mapError(err);
--	}
--
--	if (response.status === 404 && isRecord(body) && body.error === "no_build") {
--		const hint =
--			"channel" in selector && selector.channel === "canary" ? ` Try \`${APP_NAME} update --stable\`.` : "";
--		throw new Error(`No ${what} is published on ${origin} yet.${hint}`);
--	}
--	if (!response.ok) {
--		throw new Error(`${origin} answered ${response.status} ${response.statusText} for the ${what}`);
++		}
 +	};
 +	const release: unknown = await (await request(`${api}${route}`, "application/vnd.github+json")).json();
 +	if (
@@ -180,53 +120,66 @@ index 4ba1d4d2ac..67feecd83f 100644
 +		!Array.isArray(release.assets)
 +	) {
 +		throw new Error("Invalid stable fork release metadata");
- 	}
--	try {
--		return parseBuildAnswer(body, host.fileName, options.fromVersion);
--	} catch (err) {
--		throw new Error(`Invalid answer from ${origin} for the ${what}: ${err instanceof Error ? err.message : err}`);
++	}
 +	const version = release.tag_name.slice(1);
 +	if ("version" in selector && selector.version !== version) throw new Error("Fork release version mismatch");
-+	const asset = release.assets.filter((entry: unknown) => isRecord(entry) && entry.name === host.fileName);
++	const fileName = OMP_BUILD.fileName(host, version);
++	const asset = release.assets.filter((entry: unknown) => isRecord(entry) && entry.name === fileName);
 +	const sums = release.assets.filter((entry: unknown) => isRecord(entry) && entry.name === "SHA256SUMS.txt");
 +	if (asset.length !== 1 || sums.length !== 1 || !isRecord(asset[0]) || !isSize(asset[0].size)) {
-+		throw new Error(`Fork release does not contain exactly one ${host.fileName} and SHA256SUMS.txt`);
- 	}
++		throw new Error(`Fork release does not contain exactly one ${fileName} and SHA256SUMS.txt`);
++	}
 +	const base = `https://github.com/${FORK_REPOSITORY}/releases/download/${encodeURIComponent(release.tag_name)}`;
 +	const checksumText = await (await request(`${base}/SHA256SUMS.txt`, "text/plain")).text();
 +	const matches = checksumText
 +		.split(/\r?\n/)
 +		.map(line => /^([0-9a-fA-F]{64}) [ *](.+)$/.exec(line))
-+		.filter(match => match?.[2] === host.fileName);
-+	if (matches.length !== 1 || !matches[0]) throw new Error(`Missing or ambiguous SHA-256 for ${host.fileName}`);
++		.filter(match => match?.[2] === fileName);
++	if (matches.length !== 1 || !matches[0]) throw new Error(`Missing or ambiguous SHA-256 for ${fileName}`);
 +	return {
 +		version,
-+		file: { name: host.fileName, size: asset[0].size, sha256: matches[0][1].toLowerCase() },
-+		download: `${base}/${encodeURIComponent(host.fileName)}`,
++		file: { name: fileName, size: asset[0].size, sha256: matches[0][1].toLowerCase() },
++		download: `${base}/${encodeURIComponent(fileName)}`,
 +	};
- }
++}
++
++/**
++ * Ask for a build of this host's target ({@link BuildSelector}): omp's own
++ * ({@link OMP_BUILD}) from the fork's GitHub releases, any other product from
++ * the build service.
++ */
+ export async function fetchBuild(selector: BuildSelector, options: FetchBuildOptions = {}): Promise<BuildAnswer> {
+ 	const product = options.product ?? OMP_BUILD;
++	if (product === OMP_BUILD) return await fetchForkRelease(selector, options);
+ 	const host = options.host ?? (await currentBuildHost());
+ 	const origin = buildServiceUrl();
+ 	const timeoutMs = options.timeoutMs ?? BUILD_CHECK_TIMEOUT_MS;
+@@ -320,11 +391,7 @@ export async function fetchBuild(selector: BuildSelector, options: FetchBuildOpt
+ 	}
+ 
+ 	if (response.status === 404 && isRecord(body) && body.error === "no_build") {
+-		const hint =
+-			product === OMP_BUILD && "channel" in selector && selector.channel === "canary"
+-				? ` Try \`${APP_NAME} update --stable\`.`
+-				: "";
+-		throw new Error(`No ${what} is published on ${origin} yet.${hint}`);
++		throw new Error(`No ${what} is published on ${origin} yet.`);
+ 	}
+ 	if (!response.ok) {
+ 		throw new Error(`${origin} answered ${response.status} ${response.statusText} for the ${what}`);
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 8fbee0cd57..63dd4c7f53 100644
+index 498d622ef2..290fc798e9 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
-@@ -34,7 +34,6 @@ import {
- import { type BuildAnswer, type BuildPatch, type Fetch, fetchBuild, type UpdateChannel } from "./build-service";
+@@ -43,7 +43,6 @@ import {
+ import { managedInstallName } from "./managed-install";
  import {
  	DEFAULT_NPM_REGISTRY,
 -	loadNpmRegistryResolver,
  	type NpmRegistry,
  	type NpmRegistryResolver,
  	npmRegistryPackageUrl,
-@@ -190,7 +189,7 @@ export interface VerifiedBinaryDownloadOptions {
- }
- 
- /**
-- * Download a file and verify its build-service-reported size and SHA-256
-+ * Download a file and verify its release-reported size and SHA-256
-  * digest (`sha256:<hex>`), leaving it executable. Nothing is left at
-  * `targetPath` when the download fails or does not match.
-  */
-@@ -789,22 +788,27 @@ async function fetchLatestManifest(
+@@ -727,22 +726,27 @@ async function fetchLatestManifest(
  }
  
  /**
@@ -264,7 +217,7 @@ index 8fbee0cd57..63dd4c7f53 100644
  	const packages: ReleasePackages = { ...CURRENT_PACKAGES };
  	const visited = new Set([packages.pkg]);
  	let registry = registries(packages.pkg);
-@@ -2086,9 +2090,7 @@ export async function updateViaShimTakeover(
+@@ -2059,9 +2063,7 @@ export async function updateViaShimTakeover(
   * a user recovering from a binary-only release straight back through bun.
   */
  function installerHint(): string {
@@ -275,8 +228,8 @@ index 8fbee0cd57..63dd4c7f53 100644
  }
  
  /** Persisted channel, or undefined when settings are unavailable (SDK/test embedding without `Settings.init()`). */
-@@ -2123,13 +2125,25 @@ interface UpdateRequest {
- 	persistChannel: boolean;
+@@ -2135,13 +2137,25 @@ function acquireInstallLock(): FileLockHandle {
+ 	return lock;
  }
  
 +/** Compare upstream cores first, then fork revisions; a fork supersedes its upstream base. */
@@ -302,7 +255,7 @@ index 8fbee0cd57..63dd4c7f53 100644
  	if (comparison <= 0 && !request.force && !request.isChannelSwitch) {
  		const icon = theme?.status?.success ?? "✔";
  		console.log(chalk.green(`${icon} Already up to date`));
-@@ -2150,9 +2164,7 @@ function announceOffer(version: string, request: UpdateRequest): boolean {
+@@ -2162,9 +2176,7 @@ function announceOffer(version: string, request: UpdateRequest): boolean {
  }
  
  /**
@@ -313,7 +266,7 @@ index 8fbee0cd57..63dd4c7f53 100644
   */
  async function runBinaryUpdate(
  	target: BinaryUpdateTarget | undefined,
-@@ -2276,12 +2288,8 @@ async function runManagedUpdate(
+@@ -2306,12 +2318,8 @@ async function runManagedUpdate(
  }
  
  /**
@@ -325,42 +278,36 @@ index 8fbee0cd57..63dd4c7f53 100644
 - * `--check` still answers; installing then fails on the unresolved target.
 + * Check the stable fork release. Only standalone binaries are updated in
 + * place; package-managed installs must be migrated explicitly.
-  */
- export async function runUpdateCommand(opts: {
- 	force: boolean;
-@@ -2317,12 +2325,25 @@ export async function runUpdateCommand(opts: {
- 	} catch (err) {
- 		targetError = err;
- 	}
--	if (target?.method === "binary") {
--		await runBinaryUpdate(target, targetError, request);
--	} else if (!target && isCompiledBinary()) {
--		await runBinaryUpdate(undefined, targetError, request);
--	} else {
--		await runManagedUpdate(target, targetError, request);
-+	if (target?.method === "binary" || (!target && isCompiledBinary())) {
-+		await runBinaryUpdate(target?.method === "binary" ? target : undefined, targetError, request);
-+		return;
-+	}
-+	// Package managers own their launchers and upstream packages. Never ask
-+	// them to upgrade this fork or silently replace a managed installation.
-+	try {
-+		const build = await fetchBuild({ channel: request.channel });
+  *
+  * Progress and results print to stdout. Throws when the check or the install
+  * fails, or when another update holds the install lock.
+@@ -2350,7 +2358,24 @@ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutco
+ 		}
+ 		if (target?.method === "binary") return await runBinaryUpdate(target, targetError, request);
+ 		if (!target && isCompiledBinary()) return await runBinaryUpdate(undefined, targetError, request);
+-		return await runManagedUpdate(target, targetError, request);
++		// Package managers own their launchers and upstream packages. Never ask
++		// them to upgrade this fork or silently replace a managed installation.
++		let build: BuildAnswer;
++		try {
++			build = await fetchBuild({ channel: request.channel });
++		} catch (err) {
++			throw updateError("Failed to check fork releases", err);
++		}
 +		announceOffer(build.version, request);
-+		console.log(chalk.yellow("This installation is package-managed or not a standalone binary; it was not changed."));
++		const reason = "This installation is package-managed or not a standalone binary; it was not changed.";
++		console.log(chalk.yellow(reason));
 +		console.log(
 +			chalk.dim(
 +				"To migrate explicitly, install a verified fork release binary separately: https://github.com/kierandrewett/omp/releases",
 +			),
 +		);
 +		if (!request.check) process.exitCode = 1;
-+	} catch (err) {
-+		console.error(chalk.red(`Failed to check fork releases: ${err}`));
-+		process.exitCode = 1;
++		return { kind: "unsupported", reason };
+ 	} finally {
+ 		lock?.release();
  	}
- }
- 
-@@ -2339,7 +2360,7 @@ ${chalk.bold("Options:")}
+@@ -2369,7 +2394,7 @@ ${chalk.bold("Options:")}
    -c, --check     Check for updates without installing
    -f, --force     Force reinstall even if up to date
    -l, --plugins   Update installed plugins
@@ -369,7 +316,7 @@ index 8fbee0cd57..63dd4c7f53 100644
    --stable        Switch back to the stable channel
  
  ${chalk.bold("Examples:")}
-@@ -2347,6 +2368,6 @@ ${chalk.bold("Examples:")}
+@@ -2377,6 +2402,6 @@ ${chalk.bold("Examples:")}
    ${APP_NAME} update --check      Check if updates are available
    ${APP_NAME} update --force      Force reinstall
    ${APP_NAME} update -l           Update installed plugins
@@ -378,19 +325,19 @@ index 8fbee0cd57..63dd4c7f53 100644
  `);
  }
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 89668b0c45..e8a3accf8d 100644
+index 155f912c1d..d4d71dc75e 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
-@@ -43,7 +43,7 @@ import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindi
- import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
- import { fetchBuild } from "./cli/build-service";
+@@ -46,7 +46,7 @@ import { fetchBuild } from "./cli/build-service";
  import { applyStartupCwd } from "./cli/startup-cwd";
--import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
-+import { compareForkVersions, getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
+ import { runAutoUpdate } from "./cli/auto-update";
+ import { managedInstallName } from "./cli/managed-install";
+-import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
++import { compareForkVersions, getLatestRelease, isSourceCheckout } from "./cli/update-cli";
  import { findConfigFile } from "./config";
+ import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
  import { ModelRegistry } from "./config/model-registry";
- import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
-@@ -280,12 +280,11 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+@@ -284,12 +284,11 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
  		// "run omp update" would be wrong advice for both.
  		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
  		const channel = cfgUpdateChannel.get(settings);
@@ -406,33 +353,23 @@ index 89668b0c45..e8a3accf8d 100644
  		return undefined;
  	}
 diff --git a/packages/coding-agent/test/cli/build-service.test.ts b/packages/coding-agent/test/cli/build-service.test.ts
-index 776133bd5c..1f017b8453 100644
+index bc85119a9c..b72e81df3e 100644
 --- a/packages/coding-agent/test/cli/build-service.test.ts
 +++ b/packages/coding-agent/test/cli/build-service.test.ts
-@@ -1,4 +1,4 @@
--import { afterEach, describe, expect, it } from "bun:test";
-+import { describe, expect, it } from "bun:test";
+@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
+ import * as path from "node:path";
  import {
  	type BuildHost,
++	type BuildProduct,
+ 	downloadBuildFile,
  	fetchBuild,
-@@ -115,68 +115,126 @@ describe("build service targets", () => {
+ 	isMuslLinuxForTest,
+@@ -106,7 +107,132 @@ describe("build service targets", () => {
  	});
  });
  
 -describe("fetchBuild", () => {
 +describe("fetchBuild fork releases", () => {
- 	const host: BuildHost = { target: "macos-arm64", fileName };
--	const previousUrl = process.env.PI_BUILD_URL;
--
--	afterEach(() => {
--		if (previousUrl === undefined) delete process.env.PI_BUILD_URL;
--		else process.env.PI_BUILD_URL = previousUrl;
--	});
--
--	it("asks the configured origin for the channel's newest build, naming the installed version", async () => {
--		process.env.PI_BUILD_URL = "https://build.test/";
--		const requests: Array<{ url: string; userAgent: string | null; signal: AbortSignal | null | undefined }> = [];
--
 +	const api = "https://api.github.com/repos/kierandrewett/omp/releases";
 +	const tag = "v18.8.9-fork.2";
 +	const download = `https://github.com/kierandrewett/omp/releases/download/${tag}`;
@@ -451,26 +388,23 @@ index 776133bd5c..1f017b8453 100644
 +			userAgent: string | null;
 +			signal: AbortSignal | null | undefined;
 +		}> = [];
- 		const build = await fetchBuild(
--			{ channel: "canary" },
++		const build = await fetchBuild(
 +			{ channel: "stable" },
- 			{
- 				host,
- 				fromVersion: "18.8.8",
- 				fetchImpl: async (input, init) => {
++			{
++				host,
++				fromVersion: "18.8.8",
++				fetchImpl: async (input, init) => {
 +					const url = String(input);
- 					requests.push({
--						url: String(input),
++					requests.push({
 +						url,
 +						accept: new Headers(init?.headers).get("Accept"),
- 						userAgent: new Headers(init?.headers).get("User-Agent"),
- 						signal: init?.signal,
- 					});
--					return Response.json(answer());
++						userAgent: new Headers(init?.headers).get("User-Agent"),
++						signal: init?.signal,
++					});
 +					return url === `${api}/latest` ? Response.json(release) : new Response(checksum);
- 				},
- 			},
- 		);
++				},
++			},
++		);
 +		expect(requests.map(request => [request.url, request.accept])).toEqual([
 +			[`${api}/latest`, "application/vnd.github+json"],
 +			[`${download}/SHA256SUMS.txt`, "text/plain"],
@@ -485,14 +419,7 @@ index 776133bd5c..1f017b8453 100644
 +			download: `${download}/${fileName}`,
 +		});
 +	});
- 
--		expect(requests).toHaveLength(1);
--		expect(requests[0].url).toBe(
--			"https://build.test/api/products/omp/latest/macos-arm64?channel=canary&from_version=18.8.8",
--		);
--		expect(requests[0].userAgent).toBe(`omp/${VERSION}`);
--		expect(requests[0].signal).toBeInstanceOf(AbortSignal);
--		expect(build.patch?.fromVersion).toBe("18.8.8");
++
 +	it("requests an exact fork version and rejects a different returned tag", async () => {
 +		const urls: string[] = [];
 +		const fetchImpl = async (input: string | URL | Request) => {
@@ -507,11 +434,8 @@ index 776133bd5c..1f017b8453 100644
 +
 +	it("rejects canary rather than offering an unrelated stable release", async () => {
 +		await expect(fetchBuild({ channel: "canary" }, { host })).rejects.toThrow("stable releases only");
- 	});
- 
--	it("asks for one exact version without a channel", async () => {
--		delete process.env.PI_BUILD_URL;
--		let url = "";
++	});
++
 +	it("rejects draft, prerelease, and malformed fork release metadata", async () => {
 +		for (const body of [
 +			null,
@@ -526,17 +450,7 @@ index 776133bd5c..1f017b8453 100644
 +			).rejects.toThrow("Invalid stable fork release metadata");
 +		}
 +	});
- 
--		await fetchBuild(
--			{ version: "18.8.9" },
--			{
--				host,
--				fetchImpl: async input => {
--					url = String(input);
--					return Response.json(answer());
--				},
--			},
--		);
++
 +	it("rejects missing, duplicate, or invalid platform assets before downloading", async () => {
 +		for (const assets of [
 +			[{ name: "omp-darwin-x64", size: 42 }, { name: "SHA256SUMS.txt" }],
@@ -549,8 +463,7 @@ index 776133bd5c..1f017b8453 100644
 +			).rejects.toThrow(`Fork release does not contain exactly one ${fileName}`);
 +		}
 +	});
- 
--		expect(url).toBe("https://build.stencil.so/api/products/omp/versions/18.8.9/macos-arm64");
++
 +	it("rejects missing or ambiguous checksums instead of installing unverifiable bytes", async () => {
 +		for (const sums of [`${sha("new")}  omp-darwin-x64\n`, `${checksum}${checksum}`, `not-a-hash  ${fileName}\n`]) {
 +			await expect(
@@ -564,25 +477,133 @@ index 776133bd5c..1f017b8453 100644
 +				),
 +			).rejects.toThrow(`Missing or ambiguous SHA-256 for ${fileName}`);
 +		}
++	});
++
++	it("surfaces GitHub release request failures", async () => {
++		await expect(
++			fetchBuild(
++				{ channel: "stable" },
++				{
++					host,
++					fetchImpl: async () => new Response(null, { status: 404 }),
++				},
++			),
++		).rejects.toThrow("GitHub release request failed: 404");
++	});
++});
++
++describe("fetchBuild origins", () => {
++	const engine: BuildProduct = { id: "engine", fileName: engineHost => `engine-${engineHost.asset}` };
++	const engineAnswer = () => answer({ file: { ...(answer().file as object), name: "engine-darwin-arm64" } });
+ 	const previousUrl = process.env.PI_BUILD_URL;
+ 
+ 	afterEach(() => {
+@@ -114,13 +240,43 @@ describe("fetchBuild", () => {
+ 		else process.env.PI_BUILD_URL = previousUrl;
+ 	});
+ 
+-	it("asks the configured origin for the channel's newest build, naming the installed version", async () => {
++	it("ignores PI_BUILD_URL for omp's own builds", async () => {
++		process.env.PI_BUILD_URL = "https://build.test/";
++		const urls: string[] = [];
++
++		await fetchBuild(
++			{ channel: "stable" },
++			{
++				host,
++				fetchImpl: async input => {
++					const url = String(input);
++					urls.push(url);
++					return url.endsWith("/latest")
++						? Response.json({
++								tag_name: "v18.8.9-fork.2",
++								draft: false,
++								prerelease: false,
++								assets: [{ name: fileName, size: 42 }, { name: "SHA256SUMS.txt" }],
++							})
++						: new Response(`${sha("new")}  ${fileName}\n`);
++				},
++			},
++		);
++
++		expect(urls).toEqual([
++			"https://api.github.com/repos/kierandrewett/omp/releases/latest",
++			"https://github.com/kierandrewett/omp/releases/download/v18.8.9-fork.2/SHA256SUMS.txt",
++		]);
++	});
++
++	it("asks the configured build service origin for another product's newest build, naming the installed version", async () => {
+ 		process.env.PI_BUILD_URL = "https://build.test/";
+ 		const requests: Array<{ url: string; userAgent: string | null; signal: AbortSignal | null | undefined }> = [];
+ 
+ 		const build = await fetchBuild(
+ 			{ channel: "canary" },
+ 			{
++				product: engine,
+ 				host,
+ 				fromVersion: "18.8.8",
+ 				fetchImpl: async (input, init) => {
+@@ -129,45 +285,50 @@ describe("fetchBuild", () => {
+ 						userAgent: new Headers(init?.headers).get("User-Agent"),
+ 						signal: init?.signal,
+ 					});
+-					return Response.json(answer());
++					return Response.json(engineAnswer());
+ 				},
+ 			},
+ 		);
+ 
+ 		expect(requests).toHaveLength(1);
+ 		expect(requests[0].url).toBe(
+-			"https://build.test/api/products/omp/latest/macos-arm64?channel=canary&from_version=18.8.8",
++			"https://build.test/api/products/engine/latest/macos-arm64?channel=canary&from_version=18.8.8",
+ 		);
+ 		expect(requests[0].userAgent).toBe(`omp/${VERSION}`);
+ 		expect(requests[0].signal).toBeInstanceOf(AbortSignal);
+ 		expect(build.patch?.fromVersion).toBe("18.8.8");
+ 	});
+ 
+-	it("asks for one exact version without a channel", async () => {
++	it("asks the build service for one exact version of another product without a channel", async () => {
+ 		delete process.env.PI_BUILD_URL;
+ 		let url = "";
+ 
+ 		await fetchBuild(
+ 			{ version: "18.8.9" },
+ 			{
++				product: engine,
+ 				host,
+ 				fetchImpl: async input => {
+ 					url = String(input);
+-					return Response.json(answer());
++					return Response.json(engineAnswer());
+ 				},
+ 			},
+ 		);
+ 
+-		expect(url).toBe("https://build.stencil.so/api/products/omp/versions/18.8.9/macos-arm64");
++		expect(url).toBe("https://build.stencil.so/api/products/engine/versions/18.8.9/macos-arm64");
  	});
  
 -	it("names the target when nothing is published for it", async () => {
-+	it("surfaces GitHub release request failures", async () => {
++	it("names the target when the build service has nothing published for another product", async () => {
  		await expect(
  			fetchBuild(
  				{ channel: "stable" },
 -				{ host, fetchImpl: async () => Response.json({ error: "no_build" }, { status: 404 }) },
 +				{
++					product: engine,
 +					host,
-+					fetchImpl: async () => new Response(null, { status: 404 }),
++					fetchImpl: async () => Response.json({ error: "no_build" }, { status: 404 }),
 +				},
  			),
 -		).rejects.toThrow("No omp stable build for macos-arm64 is published");
-+		).rejects.toThrow("GitHub release request failed: 404");
++		).rejects.toThrow("No engine stable build for macos-arm64 is published");
  	});
  });
+ 
 diff --git a/packages/coding-agent/test/cli/update-cli.test.ts b/packages/coding-agent/test/cli/update-cli.test.ts
-index 9e9ccc2fd3..4a3358df5c 100644
+index 8985a0be5a..845003eae0 100644
 --- a/packages/coding-agent/test/cli/update-cli.test.ts
 +++ b/packages/coding-agent/test/cli/update-cli.test.ts
 @@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -591,7 +612,7 @@ index 9e9ccc2fd3..4a3358df5c 100644
  import * as path from "node:path";
 -import { removeWithRetries, setAgentDir, setProjectDir, VERSION } from "@oh-my-pi/pi-utils";
 +import { removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
- import { currentBuildHost } from "../../src/cli/build-service";
+ import { currentBuildHost, OMP_BUILD } from "../../src/cli/build-service";
  import { fixedNpmRegistry } from "../../src/cli/npm-registry";
 -import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
 +import { compareForkVersions, getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
@@ -634,7 +655,7 @@ index 9e9ccc2fd3..4a3358df5c 100644
  		await Promise.all(dirs.splice(0).map(dir => removeWithRetries(dir)));
  	});
  
-@@ -78,48 +99,120 @@ describe("runUpdateCommand version source", () => {
+@@ -78,50 +99,124 @@ describe("runUpdateCommand version source", () => {
  		return { logs };
  	}
  
@@ -643,12 +664,17 @@ index 9e9ccc2fd3..4a3358df5c 100644
 +	const version = "999.0.0-fork.1";
 +	const releaseBase = `https://github.com/kierandrewett/omp/releases/download/v${version}`;
 +
++	/** The release asset name omp's own binary has on this host. */
++	async function releaseFileName(): Promise<string> {
++		return OMP_BUILD.fileName(await currentBuildHost(), version);
++	}
++
 +	it("checks the fork release without changing a non-standalone installation or querying npm", async () => {
  		await isolatePath();
 -		process.env.PI_BUILD_URL = "https://build.test";
 -		quiet();
 -		const requests = stubFetch(() => Response.json({ version: "999.0.0" }));
-+		const { fileName } = await currentBuildHost();
++		const fileName = await releaseFileName();
 +		const { logs } = quiet();
 +		const requests = stubFetch(url => {
 +			if (url === api)
@@ -674,7 +700,7 @@ index 9e9ccc2fd3..4a3358df5c 100644
 +
 +	it("refuses to install over a non-standalone installation", async () => {
 +		await isolatePath();
-+		const { fileName } = await currentBuildHost();
++		const fileName = await releaseFileName();
 +		const { logs } = quiet();
 +		const requests = stubFetch(url => {
 +			if (url === api)
@@ -705,11 +731,13 @@ index 9e9ccc2fd3..4a3358df5c 100644
  			await Bun.write(ompPath, "#!/bin/sh\necho omp/1.0.0\n");
  			await fs.chmod(ompPath, 0o755);
 -			const next = "#!/bin/sh\necho omp/999.0.0\n";
--			const { target, fileName } = await currentBuildHost();
+-			const host = await currentBuildHost();
+-			const { target } = host;
+-			const fileName = OMP_BUILD.fileName(host, "999.0.0");
 -			process.env.PI_BUILD_URL = "https://build.test";
 -			const check = `https://build.test/api/products/omp/latest/${target}?channel=stable&from_version=${VERSION}`;
 +			const next = `#!/bin/sh\necho omp/${version}\n`;
-+			const { fileName } = await currentBuildHost();
++			const fileName = await releaseFileName();
 +			const binaryUrl = `${releaseBase}/${fileName}`;
  			const { logs } = quiet();
  			const requests = stubFetch(url => {
@@ -751,8 +779,8 @@ index 9e9ccc2fd3..4a3358df5c 100644
 +			await Bun.write(ompPath, original);
 +			await fs.chmod(ompPath, 0o755);
 +			const next = `#!/bin/sh\necho omp/${version}\n`;
-+			const { fileName } = await currentBuildHost();
-+			const { logs } = quiet();
++			const fileName = await releaseFileName();
++			quiet();
 +			stubFetch(url => {
 +				if (url === api)
 +					return Response.json({
@@ -767,10 +795,39 @@ index 9e9ccc2fd3..4a3358df5c 100644
 +				return new Response(null, { status: 404 });
 +			});
 +
-+			await expect(runUpdateCommand({ force: false, check: false })).rejects.toThrow("process.exit(1)");
-+			expect(logs.some(line => /digest mismatch/i.test(line))).toBe(true);
++			await expect(runUpdateCommand({ force: false, check: false })).rejects.toThrow(/digest mismatch/i);
 +			expect(await Bun.file(ompPath).text()).toBe(original);
 +			expect(await fs.readdir(dir)).toEqual(["omp"]);
  		},
  	);
  });
+diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
+index 027d9c3350..1033d1c24d 100644
+--- a/packages/coding-agent/test/update-cli.test.ts
++++ b/packages/coding-agent/test/update-cli.test.ts
+@@ -872,12 +872,14 @@ describe("migrateRenamedInstall transaction", () => {
+ 		const { steps, calls } = scriptedSteps({ install: [0, 0], verify: [false, false] });
+ 
+ 		await withPlatformAsync("linux", async () => {
+-			await expect(migrateRenamedInstall(release, steps)).rejects.toThrow("curl -fsSL https://omp.sh/install");
++			await expect(migrateRenamedInstall(release, steps)).rejects.toThrow(
++				"https://github.com/kierandrewett/omp/releases",
++			);
+ 		});
+ 		expect(calls).toEqual(["install", "removeOld", "verify", "install", "verify"]);
+ 	});
+ 
+-	it("uses the platform-aware PowerShell reinstall hint on Windows", async () => {
++	it("points the reinstall hint at the fork release page on Windows too", async () => {
+ 		vi.spyOn(console, "log").mockImplementation(() => {});
+ 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+ 		if (!platformDescriptor) throw new Error("process.platform descriptor missing");
+@@ -885,7 +887,7 @@ describe("migrateRenamedInstall transaction", () => {
+ 		try {
+ 			const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
+ 			const promise = migrateRenamedInstall(release, steps);
+-			await expect(promise).rejects.toThrow("irm https://omp.sh/install.ps1");
++			await expect(promise).rejects.toThrow("https://github.com/kierandrewett/omp/releases");
+ 			await expect(promise).rejects.not.toThrow("| sh");
+ 		} finally {
+ 			Object.defineProperty(process, "platform", platformDescriptor);

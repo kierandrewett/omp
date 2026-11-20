@@ -1,8 +1,8 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index f1bf8466cd..eb9a49b712 100644
+index e63ce0a0ba..18d29bc69f 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -918,7 +918,7 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
+@@ -979,7 +979,7 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
  
  The `usage_bar` segment draws a five-cell progress bar, the percent used and the window it shows (`━━━━━ 100% 7d`, or `=====` glyphs with the ASCII symbol set) for the active account of the active provider, warning-coloured from 50% and error-coloured from 80%. `statusLine.usageWindow` chooses the window: `weekly` (default) draws the 7 Day window, `session` the 5 Hour window, `worst` whichever is more used. For a Claude model with its own weekly counter (Fable, Mythos, Opus, Sonnet) `weekly` draws the more used of the shared 7 Day row and that model's row, tagged `7d fable`, the way credential ranking scopes a model's weekly limit. A provider that reports no 7 Day window draws no bar in `weekly` mode; another window is never shown in its place. `session` draws the 5 Hour window, and when a provider has none it draws its shortest reported window under that window's own tag (`1d`, `7d`, `mo`), so read the tag. The bar reads the same cached usage reports as the `usage` segment, refreshed no more often than every five minutes, picks the report of the session's own account (nothing is drawn while a provider with several accounts has no resolved account), and renders nothing when the provider reports no such window. It sits right after `context_pct` in the `default` preset; add `usage_bar` to `statusLine.leftSegments` or `statusLine.rightSegments` with `statusLine.preset: custom` to use it in a custom line.
  
@@ -12,7 +12,7 @@ index f1bf8466cd..eb9a49b712 100644
  The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 9de6ab2ad3..b6e315312b 100644
+index f7c59e08a5..6181a0ab8b 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
 @@ -7,7 +7,7 @@
@@ -31,13 +31,13 @@ index 9de6ab2ad3..b6e315312b 100644
 -- A subagent never takes the parent's model, the session model or the `default` role, and it runs on exactly one model for its whole life. Every spawn without a per-call, host or seance model, from the task tool or from eval `agent()`/`workpool()`, goes through automatic model selection. One usable role alias is chosen without the judge (`only one configured alias`); two or more go to the judge, and a judge that fails, times out or is not confident chooses nothing (there is no fallback role). When selection cannot choose, a `task.agentModelOverrides` entry or the agent's own `model` is used with a visible warning (a notice, a warning line on the subagent row and a `<model-warning>` in the result); with neither, the spawn fails before the child starts and the error tells the parent agent to stop and report to you instead of changing settings.
 +- A subagent never takes the parent's model, the session model or the `default` role, and it runs on exactly one model for its whole life. Every spawn without a per-call, host or seance model, from the task tool or from eval `agent()`/`workpool()`, goes through automatic model selection. One usable role alias is chosen without the judge (`only one configured alias`); two or more go to the judge, and a judge that fails, times out or is not confident chooses nothing (there is no fallback role). When selection cannot choose, the spawn fails before the child starts and the error tells the parent agent to stop and report to you instead of changing settings. Neither a `task.agentModelOverrides` entry nor the agent's own `model` takes over.
  - A subagent no longer falls back to the parent's model when its own model has no working credentials, and it no longer inherits the `default` or a role fallback chain. Only a chain you wrote in `retry.fallbackChains` under the exact `provider/model-id` it runs on can move it, and using it raises the same warning. A task result whose child ended on another model than it started on says so in a `<model-warning>`.
- - `task.prewalk`, `task.agentPrewalk` and an agent's `prewalk` frontmatter no longer apply to subagents: a subagent never hands off to another model. Session-level prewalk is unchanged.
+ - `task.prewalk`, `task.agentPrewalk`, `task.agentPrewalkAuto` and an agent's `prewalk` frontmatter no longer apply to subagents: a subagent never hands off to another model. Session-level prewalk is unchanged.
  - `omp update` and the startup update check now use the latest stable release of the fork's GitHub repository (`kierandrewett/omp`, versions like `18.14.2-fork.1`): the `omp-linux-x64` asset is checked against `SHA256SUMS.txt` before it replaces the running binary, and the previous binary is restored if the new one fails version verification. `PI_BUILD_URL` and the upstream npm registry are no longer consulted, and npm, bun, Homebrew, mise and Nix installs are not updated from here.
 diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-index 47308e04e0..d36070b87e 100644
+index 4b8dbdfddc..07713ea93e 100644
 --- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
 +++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-@@ -109,7 +109,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+@@ -110,7 +110,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
  				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },
  				{
  					label: "second of two accounts",
@@ -128,7 +128,7 @@ index b435a85194..567e3018d8 100644
 +	return { label: `${formatProviderName(provider)} (${tag})`, rawProvider: `${provider}-${tag.toLowerCase()}` };
  }
 diff --git a/packages/coding-agent/test/model-account-label.test.ts b/packages/coding-agent/test/model-account-label.test.ts
-index c1ae0fed21..69f6a10acb 100644
+index 5fe499ec5b..36fa78e029 100644
 --- a/packages/coding-agent/test/model-account-label.test.ts
 +++ b/packages/coding-agent/test/model-account-label.test.ts
 @@ -1,11 +1,11 @@
@@ -219,7 +219,7 @@ index c1ae0fed21..69f6a10acb 100644
  			authStorage.close();
  		}
 diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
-index 1f392e6682..1a747a697a 100644
+index e4347f09b0..8e8d3d7e2d 100644
 --- a/packages/tui/CHANGELOG.md
 +++ b/packages/tui/CHANGELOG.md
 @@ -4,7 +4,7 @@
@@ -232,10 +232,10 @@ index 1f392e6682..1a747a697a 100644
  - The status-line usage readout shows nothing, instead of one merged account, when the active account is unresolved and the provider has several usage reports.
  
 diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
-index 8fc37e2855..92608d591a 100644
+index 7730e2584b..2975d77563 100644
 --- a/packages/tui/src/status-line/host.ts
 +++ b/packages/tui/src/status-line/host.ts
-@@ -15,14 +15,14 @@ export interface StatusAccountIdentity {
+@@ -22,14 +22,14 @@ export interface StatusAccountIdentity {
  
  /**
   * How the active model's provider is qualified when the provider holds two or
