@@ -27,3 +27,4 @@
 0027-fix-task-stop-spawn-when-automatic-model-selection-fails.patch
 0028-feat-status-line-name-accounts-by-a-short-form-of-their-email.patch
 0029-feat-task-run-a-group-of-subagents-on-the-cheapest-role.patch
+0030-feat-task-keep-the-model-a-user-tagged-with-model.patch

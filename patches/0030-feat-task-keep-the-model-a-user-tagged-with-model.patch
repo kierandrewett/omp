@@ -1,0 +1,104 @@
+diff --git a/docs/task-agent-discovery.md b/docs/task-agent-discovery.md
+index e621388abe..4e9c3ad617 100644
+--- a/docs/task-agent-discovery.md
++++ b/docs/task-agent-discovery.md
+@@ -96,7 +96,7 @@ With the default batched task schema, supply shared `context` and per-item `task
+ 
+ Type `^` in the composer to choose a model from the same scope and ranking as the `Alt+P` session picker. Accepting a completion inserts an atomic chip showing its display name. For example, type `Have ^`, pick a model, then finish with `review this change`.
+ 
+-On submit, each first-mentioned model receives a branch-local pseudonym (`m1`, `m2`, …). The user message carries `<model agent="m1" name="Display Name"/>`; the task description lists its provider/model selector. `task`, eval `agent()`, and `workpool()` accept that pseudonym as their `agent`. These agents use the bundled general-purpose task template, not a specialist template, and are intended only for requests explicitly naming the tagged model.
++On submit, each first-mentioned model receives a branch-local pseudonym (`m1`, `m2`, …). The user message carries `<model agent="m1" name="Display Name"/>`; the task description lists its provider/model selector. `task`, eval `agent()`, and `workpool()` accept that pseudonym as their `agent`. These agents use the bundled general-purpose task template, not a specialist template, and are intended only for requests explicitly naming the tagged model. A tagged model is the user's own choice, so automatic model selection never replaces it, alone or in a group.
+ 
+ Tagging a model never rewrites the model-facing `task` description mid-session: the description lists the pseudonyms baked into the current base prompt, and later tags arrive as a hidden `session-agents` system notice on the next user turn. The notice rides the same channel as the eval-prelude and tool-roster deltas, so the provider cache prefix stays byte-stable. The next base-prompt rebuild absorbs the live set into the description.
+ 
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 16d999a9c4..8316e2fb02 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -30,6 +30,7 @@
+ 
+ ### Fixed
+ 
++- A subagent spawned with a model the user tagged with `^model` now always runs on that model. Automatic model selection no longer replaces it with a cheaper role, whether the agent runs alone or in a group.
+ - A failed automatic subagent model choice now stops the spawn. Before, a task whose agent definition or `task.agentModelOverrides` entry named a model ran on that model with a warning, so a spent judge key or a judge outage silently moved work onto a model you had not picked. The call now fails with the reason, and no child starts.
+ - Fixed a lone `.` or `c` typed into a focused subagent that was still running, or waiting out a retry back-off, printing `Agent is already processing` as an error. The shortcut now queues as a steering message like any other text; the continue shortcut itself only restarts an idle agent.
+ - Fixed a session wedged for days by a 429 carrying a huge retry hint, such as a 39-hour `retry-after-ms`: with `retry.waitForUsageReset` on it slept the whole wait while reporting busy, so `.` was refused and steers never landed. A wait past 24 hours now ends the retry (`auto_retry_end` with the error) and leaves the session idle. A 429 whose hint is past `retry.maxDelayMs` but is not a usage limit now blocks the failing credential until that hint and retries on a free sibling credential at once.
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index 9656914116..9203dc932f 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -237,7 +237,7 @@ export interface EffectiveSubagentPolicy {
+ 	 * Which explicit source chose {@link modelOverride}. `none` means nothing did yet: automatic selection
+ 	 * must pick a model at dispatch, or the spawn fails. The parent's model is never a source.
+ 	 */
+-	modelOrigin: "per-call" | "host" | "override" | "agent" | "none";
++	modelOrigin: "per-call" | "host" | "tagged" | "override" | "agent" | "none";
+ 	/** Whether the child gets the `yield` tool; see {@link StructuredSubagentRequest.structured}. */
+ 	structured: boolean;
+ 	/** Present for a per-call `model`: every model the child sends to must stay approved by these grants. */
+@@ -718,8 +718,10 @@ export async function resolveEffectiveSubagentPolicy(
+ 	} = perCallModel
+ 		? { patterns: [perCallModel.selector], role: undefined, origin: "per-call" as const }
+ 		: resolveAgentModelSelection(modelResolution);
+-	// A host model was chosen by a person or the host that spawned the child.
+-	const modelOrigin: EffectiveSubagentPolicy["modelOrigin"] = origin === "request" ? "host" : origin;
++	// A host model was chosen by a person or the host that spawned the child. A `^model` tag is the user's own
++	// choice too, so the agent it created keeps its model and automatic selection never replaces it.
++	const modelOrigin: EffectiveSubagentPolicy["modelOrigin"] =
++		origin === "request" ? "host" : origin === "agent" && sessionAgents.includes(agent) ? "tagged" : origin;
+ 	if (modelOrigin === "none" && configuredAliasNames(request.session.settings).length === 0) {
+ 		// Decidable from settings alone, so fail before anything is allocated. Dispatch repeats the check with the judge.
+ 		throw new StructuredSubagentError(
+@@ -801,7 +803,7 @@ async function countConcurrentSubagents(request: StructuredSubagentRequest): Pro
+ }
+ 
+ /**
+- * Choose the model of a spawn no caller named a model for. Classify only at dispatch, not during
++ * Choose the model of a spawn no caller or user tag named a model for. Classify only at dispatch, not during
+  * side-effect-free frontend preflight. A subagent never takes the parent's model, and a failed choice never
+  * falls back to another model: without a decision the spawn fails before anything starts.
+  */
+@@ -809,7 +811,7 @@ async function applyAutoTaskModel(
+ 	request: StructuredSubagentRequest,
+ 	policy: EffectiveSubagentPolicy,
+ ): Promise<EffectiveSubagentPolicy> {
+-	if (policy.modelOrigin === "per-call" || policy.modelOrigin === "host") {
++	if (policy.modelOrigin === "per-call" || policy.modelOrigin === "host" || policy.modelOrigin === "tagged") {
+ 		return policy;
+ 	}
+ 	request.signal?.throwIfAborted();
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index 1e21540c97..dbfe9d04cc 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -794,6 +794,30 @@ describe("structured subagent primitive", () => {
+ 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+ 	});
+ 
++	it("keeps the model a user tagged with ^model instead of classifying it", async () => {
++		mockDiscovery();
++		const childSession = Object.assign(session({ modelRoles: { sonnet: "anthropic/claude-sonnet-4-5" } }), {
++			modelRegistry: {},
++		});
++		childSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["openai/tagged"] }];
++		const classify = vi.spyOn(autoModelModule, "classifyAutoTaskModel");
++		const dispatched: executorModule.ExecutorOptions[] = [];
++		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
++			dispatched.push(options);
++			return result();
++		});
++
++		// Two spawns together would otherwise be a group and take the cheapest role.
++		const settled = await Promise.all(
++			[1, 2].map(() =>
++				runStructuredSubagent(request({ session: childSession, agent: "m1", retainArtifacts: true })),
++			),
++		);
++		expect(classify).not.toHaveBeenCalled();
++		expect(dispatched.map(options => options.modelOverride)).toEqual([["openai/tagged"], ["openai/tagged"]]);
++		for (const one of settled) await fs.rm(one.artifactsDir, { recursive: true, force: true });
++	});
++
+ 	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
+ 		mockDiscovery();
+ 		const blockedSession = session();

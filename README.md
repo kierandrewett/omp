@@ -40,6 +40,7 @@ The order is in `patches/series`. Each patch is one plain `git diff --binary`.
 |`0027-fix-task-stop-spawn-when-automatic-model-selection-fails`|A failed automatic model choice stops the spawn. The agent definition's model and `task.agentModelOverrides` no longer stand in.|
 |`0028-feat-status-line-name-accounts-by-a-short-form-of-their-email`|The status line names an account by the start of its email (`Anthropic (drewett.ki…) > Sonnet 5.5`), not by a letter.|
 |`0029-feat-task-run-a-group-of-subagents-on-the-cheapest-role`|Two or more subagents that run at the same time all take the cheapest priced role, without asking the judge.|
+|`0030-feat-task-keep-the-model-a-user-tagged-with-model`|A subagent spawned with a `^model`-tagged model always runs on it. Automatic model selection skips it.|
 
 Upstream gates the per-call `model` field behind `task.perCallModel`, and the default is `off`. Set it to `on` in
 `~/.omp/agent/config.yml` to let agents pass `@haiku`, `$$` and similar. Automatic judge routing works without it.
